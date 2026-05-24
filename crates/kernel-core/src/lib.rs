@@ -1,17 +1,14 @@
 #![deny(missing_docs)]
 
-//! Minimal kernel-core trusted computing base primitives.
+//! AnimaOS kernel-core: the privileged trusted computing base.
+//!
+//! This crate is intentionally small. `unsafe` is permitted but is confined to
+//! audited modules with explicit safety invariants documented at each call site.
 
-/// Represents a frame allocation request in the privileged substrate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameAllocation {
-    /// The requested frame count.
-    pub frames: usize,
-}
+pub mod frame_allocator;
+pub mod pcb;
+pub mod syscall;
 
-impl FrameAllocation {
-    /// Creates a bounded frame allocation request.
-    pub fn new(frames: usize) -> Self {
-        Self { frames }
-    }
-}
+pub use frame_allocator::{FrameAllocation, FrameAllocator, FrameAllocatorError};
+pub use pcb::{AgentPcb, AgentPid, AgentState};
+pub use syscall::{SyscallEnum, SyscallError};

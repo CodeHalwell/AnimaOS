@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+//! Self-preservation plane: autonomous lifecycle director.
+
+pub mod sleep;
+
+pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
+
 use memory::VirtualContextManager;
 use observe::HomeostaticMonitor;
 use scheduler::{IterationAwareMlfq, TaskAgenda};
@@ -57,15 +63,42 @@ pub struct LifecycleManager {
 }
 
 impl LifecycleManager {
+    /// Constructs a new manager in the awake state.
+    pub fn new(
+        sensory_bridge: SensoryBridge,
+        memory: VirtualContextManager,
+        config: LifecycleConfig,
+        initial_bounds: HumanGuidance,
+        max_iterations: Option<u32>,
+    ) -> Self {
+        Self {
+            sensory_bridge,
+            memory,
+            scheduler: IterationAwareMlfq::default(),
+            agenda: TaskAgenda::new(),
+            state: LifecycleState::Awake,
+            policy_bounds: initial_bounds,
+            config,
+            max_iterations,
+            iterations: 0,
+        }
+    }
+
     /// Applies new human policy bounds.
     pub fn update_policy_bounds(&mut self, guidance: HumanGuidance) {
         self.policy_bounds = guidance;
     }
 
-    /// Transitions into sleep state.
+    /// Transitions into sleep state and runs the standard maintenance suite.
     pub async fn transition_to_sleep_state(&mut self) -> Result<(), LifecycleError> {
         self.state = LifecycleState::Sleep;
+        let _ = sleep::run_default_maintenance();
         Ok(())
+    }
+
+    /// Transitions back into the active waking state.
+    pub fn transition_to_waking_state(&mut self) {
+        self.state = LifecycleState::Awake;
     }
 
     fn should_stop(&self) -> bool {
@@ -106,8 +139,8 @@ pub async fn somatic_execution_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use observe::HomeostaticMonitor;
     use scheduler::Task;
-    use std::collections::VecDeque;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
@@ -141,11 +174,7 @@ mod tests {
             iterations: 0,
         };
 
-        let monitor = HomeostaticMonitor {
-            rolling_ttft: VecDeque::new(),
-            baseline_ttft: 1.0,
-            beta: 0.5,
-        };
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
 
         let result = block_on(somatic_execution_loop(&mut manager, &monitor));
 
@@ -178,11 +207,8 @@ mod tests {
             iterations: 0,
         };
 
-        let monitor = HomeostaticMonitor {
-            rolling_ttft: VecDeque::from(vec![2.0]),
-            baseline_ttft: 1.0,
-            beta: 0.5,
-        };
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(2.0);
 
         let result = block_on(somatic_execution_loop(&mut manager, &monitor));
 
