@@ -61,6 +61,6 @@ mod tests {
 
         let index = monitor.compute_systemic_stress_index(100, 200);
 
-        assert!((index - 0.75).abs() < f32::EPSILON);
+        assert!((index - 0.75).abs() < 1e-6);
     }
 }

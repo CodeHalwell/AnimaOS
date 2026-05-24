@@ -90,7 +90,7 @@ pub async fn somatic_execution_loop(
 
         if lifecycle.agenda.is_empty() && stress_index < 0.4 {
             lifecycle.transition_to_sleep_state().await?;
-        } else if let Some(task) = lifecycle.agenda.select_optimal_task(stress_index) {
+        } else if let Some(task) = lifecycle.agenda.select_optimal_task() {
             lifecycle.scheduler.dispatch_task(task).await;
         } else {
             std::thread::yield_now();
