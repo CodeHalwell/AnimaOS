@@ -109,13 +109,12 @@ mod tests {
     use scheduler::Task;
     use std::collections::VecDeque;
     use std::future::Future;
-    use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
-        let mut future = Pin::from(Box::new(future));
+        let mut future = Box::pin(future);
         loop {
             match future.as_mut().poll(&mut cx) {
                 Poll::Ready(value) => return value,
