@@ -93,7 +93,7 @@ pub async fn somatic_execution_loop(
         } else if let Some(task) = lifecycle.agenda.select_optimal_task(stress_index) {
             lifecycle.scheduler.dispatch_task(task).await;
         } else {
-            std::future::ready(()).await;
+            std::thread::yield_now();
         }
 
         lifecycle.iterations = lifecycle.iterations.saturating_add(1);

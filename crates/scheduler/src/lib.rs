@@ -34,7 +34,10 @@ impl TaskAgenda {
     }
 
     /// Selects the next task using a stable MLFQ-like ordering.
-    pub fn select_optimal_task(&mut self, _stress_index: f32) -> Option<Task> {
+    ///
+    /// `stress_index` is currently reserved for future adaptive queue policies.
+    pub fn select_optimal_task(&mut self, stress_index: f32) -> Option<Task> {
+        let _ = stress_index;
         let mut best_index = None;
         let mut best_level = u8::MAX;
 
