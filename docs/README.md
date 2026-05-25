@@ -36,6 +36,7 @@ This directory contains the full design for Anima. Read in order if you are new;
 | [`04-verification.md`](./04-verification.md) | Testing strategy, formal verification posture, and continuous integration. |
 | [`05-roadmap.md`](./05-roadmap.md) | The 24-month phased implementation plan with milestones, exit criteria, and risks. |
 | [`06-glossary.md`](./06-glossary.md) | Terminology mapping: anatomical names ↔ engineering meanings. |
+| [`07-implementation-plan.md`](./07-implementation-plan.md) | Epic-by-epic delivery plan, aligned to the roadmap milestones, with stories and exit criteria. |
 
 ## Status
 
