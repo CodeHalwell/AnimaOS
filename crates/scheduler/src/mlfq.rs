@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 
+use crate::backend::{CancellationToken, LlmBackend, LlmBackendError, StreamingCompletion};
 use crate::Task;
 
 /// Number of MLFQ priority tiers.
@@ -66,6 +67,17 @@ impl TaskAgenda {
     }
 }
 
+/// Result of a successful dispatch through an [`LlmBackend`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskOutcome {
+    /// Task that was executed.
+    pub task: Task,
+    /// Concatenated response text from streamed tokens.
+    pub response: String,
+    /// Number of [`StreamingCompletion::Token`] events observed.
+    pub tokens_emitted: u32,
+}
+
 /// Dispatches tasks to execution loops, tracking per-tier statistics.
 #[derive(Debug, Default, Clone)]
 pub struct IterationAwareMlfq {
@@ -76,11 +88,39 @@ pub struct IterationAwareMlfq {
 }
 
 impl IterationAwareMlfq {
-    /// Dispatches a task to an execution primitive.
-    pub async fn dispatch_task(&mut self, task: Task) {
+    /// Dispatches a task through the provided LLM backend, draining the streaming
+    /// completion into a single [`TaskOutcome`]. Records per-tier dispatch stats
+    /// regardless of success or failure so accounting stays honest.
+    pub async fn dispatch_task(
+        &mut self,
+        task: Task,
+        backend: &dyn LlmBackend,
+        cancel: &CancellationToken,
+    ) -> Result<TaskOutcome, LlmBackendError> {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tier_counters[tier] = self.tier_counters[tier].saturating_add(1);
-        self.dispatched_tasks.push(task);
+
+        let stream = backend.stream_completion(&task.prompt, cancel).await?;
+
+        let mut response = String::new();
+        let mut tokens_emitted: u32 = 0;
+        for event in stream {
+            match event {
+                StreamingCompletion::Token(t) => {
+                    tokens_emitted = tokens_emitted.saturating_add(1);
+                    response.push_str(&t);
+                }
+                StreamingCompletion::Done => {}
+                StreamingCompletion::Cancelled => return Err(LlmBackendError::Cancelled),
+            }
+        }
+
+        self.dispatched_tasks.push(task.clone());
+        Ok(TaskOutcome {
+            task,
+            response,
+            tokens_emitted,
+        })
     }
 }
 
@@ -91,14 +131,8 @@ mod tests {
     #[test]
     fn select_pulls_from_high_priority_first() {
         let mut agenda = TaskAgenda::new();
-        agenda.push(Task {
-            id: 2,
-            mlfq_level: 2,
-        });
-        agenda.push(Task {
-            id: 1,
-            mlfq_level: 0,
-        });
+        agenda.push(Task::new(2, 2, ""));
+        agenda.push(Task::new(1, 0, ""));
 
         let next = agenda.select_optimal_task().unwrap();
         assert_eq!(next.id, 1);
@@ -110,11 +144,42 @@ mod tests {
     #[test]
     fn out_of_range_level_clamps_to_lowest_tier() {
         let mut agenda = TaskAgenda::new();
-        agenda.push(Task {
-            id: 99,
-            mlfq_level: 250,
-        });
+        agenda.push(Task::new(99, 250, ""));
         let next = agenda.select_optimal_task().unwrap();
         assert_eq!(next.id, 99);
+    }
+
+    #[test]
+    fn dispatch_through_mock_backend_returns_response() {
+        use crate::backend::CancellationToken;
+        use crate::mock::MockLlmBackend;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn block_on<F: Future>(future: F) -> F::Output {
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            let mut future = Box::pin(future);
+            loop {
+                match Pin::as_mut(&mut future).poll(&mut cx) {
+                    Poll::Ready(value) => return value,
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            }
+        }
+
+        let mut sched = IterationAwareMlfq::default();
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+        let outcome =
+            block_on(sched.dispatch_task(Task::new(7, 1, "alpha beta gamma"), &backend, &cancel))
+                .expect("dispatch should succeed");
+
+        assert_eq!(outcome.task.id, 7);
+        assert_eq!(outcome.tokens_emitted, 3);
+        assert_eq!(outcome.response, "alpha beta gamma ");
+        assert_eq!(sched.dispatched_tasks.len(), 1);
+        assert_eq!(sched.tier_counters[1], 1);
     }
 }

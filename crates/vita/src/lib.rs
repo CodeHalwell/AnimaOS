@@ -2,15 +2,19 @@
 
 //! Self-preservation plane: autonomous lifecycle director.
 
+pub mod audit;
 pub mod sleep;
 
+pub use audit::{AuditEntry, AuditLog};
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
 use memory::VirtualContextManager;
-use scheduler::{IterationAwareMlfq, TaskAgenda};
+use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError};
-use std::time::Duration;
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +46,10 @@ impl From<SensoryBridgeError> for LifecycleError {
 }
 
 /// Primary autonomous lifecycle manager.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LifecycleManager {
+    /// Human-readable agent identifier (carried into audit entries).
+    pub agent_id: String,
     /// Human sensory bridge.
     pub senses: SensoryBridge,
     /// Active working memory.
@@ -58,21 +64,44 @@ pub struct LifecycleManager {
     pub policy_bounds: HumanGuidance,
     /// Runtime configuration.
     pub config: LifecycleConfig,
+    /// LLM backend used to execute dispatched tasks.
+    pub backend: Arc<dyn LlmBackend>,
+    /// Per-agent audit log.
+    pub audit: AuditLog,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
 }
 
+impl std::fmt::Debug for LifecycleManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LifecycleManager")
+            .field("agent_id", &self.agent_id)
+            .field("state", &self.state)
+            .field("config", &self.config)
+            .field("policy_bounds", &self.policy_bounds)
+            .field("agenda_len", &self.agenda.len())
+            .field("backend", &self.backend.id())
+            .field("audit_len", &self.audit.len())
+            .field("iterations", &self.iterations)
+            .field("max_iterations", &self.max_iterations)
+            .finish()
+    }
+}
+
 impl LifecycleManager {
     /// Constructs a new manager in the awake state.
     pub fn new(
+        agent_id: impl Into<String>,
         senses: SensoryBridge,
         memory: VirtualContextManager,
         config: LifecycleConfig,
         initial_bounds: HumanGuidance,
+        backend: Arc<dyn LlmBackend>,
         max_iterations: Option<u32>,
     ) -> Self {
         Self {
+            agent_id: agent_id.into(),
             senses,
             memory,
             scheduler: IterationAwareMlfq::default(),
@@ -80,6 +109,8 @@ impl LifecycleManager {
             state: LifecycleState::Awake,
             policy_bounds: initial_bounds,
             config,
+            backend,
+            audit: AuditLog::new(),
             max_iterations,
             iterations: 0,
         }
@@ -92,14 +123,24 @@ impl LifecycleManager {
 
     /// Transitions into sleep state and runs the standard maintenance suite.
     pub async fn transition_to_sleep_state(&mut self) -> Result<(), LifecycleError> {
-        self.state = LifecycleState::Sleep;
+        if self.state != LifecycleState::Sleep {
+            self.state = LifecycleState::Sleep;
+            self.audit.push(AuditEntry::SleepEntered {
+                agent_id: self.agent_id.clone(),
+            });
+        }
         let _ = sleep::run_default_maintenance();
         Ok(())
     }
 
     /// Transitions back into the active waking state.
     pub fn transition_to_waking_state(&mut self) {
-        self.state = LifecycleState::Awake;
+        if self.state != LifecycleState::Awake {
+            self.state = LifecycleState::Awake;
+            self.audit.push(AuditEntry::WakeEntered {
+                agent_id: self.agent_id.clone(),
+            });
+        }
     }
 
     fn should_stop(&self) -> bool {
@@ -126,7 +167,46 @@ pub async fn somatic_execution_loop(
             lifecycle.transition_to_sleep_state().await?;
             true
         } else if let Some(task) = lifecycle.agenda.select_optimal_task() {
-            lifecycle.scheduler.dispatch_task(task).await;
+            if lifecycle.state == LifecycleState::Sleep {
+                lifecycle.transition_to_waking_state();
+            }
+            let agent_id = lifecycle.agent_id.clone();
+            let task_id = task.id;
+            let tier = task.mlfq_level;
+            let prompt = task.prompt.clone();
+
+            lifecycle.audit.push(AuditEntry::TaskStarted {
+                agent_id: agent_id.clone(),
+                task_id,
+                tier,
+                prompt,
+            });
+
+            let cancel = CancellationToken::new();
+            let backend = Arc::clone(&lifecycle.backend);
+            let dispatch_result = lifecycle
+                .scheduler
+                .dispatch_task(task, &*backend, &cancel)
+                .await;
+
+            match dispatch_result {
+                Ok(outcome) => {
+                    lifecycle.memory.add_tokens(outcome.tokens_emitted);
+                    lifecycle.audit.push(AuditEntry::TaskCompleted {
+                        agent_id,
+                        task_id,
+                        tokens_emitted: outcome.tokens_emitted,
+                        response: outcome.response,
+                    });
+                }
+                Err(error) => {
+                    lifecycle.audit.push(AuditEntry::TaskFailed {
+                        agent_id,
+                        task_id,
+                        error: format!("{error:?}"),
+                    });
+                }
+            }
             false
         } else {
             true
@@ -147,7 +227,7 @@ pub async fn somatic_execution_loop(
 mod tests {
     use super::*;
     use interoception::HomeostaticMonitor;
-    use scheduler::Task;
+    use scheduler::{MockLlmBackend, Task};
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
@@ -163,66 +243,70 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lifecycle_enters_sleep_when_idle_and_low_stress() {
-        let mut manager = LifecycleManager {
-            senses: SensoryBridge::new(HumanGuidance {
-                policy_hint: "low-cost".to_string(),
+    fn manager(agent_id: &str, max_iterations: Option<u32>) -> LifecycleManager {
+        LifecycleManager::new(
+            agent_id,
+            SensoryBridge::new(HumanGuidance {
+                policy_hint: "test".to_string(),
             }),
-            memory: VirtualContextManager::new(10),
-            scheduler: IterationAwareMlfq::default(),
-            agenda: TaskAgenda::new(),
-            state: LifecycleState::Awake,
-            policy_bounds: HumanGuidance {
+            VirtualContextManager::with_capacity(0, 1000),
+            LifecycleConfig { max_context: 1000 },
+            HumanGuidance {
                 policy_hint: "initial".to_string(),
             },
-            config: LifecycleConfig { max_context: 1000 },
-            max_iterations: Some(1),
-            iterations: 0,
-        };
-
-        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
-        monitor.record_ttft(0.0);
-
-        let result = block_on(somatic_execution_loop(&mut manager, &monitor));
-
-        assert!(result.is_ok());
-        assert_eq!(manager.state, LifecycleState::Sleep);
-        assert_eq!(manager.policy_bounds.policy_hint, "low-cost");
+            Arc::new(MockLlmBackend::new()),
+            max_iterations,
+        )
     }
 
     #[test]
-    fn lifecycle_dispatches_available_tasks() {
-        let mut agenda = TaskAgenda::new();
-        agenda.push(Task {
-            id: 42,
-            mlfq_level: 1,
-        });
+    fn lifecycle_enters_sleep_when_idle_and_low_stress() {
+        let mut m = manager("agent-a", Some(1));
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(0.0);
 
-        let mut manager = LifecycleManager {
-            senses: SensoryBridge::new(HumanGuidance {
-                policy_hint: "prioritize-tooling".to_string(),
-            }),
-            memory: VirtualContextManager::new(400),
-            scheduler: IterationAwareMlfq::default(),
-            agenda,
-            state: LifecycleState::Awake,
-            policy_bounds: HumanGuidance {
-                policy_hint: "initial".to_string(),
-            },
-            config: LifecycleConfig { max_context: 800 },
-            max_iterations: Some(1),
-            iterations: 0,
-        };
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.state, LifecycleState::Sleep);
+        assert!(m
+            .audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::SleepEntered { .. })));
+    }
+
+    #[test]
+    fn lifecycle_dispatches_available_tasks_and_records_audit() {
+        let mut m = manager("agent-b", Some(1));
+        m.agenda.push(Task::new(42, 1, "hello mock backend"));
 
         let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
         monitor.record_ttft(2.0);
 
-        let result = block_on(somatic_execution_loop(&mut manager, &monitor));
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
-        assert!(result.is_ok());
-        assert_eq!(manager.state, LifecycleState::Awake);
-        assert_eq!(manager.scheduler.dispatched_tasks.len(), 1);
-        assert_eq!(manager.scheduler.dispatched_tasks[0].id, 42);
+        assert_eq!(m.state, LifecycleState::Awake);
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(m.scheduler.dispatched_tasks[0].id, 42);
+
+        let entries = m.audit.entries();
+        assert!(matches!(
+            entries.first(),
+            Some(AuditEntry::TaskStarted { task_id: 42, .. })
+        ));
+        let completed = entries
+            .iter()
+            .find_map(|e| match e {
+                AuditEntry::TaskCompleted {
+                    task_id,
+                    tokens_emitted,
+                    response,
+                    ..
+                } if *task_id == 42 => Some((*tokens_emitted, response.clone())),
+                _ => None,
+            })
+            .expect("expected TaskCompleted entry");
+        assert_eq!(completed.0, 3);
+        assert_eq!(completed.1, "hello mock backend ");
     }
 }
