@@ -1,0 +1,16 @@
+[package]
+name = "hosted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anima-hosted"
+path = "src/main.rs"
+
+[dependencies]
+lifecycle = { path = "../../crates/lifecycle" }
+memory = { path = "../../crates/memory" }
+observe = { path = "../../crates/observe" }
+scheduler = { path = "../../crates/scheduler" }
+sensory-bridge = { path = "../../crates/sensory-bridge" }
