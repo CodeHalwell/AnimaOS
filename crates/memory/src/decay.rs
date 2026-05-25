@@ -43,8 +43,8 @@ impl MemoryNode {
             initial_activation,
             lambda,
             emotion: EmotionalContext::default(),
-            alpha: 0.1,
-            sigma: 0.1,
+            alpha: 1.5,
+            sigma: 2.0,
         }
     }
 

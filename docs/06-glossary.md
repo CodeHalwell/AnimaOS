@@ -99,38 +99,38 @@ The risk of an overcooked metaphor is real. If you find a passage in the documen
 
 ## 9. Migration from Axon OS
 
-The earlier specification used a different vocabulary. The mapping is one-to-one.
+The earlier Axon OS specification used a different vocabulary. The Anima codebase initially landed under engineering-flavoured names (`kernel-core`, `lifecycle`, `toolbus`, `sensory-bridge`, `security`, `observe`) and has since been renamed to the anatomical names listed below. The renames are complete; all imports and Cargo packages use the new names.
 
 | Axon OS Term | Anima Term | Notes |
 |--------------|-----------|-------|
 | Axon (system name) | Anima | An axon is only the output fibre of a neuron; "anima" captures the whole organism |
 | Autonomic Substrate | Corpus | Same concept, named after the body itself |
 | Somatic Layer | (unchanged conceptually) | The agent runtime; no rename, the term is accurate |
-| `kernel-core` | `corpus` | Crate rename |
-| `lifecycle` | `vita` | Crate rename; reinforces the "life" framing |
-| `toolbus` | `praxis` | Crate rename; aligns with motor/action terminology |
-| `sensory-bridge` | `senses` | Crate rename; shorter, no metaphorical loss |
-| `security` | `self` | Crate rename; aligns with the existing "Self/Non-Self Barrier" language |
-| `observe` | `interoception` | Crate rename; distinguishes from external observation |
+| `kernel-core` | `corpus` | Crate rename, complete |
+| `lifecycle` | `vita` | Crate rename, complete |
+| `toolbus` | `praxis` | Crate rename, complete |
+| `sensory-bridge` | `senses` | Crate rename, complete |
+| `security` | `self` (package: `anima-self`) | Directory rename complete; the Cargo package is `anima-self` because `self` is a reserved Rust keyword |
+| `observe` | `interoception` | Crate rename, complete |
 | `/dev/sensors/human` | `/dev/anima/senses/human` | Path rename; nested under the new namespace |
 | `/dev/tools/` | `/dev/anima/praxis/tools/` | Path rename; nested under the new namespace |
 
-The technical content of the original Axon specification carries through unchanged. The split between TCB and policy layers, the three-tier memory model, the homeostatic loop, the verification posture, and the 24-month roadmap are all preserved. Only the names and the framing have shifted.
+The technical content of the original Axon specification carries through unchanged. The split between TCB and policy layers, the three-tier memory model, the homeostatic loop, the verification posture, and the roadmap are all preserved. Only the names and the framing have shifted.
 
 ## 10. Quick Reference
 
-If you need to identify a component by its crate name and you know only one of its aliases:
+If you need to identify a component by its crate name:
 
 ```
-anima        = the whole project
-corpus       = TCB; kernel-core (old name)
-vita         = lifecycle director
-praxis       = tool bus; toolbus (old name)
-senses       = sensory bridge; sensory-bridge (old name)
-self         = capability/security
-interoception = observe (old name); telemetry
-memory       = three-tier memory
-scheduler    = MLFQ task scheduler
+anima         = the whole project
+corpus        = TCB / autonomic substrate
+vita          = lifecycle director
+praxis        = efferent actuator core (tool bus)
+senses        = afferent sensory bridge
+self          = capability / identity (Cargo package: anima-self)
+interoception = stress index and internal telemetry
+memory        = three-tier CLS memory hierarchy
+scheduler     = MLFQ task scheduler and token pipe
 ```
 
 If a term in the documentation isn't in this glossary, that's a bug. File an issue.

@@ -1,13 +1,13 @@
 [workspace]
 members = [
-  "crates/kernel-core",
-  "crates/lifecycle",
+  "crates/corpus",
+  "crates/vita",
   "crates/scheduler",
   "crates/memory",
-  "crates/toolbus",
-  "crates/security",
-  "crates/observe",
-  "crates/sensory-bridge",
+  "crates/praxis",
+  "crates/self",
+  "crates/interoception",
+  "crates/senses",
   "kernels/hosted",
 ]
 resolver = "2"

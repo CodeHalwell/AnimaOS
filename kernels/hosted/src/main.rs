@@ -5,11 +5,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-use lifecycle::{somatic_execution_loop, LifecycleConfig, LifecycleManager};
+use interoception::HomeostaticMonitor;
 use memory::VirtualContextManager;
-use observe::HomeostaticMonitor;
 use scheduler::{Task, TaskAgenda};
-use sensory_bridge::{HumanGuidance, SensoryBridge};
+use senses::{HumanGuidance, SensoryBridge};
+use vita::{somatic_execution_loop, LifecycleConfig, LifecycleManager};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();

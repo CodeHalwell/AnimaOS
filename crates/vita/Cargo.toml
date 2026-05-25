@@ -1,11 +1,11 @@
 [package]
-name = "lifecycle"
+name = "vita"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 memory = { path = "../memory" }
-observe = { path = "../observe" }
+interoception = { path = "../interoception" }
 scheduler = { path = "../scheduler" }
-sensory-bridge = { path = "../sensory-bridge" }
+senses = { path = "../senses" }

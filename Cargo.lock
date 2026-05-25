@@ -3,36 +3,34 @@
 version = 4
 
 [[package]]
+name = "anima-self"
+version = "0.1.0"
+
+[[package]]
+name = "corpus"
+version = "0.1.0"
+
+[[package]]
 name = "hosted"
 version = "0.1.0"
 dependencies = [
- "lifecycle",
+ "interoception",
  "memory",
- "observe",
  "scheduler",
- "sensory-bridge",
+ "senses",
+ "vita",
 ]
 
 [[package]]
-name = "kernel-core"
+name = "interoception"
 version = "0.1.0"
-
-[[package]]
-name = "lifecycle"
-version = "0.1.0"
-dependencies = [
- "memory",
- "observe",
- "scheduler",
- "sensory-bridge",
-]
 
 [[package]]
 name = "memory"
 version = "0.1.0"
 
 [[package]]
-name = "observe"
+name = "praxis"
 version = "0.1.0"
 
 [[package]]
@@ -40,13 +38,15 @@ name = "scheduler"
 version = "0.1.0"
 
 [[package]]
-name = "security"
+name = "senses"
 version = "0.1.0"
 
 [[package]]
-name = "sensory-bridge"
+name = "vita"
 version = "0.1.0"
-
-[[package]]
-name = "toolbus"
-version = "0.1.0"
+dependencies = [
+ "interoception",
+ "memory",
+ "scheduler",
+ "senses",
+]

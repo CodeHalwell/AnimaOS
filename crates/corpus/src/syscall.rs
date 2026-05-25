@@ -12,9 +12,9 @@ pub enum SyscallEnum {
         /// Number of frames to allocate.
         frames: usize,
     },
-    /// Read the next sensory packet from `/dev/sensors/human`.
+    /// Read the next sensory packet from `/dev/anima/senses/human`.
     ReadSensoryPacket,
-    /// Dispatch an efferent tool call through the toolbus.
+    /// Dispatch an efferent tool call through praxis.
     DispatchTool {
         /// Stable tool identifier.
         tool_id: u32,
