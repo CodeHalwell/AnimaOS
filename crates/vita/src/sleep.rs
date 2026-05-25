@@ -33,7 +33,10 @@
 //! field that callers can inspect to observe the pruning statistics.
 
 use memory::decay::SEMANTIC_FLOOR;
-use memory::{L1PruningStore, L3Archive, PruningReport, ReplayConfig, ReplayReport};
+use memory::{
+    AuditTraceEntry, CompilationConfig, CompilationReport, DreamConfig, DreamReport,
+    L1PruningStore, L3Archive, PruningReport, ReplayConfig, ReplayReport,
+};
 
 use crate::audit::{AuditEntry, AuditLog};
 
@@ -105,6 +108,41 @@ pub struct ReplayContext<'a> {
     pub config: ReplayConfig,
 }
 
+// ── DreamContext ──────────────────────────────────────────────────────────────
+
+/// Context passed to the `DreamExploration` sleep phase (E3.7).
+///
+/// When supplied to [`run_maintenance_audited`] the phase will call
+/// [`memory::run_dream_walk`] against `l3` using `config`, then populate the
+/// [`SleepRoutineOutcome::dream`] field and return candidate associative edges
+/// in [`SleepRoutineOutcome::dream_candidates`].
+///
+/// The L3 archive is borrowed immutably — edge persistence / hand-off is
+/// performed by the caller after maintenance completes.
+pub struct DreamContext<'a> {
+    /// L3 archive to walk during this cycle.
+    pub l3: &'a L3Archive,
+    /// Dream-exploration configuration (seed, walk length, threshold, …).
+    pub config: DreamConfig,
+}
+
+// ── CompilationContext ────────────────────────────────────────────────────────
+
+/// Context passed to the `PolicyCompilation` sleep phase (E3.8).
+///
+/// When supplied to [`run_maintenance_audited`] the phase will call
+/// [`memory::compile_traces_to_pairs`] using `entries` and `config`, then
+/// populate the [`SleepRoutineOutcome::compilation`] field.
+pub struct CompilationContext<'a> {
+    /// Audit-log trace entries to compile into training pairs for this cycle.
+    ///
+    /// Callers may pass a reference to an existing slice (e.g. a stack-allocated
+    /// `Vec`) or an owned collection via `Cow`-style patterns.
+    pub entries: &'a [AuditTraceEntry],
+    /// Compilation configuration (output directory, formats, append mode).
+    pub config: CompilationConfig,
+}
+
 // ── SleepRoutineOutcome ───────────────────────────────────────────────────────
 
 /// Outcome of a single sleep routine run.
@@ -133,6 +171,17 @@ pub struct SleepRoutineOutcome {
     /// Nodes that failed the replay check and should be re-inserted into L1
     /// (rollback).  Empty when rollback was not triggered or was disabled.
     pub replay_rollback_nodes: Vec<(String, memory::MemoryNode)>,
+    /// Dream-walk statistics for the `DreamExploration` phase; `None` for other
+    /// phases or when no [`DreamContext`] was provided (E3.7).
+    pub dream: Option<DreamReport>,
+    /// Candidate associative edges discovered during the `DreamExploration` phase.
+    ///
+    /// Empty for all other phases and when no [`DreamContext`] was supplied.
+    /// Callers use these to seed the next pruning cycle (E3.7 story S3.7.3).
+    pub dream_candidates: Vec<memory::AssociativeEdge>,
+    /// Compilation statistics for the `PolicyCompilation` phase; `None` for
+    /// other phases or when no [`CompilationContext`] was provided (E3.8).
+    pub compilation: Option<CompilationReport>,
 }
 
 // ── SleepMaintenanceReport ────────────────────────────────────────────────────
@@ -173,6 +222,12 @@ pub fn run_default_maintenance() -> SleepMaintenanceReport {
 /// runs real L1 emotional-decay pruning via [`L1PruningStore::run_pruning_pass_with`]
 /// (E3.5).  Without a context the phase falls back to a no-op stub.
 ///
+/// When `dream_ctx` is `Some`, the [`SleepRoutine::DreamExploration`] phase
+/// runs real random-walk exploration via [`memory::run_dream_walk`] (E3.7).
+///
+/// When `compilation_ctx` is `Some`, the [`SleepRoutine::PolicyCompilation`]
+/// phase compiles audit traces into training datasets (E3.8).
+///
 /// This satisfies E3.4 exit criterion 1: transitions (including every
 /// maintenance phase) are audited end-to-end in the log.
 pub fn run_maintenance_audited(
@@ -180,6 +235,8 @@ pub fn run_maintenance_audited(
     audit: &mut AuditLog,
     mut pruning_ctx: Option<PruningContext<'_>>,
     mut replay_ctx: Option<ReplayContext<'_>>,
+    mut dream_ctx: Option<DreamContext<'_>>,
+    mut compilation_ctx: Option<CompilationContext<'_>>,
 ) -> SleepMaintenanceReport {
     let mut outcomes = Vec::with_capacity(PHASES.len());
 
@@ -191,13 +248,11 @@ pub fn run_maintenance_audited(
             phase: phase.clone(),
         });
 
-        // The MemoryPruning phase consumes the pruning context (at most once).
-        let outcome = if routine == SleepRoutine::MemoryPruning {
-            run_pruning_phase(pruning_ctx.take())
-        } else if routine == SleepRoutine::GenerativeReplay {
-            run_replay_phase(replay_ctx.take())
-        } else {
-            run_routine_stub(routine)
+        let outcome = match routine {
+            SleepRoutine::MemoryPruning => run_pruning_phase(pruning_ctx.take()),
+            SleepRoutine::GenerativeReplay => run_replay_phase(replay_ctx.take()),
+            SleepRoutine::DreamExploration => run_dream_phase(dream_ctx.take()),
+            SleepRoutine::PolicyCompilation => run_compilation_phase(compilation_ctx.take()),
         };
         let success = outcome.completed;
 
@@ -243,6 +298,9 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
                 evicted_l1_nodes: evicted,
                 replay: None,
                 replay_rollback_nodes: Vec::new(),
+                dream: None,
+                dream_candidates: Vec::new(),
+                compilation: None,
             }
         }
         None => SleepRoutineOutcome {
@@ -253,6 +311,9 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
             evicted_l1_nodes: Vec::new(),
             replay: None,
             replay_rollback_nodes: Vec::new(),
+            dream: None,
+            dream_candidates: Vec::new(),
+            compilation: None,
         },
     }
 }
@@ -279,14 +340,78 @@ fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
                 evicted_l1_nodes: Vec::new(),
                 replay: Some(report),
                 replay_rollback_nodes: rollback_nodes,
+                dream: None,
+                dream_candidates: Vec::new(),
+                compilation: None,
             }
         }
         None => run_routine_stub(SleepRoutine::GenerativeReplay),
     }
 }
 
-/// Stub execution for non-pruning phases.  The production path will call real
-/// replay/dream/compiler subsystems here.
+/// Executes the `DreamExploration` phase (E3.7).
+///
+/// When `ctx` is `Some`, runs [`memory::run_dream_walk`] against the L3 archive
+/// and populates the outcome with a [`DreamReport`] and candidate associative
+/// edges.  When `ctx` is `None`, falls back to the no-op stub.
+fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
+    match ctx {
+        Some(c) => {
+            let (report, candidates) = memory::run_dream_walk(c.l3, &c.config);
+            let notes = if report.candidates_found > 0 {
+                "associative edges discovered"
+            } else {
+                "dream walk complete, no edges above threshold"
+            };
+            SleepRoutineOutcome {
+                routine: SleepRoutine::DreamExploration,
+                completed: true,
+                notes,
+                pruning: None,
+                evicted_l1_nodes: Vec::new(),
+                replay: None,
+                replay_rollback_nodes: Vec::new(),
+                dream: Some(report),
+                dream_candidates: candidates,
+                compilation: None,
+            }
+        }
+        None => run_routine_stub(SleepRoutine::DreamExploration),
+    }
+}
+
+/// Executes the `PolicyCompilation` phase (E3.8).
+///
+/// When `ctx` is `Some`, runs [`memory::compile_traces_to_pairs`] against the
+/// provided audit trace entries and populates the outcome with a
+/// [`CompilationReport`].  When `ctx` is `None`, falls back to the no-op stub.
+fn run_compilation_phase(ctx: Option<CompilationContext<'_>>) -> SleepRoutineOutcome {
+    match ctx {
+        Some(c) => {
+            let (report, _pairs, _errors) = memory::compile_traces_to_pairs(c.entries, &c.config);
+            let notes = if report.pairs_compiled > 0 {
+                "training pairs compiled and persisted"
+            } else {
+                "compilation complete, no task pairs found"
+            };
+            SleepRoutineOutcome {
+                routine: SleepRoutine::PolicyCompilation,
+                completed: true,
+                notes,
+                pruning: None,
+                evicted_l1_nodes: Vec::new(),
+                replay: None,
+                replay_rollback_nodes: Vec::new(),
+                dream: None,
+                dream_candidates: Vec::new(),
+                compilation: Some(report),
+            }
+        }
+        None => run_routine_stub(SleepRoutine::PolicyCompilation),
+    }
+}
+
+/// Stub execution for phases without a real context supplied.
 fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
     let notes = match routine {
         SleepRoutine::MemoryPruning => "decay applied, floor enforced",
@@ -302,6 +427,9 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         evicted_l1_nodes: Vec::new(),
         replay: None,
         replay_rollback_nodes: Vec::new(),
+        dream: None,
+        dream_candidates: Vec::new(),
+        compilation: None,
     }
 }
 
@@ -339,7 +467,7 @@ mod tests {
     #[test]
     fn audited_maintenance_emits_start_and_complete_for_each_phase() {
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, None, None);
+        let report = run_maintenance_audited("test-agent", &mut audit, None, None, None, None);
 
         assert!(report.all_completed(), "all phases should complete");
 
@@ -375,7 +503,7 @@ mod tests {
     #[test]
     fn audited_maintenance_carries_agent_id_in_every_entry() {
         let mut audit = AuditLog::new();
-        run_maintenance_audited("soak-agent", &mut audit, None, None);
+        run_maintenance_audited("soak-agent", &mut audit, None, None, None, None);
 
         for entry in audit.entries() {
             match entry {
@@ -414,7 +542,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None);
+        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None, None, None);
 
         assert!(report.all_completed());
 
@@ -464,7 +592,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None);
+        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None, None, None);
 
         assert!(report.all_completed());
         let pr = report.outcomes[0]
@@ -499,7 +627,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        run_maintenance_audited("invariant-agent", &mut audit, Some(ctx), None);
+        run_maintenance_audited("invariant-agent", &mut audit, Some(ctx), None, None, None);
 
         // Post-pass: every surviving node must be strictly above SEMANTIC_FLOOR.
         // We verify by re-checking each stored node directly.
@@ -527,7 +655,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("agent", &mut audit, Some(ctx), None);
+        let report = run_maintenance_audited("agent", &mut audit, Some(ctx), None, None, None);
 
         let pr = report.outcomes[0].pruning.as_ref().unwrap();
         assert_eq!(pr.floor_enforced, 0.4_f32);
@@ -540,7 +668,7 @@ mod tests {
     #[test]
     fn pruning_report_absent_when_no_context_supplied() {
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("no-ctx-agent", &mut audit, None, None);
+        let report = run_maintenance_audited("no-ctx-agent", &mut audit, None, None, None, None);
 
         let outcome = &report.outcomes[0];
         assert_eq!(outcome.routine, SleepRoutine::MemoryPruning);
@@ -574,7 +702,8 @@ mod tests {
                 l3: &l3,
                 config: memory::ReplayConfig::default(),
             };
-            let report = run_maintenance_audited("agent", &mut audit, None, Some(replay_ctx));
+            let report =
+                run_maintenance_audited("agent", &mut audit, None, Some(replay_ctx), None, None);
 
             // The GenerativeReplay outcome (index 1) must carry a ReplayReport.
             let replay_outcome = &report.outcomes[1];
@@ -615,7 +744,14 @@ mod tests {
                 rollback_enabled: true,
             },
         };
-        let report = run_maintenance_audited("rollback-agent", &mut audit, None, Some(replay_ctx));
+        let report = run_maintenance_audited(
+            "rollback-agent",
+            &mut audit,
+            None,
+            Some(replay_ctx),
+            None,
+            None,
+        );
 
         let replay_outcome = &report.outcomes[1];
         let rr = replay_outcome
@@ -637,7 +773,7 @@ mod tests {
     #[test]
     fn replay_phase_uses_stub_when_no_context_supplied() {
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("no-replay-agent", &mut audit, None, None);
+        let report = run_maintenance_audited("no-replay-agent", &mut audit, None, None, None, None);
         let replay_outcome = &report.outcomes[1];
         assert_eq!(replay_outcome.routine, SleepRoutine::GenerativeReplay);
         assert!(
@@ -645,5 +781,235 @@ mod tests {
             "replay report must be None when no context is supplied"
         );
         assert!(replay_outcome.replay_rollback_nodes.is_empty());
+    }
+
+    // ── E3.7 — Dream exploration ──────────────────────────────────────────────
+
+    /// E3.7: dream report is populated when a DreamContext is supplied.
+    #[test]
+    fn dream_report_is_logged_when_dream_context_is_supplied() {
+        use memory::{
+            archive_memory_node, DreamConfig, L3Archive, MemoryNode, Provenance, SourceTier,
+        };
+
+        let path = std::env::temp_dir().join("sleep_dream_logged.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut l3 = L3Archive::open(&path, 4, 100).unwrap();
+        for i in 1u64..=4 {
+            let node = MemoryNode::new(0.9 - i as f32 * 0.05, 0.1 * i as f32);
+            let item = archive_memory_node(i, &format!("node-{i}"), &node);
+            let prov = Provenance::now(SourceTier::L1, &format!("node-{i}"));
+            l3.demote(item, prov).unwrap();
+        }
+
+        let mut audit = AuditLog::new();
+        let dream_ctx = DreamContext {
+            l3: &l3,
+            config: DreamConfig::default(),
+        };
+        let report =
+            run_maintenance_audited("dream-agent", &mut audit, None, None, Some(dream_ctx), None);
+
+        let dream_outcome = &report.outcomes[2]; // DreamExploration is index 2
+        assert_eq!(dream_outcome.routine, SleepRoutine::DreamExploration);
+        assert!(
+            dream_outcome.dream.is_some(),
+            "dream report must be populated when DreamContext is supplied"
+        );
+        assert!(dream_outcome.completed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E3.7 exit criterion 1: dream report contains seed and threshold even when no
+    /// candidates are found.
+    #[test]
+    fn dream_report_is_logged_for_every_cycle_even_with_empty_archive() {
+        let path = std::env::temp_dir().join("sleep_dream_empty.json");
+        let _ = std::fs::remove_file(&path);
+        let l3 = memory::L3Archive::open(&path, 4, 100).unwrap();
+
+        let mut audit = AuditLog::new();
+        let dream_ctx = DreamContext {
+            l3: &l3,
+            config: memory::DreamConfig {
+                seed: 77,
+                ..Default::default()
+            },
+        };
+        let report =
+            run_maintenance_audited("empty-dream", &mut audit, None, None, Some(dream_ctx), None);
+
+        let outcome = &report.outcomes[2];
+        let dr = outcome
+            .dream
+            .as_ref()
+            .expect("dream report must be present");
+        assert_eq!(dr.seed, 77);
+        assert_eq!(dr.candidates_found, 0);
+        assert!(outcome.dream_candidates.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without a DreamContext the DreamExploration phase runs the no-op stub.
+    #[test]
+    fn dream_phase_uses_stub_when_no_context_supplied() {
+        let mut audit = AuditLog::new();
+        let report = run_maintenance_audited("no-dream-agent", &mut audit, None, None, None, None);
+        let dream_outcome = &report.outcomes[2];
+        assert_eq!(dream_outcome.routine, SleepRoutine::DreamExploration);
+        assert!(dream_outcome.dream.is_none());
+        assert!(dream_outcome.dream_candidates.is_empty());
+        assert!(dream_outcome.completed);
+    }
+
+    /// E3.7 exit criterion 1: same archive + same seed → same candidates.
+    #[test]
+    fn dream_candidates_are_reproducible_per_seed() {
+        use memory::{
+            archive_memory_node, DreamConfig, L3Archive, MemoryNode, Provenance, SourceTier,
+        };
+
+        let path = std::env::temp_dir().join("sleep_dream_repro.json");
+        let _ = std::fs::remove_file(&path);
+        let mut l3 = L3Archive::open(&path, 4, 100).unwrap();
+        for i in 1u64..=5 {
+            let node = MemoryNode::new(0.9, 0.1 * i as f32);
+            let item = archive_memory_node(i, &format!("m{i}"), &node);
+            let prov = Provenance::now(SourceTier::L1, &format!("m{i}"));
+            l3.demote(item, prov).unwrap();
+        }
+
+        let cfg = DreamConfig {
+            seed: 42,
+            similarity_threshold: 0.0,
+            ..Default::default()
+        };
+
+        let dream_ctx1 = DreamContext {
+            l3: &l3,
+            config: cfg.clone(),
+        };
+        let report1 = run_maintenance_audited(
+            "a1",
+            &mut AuditLog::new(),
+            None,
+            None,
+            Some(dream_ctx1),
+            None,
+        );
+
+        let dream_ctx2 = DreamContext {
+            l3: &l3,
+            config: cfg,
+        };
+        let report2 = run_maintenance_audited(
+            "a2",
+            &mut AuditLog::new(),
+            None,
+            None,
+            Some(dream_ctx2),
+            None,
+        );
+
+        assert_eq!(
+            report1.outcomes[2].dream_candidates, report2.outcomes[2].dream_candidates,
+            "same seed must produce identical candidates"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── E3.8 — Policy compilation ─────────────────────────────────────────────
+
+    /// E3.8: compilation report is populated when a CompilationContext is supplied.
+    #[test]
+    fn compilation_report_is_populated_when_context_is_supplied() {
+        use memory::{AuditTraceEntry, CompilationConfig};
+
+        let entries = vec![
+            AuditTraceEntry::TaskStarted {
+                task_id: 1,
+                tier: 0,
+                prompt: "q1".into(),
+            },
+            AuditTraceEntry::TaskCompleted {
+                task_id: 1,
+                tokens_emitted: 2,
+                response: "a1".into(),
+            },
+        ];
+
+        let dir = std::env::temp_dir().join("sleep_compile_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut audit = AuditLog::new();
+        let comp_ctx = CompilationContext {
+            entries: &entries,
+            config: CompilationConfig {
+                output_dir: dir.clone(),
+                formats: vec![memory::TrainingFormat::Alpaca],
+                append: false,
+            },
+        };
+        let report =
+            run_maintenance_audited("comp-agent", &mut audit, None, None, None, Some(comp_ctx));
+
+        let comp_outcome = &report.outcomes[3]; // PolicyCompilation is index 3
+        assert_eq!(comp_outcome.routine, SleepRoutine::PolicyCompilation);
+        assert!(
+            comp_outcome.compilation.is_some(),
+            "compilation report must be present when context is supplied"
+        );
+        let cr = comp_outcome.compilation.as_ref().unwrap();
+        assert_eq!(cr.pairs_compiled, 1);
+        assert_eq!(cr.files_written, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a CompilationContext the PolicyCompilation phase runs the no-op stub.
+    #[test]
+    fn compilation_phase_uses_stub_when_no_context_supplied() {
+        let mut audit = AuditLog::new();
+        let report = run_maintenance_audited("no-comp-agent", &mut audit, None, None, None, None);
+        let comp_outcome = &report.outcomes[3];
+        assert_eq!(comp_outcome.routine, SleepRoutine::PolicyCompilation);
+        assert!(comp_outcome.compilation.is_none());
+        assert!(comp_outcome.completed);
+    }
+
+    /// E3.8 exit criterion 2: zero pairs produces no files but the report is still populated.
+    #[test]
+    fn compilation_with_no_completed_tasks_writes_no_files() {
+        use memory::{AuditTraceEntry, CompilationConfig};
+
+        let entries = vec![AuditTraceEntry::TaskFailed {
+            task_id: 99,
+            error: "timeout".into(),
+        }];
+
+        let dir = std::env::temp_dir().join("sleep_compile_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut audit = AuditLog::new();
+        let comp_ctx = CompilationContext {
+            entries: &entries,
+            config: CompilationConfig {
+                output_dir: dir.clone(),
+                formats: vec![memory::TrainingFormat::Alpaca],
+                append: false,
+            },
+        };
+        let report =
+            run_maintenance_audited("empty-comp", &mut audit, None, None, None, Some(comp_ctx));
+
+        let cr = report.outcomes[3].compilation.as_ref().unwrap();
+        assert_eq!(cr.pairs_compiled, 0, "no pairs from failed tasks");
+        assert_eq!(cr.files_written, 0, "no file written when no pairs");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

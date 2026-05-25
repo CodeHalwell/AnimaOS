@@ -9,3 +9,6 @@ memory = { path = "../memory" }
 interoception = { path = "../interoception" }
 scheduler = { path = "../scheduler" }
 senses = { path = "../senses" }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -3,7 +3,9 @@
 //! Synaptic memory layer implementing the CLS three-tier hierarchy.
 
 pub mod archival;
+pub mod compilation;
 pub mod decay;
+pub mod dreaming;
 pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
@@ -14,7 +16,13 @@ pub use archival::{
     ArchivalStore, ArchivalStoreError, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError,
     Provenance, SourceTier,
 };
+pub use compilation::{
+    compile_traces_to_pairs, emergency_consolidate, AlpacaRecord, AuditTraceEntry,
+    ChainOfThoughtRecord, CompilationConfig, CompilationReport, ConversationRecord,
+    ConversationTurn, TrainingFormat, TrainingPair,
+};
 pub use decay::{EmotionalContext, MemoryNode};
+pub use dreaming::{run_dream_walk, AssociativeEdge, DreamConfig, DreamReport};
 pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};

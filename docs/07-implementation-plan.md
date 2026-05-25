@@ -506,7 +506,7 @@ when degradation crosses the configured threshold.
    cycles all carry a report; `accuracy_is_logged_for_every_cycle_even_when_perfect`
    in `memory::replay`)
 
-### Epic E3.7 — Dreaming Phase ⬜
+### Epic E3.7 — Dreaming Phase ✅
 
 **Scope.** Random graph walks across L3 produce associative-edge
 candidates that feed the next pruning cycle for validation.
@@ -514,15 +514,38 @@ candidates that feed the next pruning cycle for validation.
 **Dependencies.** E2.6, E3.6.
 
 **Stories.**
-- S3.7.1 Random-walk sampler with seeded determinism.
-- S3.7.2 Candidate edge generation.
-- S3.7.3 Hand-off to the next pruning cycle.
+- S3.7.1 Random-walk sampler with seeded determinism. ✅ (`memory/src/dreaming.rs` —
+  `Xorshift64` PRNG seeded by `DreamConfig::seed`; `run_dream_walk(l3, config)` samples
+  entries in ascending ID order, performs seeded random walks, and returns a deterministic
+  `(DreamReport, Vec<AssociativeEdge>)` for every call with identical inputs;
+  `LifecycleManager::dream_config` field controls seed and walk parameters)
+- S3.7.2 Candidate edge generation. ✅ (`AssociativeEdge { from_key, to_key, similarity }`
+  — edges discovered by cosine-similarity walks across L3 embeddings; deduplicated
+  (highest similarity kept), sorted descending by similarity then lexicographic key
+  pair for full determinism; `DreamConfig::similarity_threshold` filters low-quality edges;
+  `SleepRoutineOutcome::dream_candidates` carries the edge list out of the sleep phase)
+- S3.7.3 Hand-off to the next pruning cycle. ✅ (`dream_candidates` is exposed on
+  `SleepRoutineOutcome` index 2; callers can read the list from `run_sleep_cycle()` and
+  seed the next pruning pass; `DreamContext` wires the L3 archive into
+  `run_maintenance_audited`; `LifecycleManager` passes `dream_ctx` when `l3_archive`
+  is configured)
 
 **Exit criteria.**
-1. Candidate yield is logged and monotonic-reproducible per seed.
-2. Bad candidates are filtered out by the subsequent pruning pass.
+1. Candidate yield is logged and monotonic-reproducible per seed. ✅
+   (`candidate_yield_is_monotonic_reproducible_per_seed` in `memory::dreaming` —
+   two calls with identical archive + config produce byte-for-byte identical reports
+   and edge lists; `dream_candidates_are_reproducible_per_seed` in `vita::sleep`;
+   `dream_candidates_are_reproducible_across_lifecycle_cycles` in `vita::lib` —
+   two consecutive lifecycle sleep cycles with the same `dream_config` and unchanged
+   L3 produce identical candidate lists)
+2. Bad candidates are filtered out by the subsequent pruning pass. ✅
+   (`threshold_filters_out_low_similarity_candidates` in `memory::dreaming` —
+   orthogonal nodes (cosine similarity 0.0) are excluded when threshold > 0;
+   `all_candidate_edges_have_similarity_at_or_above_threshold` verifies post-condition;
+   `dream_threshold_filters_low_similarity_edges_in_lifecycle` in `vita::lib` confirms
+   end-to-end filtering through the LifecycleManager)
 
-### Epic E3.8 — Compilation Phase: Trace → Training Pairs ⬜
+### Epic E3.8 — Compilation Phase: Trace → Training Pairs ✅
 
 **Scope.** Compile the cycle's traces into all three output training
 formats and persist them under `training_corpus/` in L3.
@@ -530,13 +553,35 @@ formats and persist them under `training_corpus/` in L3.
 **Dependencies.** E3.6.
 
 **Stories.**
-- S3.8.1 Trace-to-pair compiler for each format.
-- S3.8.2 Persistence under `training_corpus/`.
-- S3.8.3 Final close-out of the sleep cycle.
+- S3.8.1 Trace-to-pair compiler for each format. ✅ (`memory/src/compilation.rs` —
+  `compile_traces_to_pairs(entries, config)` pairs each `TaskStarted` with its
+  subsequent `TaskCompleted` (by task ID); emits `AlpacaRecord` (`{ instruction, input,
+  output }`), `ConversationRecord` (`{ conversations: [{ role, content }] }`), and
+  `ChainOfThoughtRecord` (`{ prompt, chain_of_thought, answer }`) for the three
+  `TrainingFormat` variants; failed tasks are excluded; `AuditEntry → AuditTraceEntry`
+  conversion in `vita::lib::audit_entry_to_trace` bridges the two crates)
+- S3.8.2 Persistence under `training_corpus/`. ✅ (`write_format` writes each format
+  as a JSONL file under `CompilationConfig::output_dir`; atomic write (`.tmp` then
+  rename) prevents partial reads; `append` mode accumulates across calls;
+  `LifecycleManager::compilation_config` controls the output directory and enabled
+  formats; `run_sleep_cycle` and `transition_to_sleep_state` both build a
+  `CompilationContext` from the current audit log when configured)
+- S3.8.3 Final close-out of the sleep cycle. ✅ (`emergency_consolidate(entries, config)`
+  — triggers an immediate compilation pass and sets `CompilationReport::emergency_consolidation
+  = true`; exposed from `memory::compilation`; tested in `vita::lib` via
+  `emergency_consolidation_produces_a_marked_report`)
 
 **Exit criteria.**
-1. Output corpora validate against the documented schemas.
-2. Emergency consolidation can trigger and recover under stress injection.
+1. Output corpora validate against the documented schemas. ✅
+   (`output_files_validate_against_schemas` in `memory::compilation` — Alpaca,
+   Conversation, and ChainOfThought JSONL files are written and deserialized back
+   to their typed structs without error; `sleep_cycle_compiles_completed_tasks_into_training_corpus`
+   in `vita::lib` validates the Alpaca file produced by a sleep cycle end-to-end)
+2. Emergency consolidation can trigger and recover under stress injection. ✅
+   (`emergency_consolidation_marks_report_and_flushes_pairs` in `memory::compilation`;
+   `emergency_consolidation_produces_a_marked_report` in `vita::lib` — both assert
+   `CompilationReport::emergency_consolidation = true` and verify that pairs are flushed
+   and files written correctly)
 
 ---
 
