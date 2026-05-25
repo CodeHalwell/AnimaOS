@@ -1,5 +1,6 @@
 //! Circuit breaker isolating failing tool pathways from healthy execution.
 
+use crate::ToolInvocationError;
 use std::time::{Duration, Instant};
 
 /// Isolates failing tool pathways from healthy execution flows.
@@ -63,7 +64,7 @@ impl CircuitBreaker {
     }
 
     /// Returns pathway health and transitions Open -> HalfOpen after cooldown.
-    pub fn verify_pathway_health(&mut self) -> Result<(), &'static str> {
+    pub fn verify_pathway_health(&mut self) -> Result<(), ToolInvocationError> {
         if self.state == BreakerState::Open {
             if let Some(last_fail) = self.last_failure {
                 if last_fail.elapsed() > self.cooldown {
@@ -71,7 +72,7 @@ impl CircuitBreaker {
                     return Ok(());
                 }
             }
-            return Err("Execution pathway blocked by active circuit breaker.");
+            return Err(ToolInvocationError::BreakerOpen);
         }
         Ok(())
     }
@@ -95,7 +96,7 @@ mod tests {
             ..CircuitBreaker::new()
         };
         let result = breaker.verify_pathway_health();
-        assert!(result.is_err());
+        assert_eq!(result, Err(ToolInvocationError::BreakerOpen));
         assert_eq!(breaker.state, BreakerState::Open);
     }
 

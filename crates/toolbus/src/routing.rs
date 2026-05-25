@@ -14,7 +14,7 @@ pub struct ToolCandidate {
 ///
 /// This implements `T_filtered = { t | score(t,q) >= tau_rel * max score }`.
 pub fn length_robust_filter(candidates: &[ToolCandidate], tau_rel: f32) -> Vec<ToolCandidate> {
-    if candidates.is_empty() {
+    if candidates.is_empty() || !tau_rel.is_finite() || !(0.0..=1.0).contains(&tau_rel) {
         return Vec::new();
     }
     let max_score = candidates
@@ -61,5 +61,13 @@ mod tests {
     fn non_positive_max_returns_empty() {
         let kept = length_robust_filter(&[cand("a", 0.0), cand("b", -1.0)], 0.5);
         assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn invalid_tau_rel_returns_empty() {
+        let candidates = [cand("a", 1.0), cand("b", 0.5)];
+        assert!(length_robust_filter(&candidates, f32::NAN).is_empty());
+        assert!(length_robust_filter(&candidates, -0.1).is_empty());
+        assert!(length_robust_filter(&candidates, 1.1).is_empty());
     }
 }

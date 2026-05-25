@@ -38,15 +38,15 @@ impl HomeostaticMonitor {
 
     /// Computes the composite systemic stress index.
     pub fn compute_systemic_stress_index(&self, active_tokens: u32, max_context: u32) -> f32 {
-        if self.rolling_ttft.is_empty() {
-            return 0.0;
-        }
-
-        let avg_ttft = self.rolling_ttft.iter().sum::<f32>() / self.rolling_ttft.len() as f32;
-        let latency_ratio = if self.baseline_ttft > 0.0 {
-            avg_ttft / self.baseline_ttft
-        } else {
+        let latency_ratio = if self.rolling_ttft.is_empty() {
             1.0
+        } else {
+            let avg_ttft = self.rolling_ttft.iter().sum::<f32>() / self.rolling_ttft.len() as f32;
+            if self.baseline_ttft > 0.0 {
+                avg_ttft / self.baseline_ttft
+            } else {
+                1.0
+            }
         };
         let memory_ratio = if max_context == 0 {
             1.0
@@ -63,9 +63,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stress_index_is_zero_without_ttft_samples() {
+    fn stress_index_includes_memory_pressure_without_ttft_samples() {
         let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
-        assert_eq!(monitor.compute_systemic_stress_index(100, 1000), 0.0);
+        assert_eq!(monitor.compute_systemic_stress_index(100, 1000), 0.55);
     }
 
     #[test]

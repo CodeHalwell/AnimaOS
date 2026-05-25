@@ -2,7 +2,8 @@
 
 //! Afferent sensory input vector: parses text + PCM streams into typed packets.
 
-use std::sync::Mutex;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// External policy bounds from `/dev/sensors/human`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,23 +29,23 @@ pub enum SensoryPacket {
 }
 
 /// Minimal sensory bridge for human intent signals.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SensoryBridge {
-    active_bounds: Mutex<HumanGuidance>,
-    queue: Mutex<Vec<SensoryPacket>>,
+    active_bounds: Arc<Mutex<HumanGuidance>>,
+    queue: Arc<Mutex<VecDeque<SensoryPacket>>>,
 }
 
 impl SensoryBridge {
     /// Creates a new sensory bridge with initial human guidance.
     pub fn new(active_bounds: HumanGuidance) -> Self {
         Self {
-            active_bounds: Mutex::new(active_bounds),
-            queue: Mutex::new(Vec::new()),
+            active_bounds: Arc::new(Mutex::new(active_bounds)),
+            queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
     /// Reads current human policy bounds.
-    pub async fn read_active_bounds(&self) -> Result<HumanGuidance, SensoryBridgeError> {
+    pub fn read_active_bounds(&self) -> Result<HumanGuidance, SensoryBridgeError> {
         Ok(self.active_bounds.lock().expect("poisoned").clone())
     }
 
@@ -58,7 +59,7 @@ impl SensoryBridge {
         self.queue
             .lock()
             .expect("poisoned")
-            .push(SensoryPacket::Text(text.into()));
+            .push_back(SensoryPacket::Text(text.into()));
     }
 
     /// Packetizes a PCM frame and enqueues it.
@@ -66,28 +67,12 @@ impl SensoryBridge {
         self.queue
             .lock()
             .expect("poisoned")
-            .push(SensoryPacket::Pcm(samples));
+            .push_back(SensoryPacket::Pcm(samples));
     }
 
     /// Pops the next sensory packet, if any.
     pub fn next_packet(&self) -> Option<SensoryPacket> {
-        let mut q = self.queue.lock().expect("poisoned");
-        if q.is_empty() {
-            None
-        } else {
-            Some(q.remove(0))
-        }
-    }
-}
-
-impl Clone for SensoryBridge {
-    fn clone(&self) -> Self {
-        let bounds = self.active_bounds.lock().expect("poisoned").clone();
-        let queue = self.queue.lock().expect("poisoned").clone();
-        Self {
-            active_bounds: Mutex::new(bounds),
-            queue: Mutex::new(queue),
-        }
+        self.queue.lock().expect("poisoned").pop_front()
     }
 }
 
@@ -95,25 +80,12 @@ impl Clone for SensoryBridge {
 mod tests {
     use super::*;
 
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Waker};
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        let mut future = Box::pin(future);
-        loop {
-            if let Poll::Ready(v) = Pin::as_mut(&mut future).poll(&mut cx) {
-                return v;
-            }
-        }
-    }
-
     #[test]
     fn read_active_bounds_returns_current_guidance() {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "low-cost".to_string(),
         });
-        let g = block_on(bridge.read_active_bounds()).unwrap();
+        let g = bridge.read_active_bounds().unwrap();
         assert_eq!(g.policy_hint, "low-cost");
     }
 

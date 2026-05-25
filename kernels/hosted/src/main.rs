@@ -16,8 +16,9 @@ fn block_on<F: Future>(future: F) -> F::Output {
     let mut cx = Context::from_waker(waker);
     let mut future = Box::pin(future);
     loop {
-        if let Poll::Ready(v) = Pin::as_mut(&mut future).poll(&mut cx) {
-            return v;
+        match Pin::as_mut(&mut future).poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
         }
     }
 }

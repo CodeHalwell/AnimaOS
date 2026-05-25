@@ -10,6 +10,7 @@ use memory::VirtualContextManager;
 use observe::HomeostaticMonitor;
 use scheduler::{IterationAwareMlfq, TaskAgenda};
 use sensory_bridge::{HumanGuidance, SensoryBridge, SensoryBridgeError};
+use std::time::Duration;
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,19 +115,25 @@ pub async fn somatic_execution_loop(
     monitor: &HomeostaticMonitor,
 ) -> Result<(), LifecycleError> {
     loop {
-        let human_guidance = lifecycle.sensory_bridge.read_active_bounds().await?;
+        let human_guidance = lifecycle.sensory_bridge.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
 
         let active_tokens = lifecycle.memory.get_l1_token_count();
         let stress_index =
             monitor.compute_systemic_stress_index(active_tokens, lifecycle.config.max_context);
 
-        if lifecycle.agenda.is_empty() && stress_index < 0.4 {
+        let is_idle = if lifecycle.agenda.is_empty() && stress_index < 0.4 {
             lifecycle.transition_to_sleep_state().await?;
+            true
         } else if let Some(task) = lifecycle.agenda.select_optimal_task() {
             lifecycle.scheduler.dispatch_task(task).await;
+            false
         } else {
-            std::thread::yield_now();
+            true
+        };
+
+        if is_idle {
+            std::thread::sleep(Duration::from_millis(1));
         }
 
         lifecycle.iterations = lifecycle.iterations.saturating_add(1);
@@ -174,7 +181,8 @@ mod tests {
             iterations: 0,
         };
 
-        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(0.0);
 
         let result = block_on(somatic_execution_loop(&mut manager, &monitor));
 
