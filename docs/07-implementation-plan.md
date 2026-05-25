@@ -1143,10 +1143,30 @@ A per-PR microbenchmark suite (Criterion) plus a nightly macro-benchmark
 job. Begins in Stage 2 once the memory hierarchy is stable; tightens in
 Stage 4.
 
-### Epic EX.4 — Security Posture and Threat Model ⬜
+### Epic EX.4 — Security Posture and Threat Model 🟡
 
 Maintain a living threat model, run `cargo audit` and `cargo deny` in
 CI, and produce a security review at the end of each stage.
+
+**Delivered in this epic (partial — first pass):**
+- `cargo audit` job added to `.github/workflows/ci.yml` — scans `Cargo.lock`
+  against the RustSec advisory database on every PR; findings at error level
+  block merge. ✅
+- `cargo deny` job added to `.github/workflows/ci.yml` — enforces the
+  licence allow-list, bans `openssl` and `git2`, detects duplicate
+  dependency versions, and restricts to the crates.io registry. ✅
+- `deny.toml` — machine-readable supply-chain policy: licence allow-list,
+  banned crates, wildcard-version warnings, registry restriction. ✅
+- `docs/09-threat-model.md` — living threat model covering trust zones,
+  attack surface catalogue (AS-1 through AS-7), STRIDE threat catalogue
+  (T-1 through T-8), security controls matrix, and per-stage security
+  review checklist. ✅
+
+**Remaining (future iterations):**
+- Pin GitHub Actions `uses:` references to SHAs (currently tag-pinned only).
+- SBOM generation via `cargo cyclonedx` or `cargo spdx`.
+- Enable Dependabot / Renovate for automated dependency updates.
+- Per-stage security review sign-off as each stage closes.
 
 ---
 

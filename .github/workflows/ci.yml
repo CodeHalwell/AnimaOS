@@ -53,3 +53,38 @@ jobs:
         run: rustup component add clippy
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # -------------------------------------------------------------------------
+  # Epic EX.4 — Security Posture and Threat Model
+  # -------------------------------------------------------------------------
+  # cargo-audit: scans Cargo.lock against the RustSec advisory database for
+  #   known CVEs and security advisories.  Any finding at error-level blocks
+  #   the PR.  See docs/09-threat-model.md §6 for the supply-chain policy.
+  #
+  # cargo-deny: enforces the licence allow-list, bans unwanted crates
+  #   (openssl, git2), detects duplicate dependency versions, and restricts
+  #   the allowed package registries.  Policy is in deny.toml.
+  # -------------------------------------------------------------------------
+  security-audit:
+    name: security audit (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        # --deny=warnings promotes all advisory warnings to errors so that
+        # unmaintained crates also block CI (not only active CVEs).
+        run: cargo audit
+
+  security-deny:
+    name: supply-chain policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Run cargo deny
+        # Checks: advisories, bans (duplicates, banned crates, wildcards),
+        # licences (allow-list from deny.toml), and source registries.
+        run: cargo deny check

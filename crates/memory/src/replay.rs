@@ -208,7 +208,6 @@ fn decode_node_from_payload(payload: &[u8]) -> Option<MemoryNode> {
 mod tests {
     use super::*;
     use crate::archival::{archive_memory_node, L3Archive, Provenance, SourceTier};
-    use std::path::Path;
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(name)
