@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 wasmtime.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "praxis"
+harness = false

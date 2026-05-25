@@ -714,11 +714,52 @@ A single durable audit log and a telemetry export that is consumed by
 both development tooling and the homeostatic monitor. Owners change as
 stages progress; the epic remains open.
 
-### Epic EX.3 — Performance Regression Benchmark Suite ⬜
+### Epic EX.3 — Performance Regression Benchmark Suite ✅
 
 A per-PR microbenchmark suite (Criterion) plus a nightly macro-benchmark
 job. Begins in Stage 2 once the memory hierarchy is stable; tightens in
 Stage 4.
+
+**What was built:**
+- `criterion = "0.5"` added as workspace dev-dependency.
+- **`crates/scheduler/benches/scheduler.rs`** — 6 benchmarks across three groups:
+  - `task_agenda/push/{100,1000,10000}` — cost of inserting tasks across all three priority tiers.
+  - `task_agenda/select/{100,1000,10000}` — priority-ordered pop of a pre-filled agenda.
+  - `mlfq/boost_all_to_high/{50,500,2000}` — bulk starvation-prevention tier promotion.
+  - `mlfq/check_and_boost_no_op` — common no-op path when boost threshold is not reached.
+  - `token_pipe/push_refund_cycle/{64,512,4096}` — complete credit push/refund cycle.
+  - `token_pipe/bulk_push/{8,64,256}` — burst producer with abundant credits.
+- **`crates/memory/benches/memory.rs`** — 7 benchmarks across four groups:
+  - `arc_cache/sequential_inserts/{64,256,1024}` — full ARC miss path with eviction pressure.
+  - `arc_cache/mixed_workload/{64,256,1024}` — warm reads + cold inserts reflecting agent execution.
+  - `arc_cache/get_hits/{64,256,1024}` — read-only throughput on a fully-loaded warm cache.
+  - `l1_vcm/occupied_blocks/{0,2048,4000,8192}` — block-occupancy ceiling-division (hot scheduler path).
+  - `l1_vcm/add_tokens` — L1 token-count update with ceiling enforcement.
+  - `memory_node/activation_at/{t=0,1,10,100}` — emotionally modulated exponential decay formula.
+  - `memory_node/activation_batch/{64,512,4096}` — bulk decay evaluation (inner pruning-pass loop).
+- **`crates/praxis/benches/praxis.rs`** — 10 benchmarks across three groups:
+  - `tool_registry/lookup_echo` — HashMap probe + `Arc` clone (common read path).
+  - `tool_registry/lookup_miss` — miss path for unregistered tool identifiers.
+  - `tool_registry/dispatch_echo` — complete synchronous dispatch with circuit-breaker accounting.
+  - `tool_registry/dispatch_clock` — dispatch including a `SystemTime::now` syscall.
+  - `tool_registry/list_after_n_registrations/{10,100,1000}` — sorted list allocation.
+  - `routing/filter_10_candidates` — typical online routing path (short list).
+  - `routing/filter_candidates/{50,200,1000}` — filter scaling with linearly decreasing scores.
+  - `routing/filter_all_equal/{50,200,1000}` — full-pass degenerate case (all scores equal).
+  - `circuit_breaker/record_success_closed` — steady-state success accounting.
+  - `circuit_breaker/record_failure_below_threshold` — failure accounting without state transition.
+- **`.github/workflows/bench.yml`** — nightly CI job (02:00 UTC) running all three benchmark
+  suites with `--output-format bencher`; HTML reports uploaded as 30-day artifacts.
+  Also triggers on PR changes to `crates/scheduler/**`, `crates/memory/**`, `crates/praxis/**`
+  to surface regressions before they land.
+
+**Exit criteria met:**
+1. ✅ Per-PR microbenchmark job in `.github/workflows/bench.yml`; triggers on changes to the three
+   benchmarked crates.
+2. ✅ Nightly macro-benchmark job (`schedule: cron: '0 2 * * *'`) with artifact upload.
+3. ✅ `cargo build --benches -p scheduler/memory/praxis` clean; `cargo clippy --all-targets -D warnings`
+   clean; `cargo fmt --check` clean.
+4. ✅ All 237 existing workspace tests continue to pass unmodified.
 
 ### Epic EX.4 — Security Posture and Threat Model ⬜
 
