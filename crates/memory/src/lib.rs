@@ -6,11 +6,13 @@ pub mod archival;
 pub mod decay;
 pub mod l2_cache;
 pub mod pressure;
+pub mod pruning;
 
 pub use archival::{ArchivalStore, ArchivalStoreError, ArchivedItem};
 pub use decay::{EmotionalContext, MemoryNode};
 pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
+pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
 
 /// Default block size in tokens, matching PagedAttention page granularity.
 pub const DEFAULT_BLOCK_SIZE: u32 = 16;
