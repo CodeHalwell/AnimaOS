@@ -82,6 +82,16 @@ mod tests {
     }
 
     #[test]
+    fn default_emotional_weights_match_design_constants() {
+        // Pins alpha and sigma to the values documented in
+        // docs/02-subsystems.md §1.3 (S(t) modulator). Surprise is weighted
+        // slightly higher than arousal by design.
+        let node = MemoryNode::new(1.0, 0.0);
+        assert!((node.alpha - 1.5).abs() < f32::EPSILON);
+        assert!((node.sigma - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn high_arousal_boosts_activation() {
         let mut excited = MemoryNode::new(0.5, 0.1);
         excited.emotion = EmotionalContext {
