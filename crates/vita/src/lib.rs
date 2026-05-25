@@ -186,6 +186,11 @@ pub async fn somatic_execution_loop(
     monitor: &HomeostaticMonitor,
 ) -> Result<(), LifecycleError> {
     loop {
+        // Apply starvation-prevention boost before selecting the next task.
+        // When `boost_interval > 0`, this promotes any Medium/Low tasks that
+        // have been waiting for a full `boost_interval`-dispatch window.
+        lifecycle.scheduler.check_and_boost(&mut lifecycle.agenda);
+
         let human_guidance = lifecycle.senses.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
 

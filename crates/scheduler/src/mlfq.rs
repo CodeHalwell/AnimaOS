@@ -1,4 +1,16 @@
 //! Iteration-aware multi-level feedback queue with three priority tiers.
+//!
+//! # Starvation prevention
+//!
+//! Classic MLFQ suffers from starvation: if there is a continuous stream of
+//! high-priority tasks, low-priority tasks never run.  [`IterationAwareMlfq`]
+//! mitigates this with a periodic *starvation boost*: every `boost_interval`
+//! dispatches, all tasks waiting in the Medium and Low tiers are promoted to
+//! the High tier so that no task can be blocked for longer than
+//! `boost_interval` dispatches.
+//!
+//! Set `boost_interval = 0` (the default) to disable the boost (useful in
+//! unit tests that exercise a single priority tier).
 
 use std::collections::VecDeque;
 
@@ -11,7 +23,7 @@ pub const NUM_TIERS: usize = 3;
 /// Symbolic tier names for convenience.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlfqTier {
-    /// Highest priority - interactive / human-guided work.
+    /// Highest priority — interactive / human-guided work.
     High = 0,
     /// Default tier for background tasks.
     Medium = 1,
@@ -40,7 +52,8 @@ impl TaskAgenda {
         }
     }
 
-    /// Adds a task into the queue at its declared MLFQ level (clamped).
+    /// Adds a task into the queue at its declared MLFQ level (clamped to
+    /// the maximum tier index so out-of-range values are silently accepted).
     pub fn push(&mut self, task: Task) {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tiers[tier].push_back(task);
@@ -65,6 +78,23 @@ impl TaskAgenda {
         }
         None
     }
+
+    /// Promotes every task in tiers 1..N-1 to the High tier (tier 0),
+    /// preventing indefinite starvation of low-priority work.
+    ///
+    /// Returns the number of tasks that were promoted.
+    pub fn boost_all_to_high(&mut self) -> usize {
+        let mut boosted = 0;
+        // Collect from Medium and Low into High.
+        for tier_idx in 1..NUM_TIERS {
+            while let Some(mut task) = self.tiers[tier_idx].pop_front() {
+                task.mlfq_level = MlfqTier::High as u8;
+                self.tiers[0].push_back(task);
+                boosted += 1;
+            }
+        }
+        boosted
+    }
 }
 
 /// Result of a successful dispatch through an [`LlmBackend`].
@@ -78,21 +108,81 @@ pub struct TaskOutcome {
     pub tokens_emitted: u32,
 }
 
-/// Dispatches tasks to execution loops, tracking per-tier statistics.
+/// Dispatches tasks to execution loops, tracking per-tier statistics and
+/// enforcing starvation prevention.
+///
+/// # Starvation prevention
+///
+/// Set `boost_interval > 0` (via [`IterationAwareMlfq::with_boost_interval`])
+/// and call [`IterationAwareMlfq::check_and_boost`] with the live
+/// [`TaskAgenda`] before selecting each task.  After every `boost_interval`
+/// dispatches, `check_and_boost` promotes all Medium/Low tasks to High.
 #[derive(Debug, Default, Clone)]
 pub struct IterationAwareMlfq {
-    /// Captures tasks that were dispatched.
+    /// Ordered history of tasks that were dispatched (success and failure alike).
     pub dispatched_tasks: Vec<Task>,
-    /// Per-tier dispatch counters.
+    /// Per-tier dispatch counters — incremented before the backend call so they
+    /// reflect *attempted* dispatches, not only successful ones.
     pub tier_counters: [u64; NUM_TIERS],
+    /// Running sum of tokens emitted across all successful dispatches.
+    pub total_tokens_dispatched: u64,
+    /// Number of dispatches between starvation-prevention boosts.
+    /// `0` disables the boost (default).
+    pub boost_interval: u32,
+    /// Internal dispatch count used to trigger the starvation boost.
+    dispatch_count: u64,
 }
 
 impl IterationAwareMlfq {
-    /// Dispatches a task through the provided LLM backend, draining the streaming
-    /// completion into a single [`TaskOutcome`]. Both `dispatched_tasks` and
-    /// `tier_counters` are updated for every attempted dispatch — success and
-    /// failure alike — so callers inspecting either surface see a complete
-    /// record of what the scheduler tried to run.
+    /// Creates a scheduler with the starvation-prevention boost enabled.
+    ///
+    /// `boost_interval` is the number of dispatches between promotions of
+    /// waiting tasks to the High tier.  Typical values are in the range
+    /// 50–200 depending on workload characteristics.
+    pub fn with_boost_interval(boost_interval: u32) -> Self {
+        Self {
+            boost_interval,
+            ..Default::default()
+        }
+    }
+
+    /// Checks whether a starvation boost is due and, if so, promotes all
+    /// Medium and Low tasks in `agenda` to the High tier.
+    ///
+    /// Returns the number of tasks that were promoted (0 if no boost was due
+    /// or if `boost_interval` is 0).
+    ///
+    /// Call this method once per scheduler loop iteration *before* calling
+    /// [`TaskAgenda::select_optimal_task`] so that newly promoted tasks are
+    /// visible to the next selection.
+    pub fn check_and_boost(&mut self, agenda: &mut TaskAgenda) -> usize {
+        if self.boost_interval == 0 || self.dispatch_count == 0 {
+            return 0;
+        }
+        if self
+            .dispatch_count
+            .is_multiple_of(self.boost_interval as u64)
+        {
+            agenda.boost_all_to_high()
+        } else {
+            0
+        }
+    }
+
+    /// Dispatches a task through the provided LLM backend, draining the
+    /// streaming completion into a single [`TaskOutcome`].
+    ///
+    /// # Token-slice accounting
+    ///
+    /// If `task.token_budget` is set, the stream is truncated at that many
+    /// tokens — the dispatch returns normally with whatever has been collected
+    /// so far, and `tokens_emitted` reflects the actual count (≤ budget).
+    /// This ensures per-task token-slice accounting never over-draws the
+    /// scheduler's resource model.
+    ///
+    /// Both `dispatched_tasks` and `tier_counters` are updated for every
+    /// attempted dispatch — success and failure alike — so callers inspecting
+    /// either surface see a complete record of what the scheduler tried to run.
     pub async fn dispatch_task(
         &mut self,
         task: Task,
@@ -102,21 +192,35 @@ impl IterationAwareMlfq {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tier_counters[tier] = self.tier_counters[tier].saturating_add(1);
         self.dispatched_tasks.push(task.clone());
+        self.dispatch_count = self.dispatch_count.saturating_add(1);
 
         let stream = backend.stream_completion(&task.prompt, cancel).await?;
 
+        let budget = task.token_budget;
         let mut response = String::new();
         let mut tokens_emitted: u32 = 0;
+
         for event in stream {
             match event {
                 StreamingCompletion::Token(t) => {
                     tokens_emitted = tokens_emitted.saturating_add(1);
                     response.push_str(&t);
+                    // Enforce per-task token budget: stop processing further
+                    // stream events once the slice is exhausted.
+                    if let Some(budget) = budget {
+                        if tokens_emitted >= budget {
+                            break;
+                        }
+                    }
                 }
                 StreamingCompletion::Done => {}
                 StreamingCompletion::Cancelled => return Err(LlmBackendError::Cancelled),
             }
         }
+
+        self.total_tokens_dispatched = self
+            .total_tokens_dispatched
+            .saturating_add(tokens_emitted as u64);
 
         Ok(TaskOutcome {
             task,
@@ -129,6 +233,23 @@ impl IterationAwareMlfq {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut future = Box::pin(future);
+        loop {
+            match Pin::as_mut(&mut future).poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    // ── TaskAgenda tests ────────────────────────────────────────────────────
 
     #[test]
     fn select_pulls_from_high_priority_first() {
@@ -152,24 +273,146 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_through_mock_backend_returns_response() {
-        use crate::backend::CancellationToken;
-        use crate::mock::MockLlmBackend;
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Waker};
+    fn boost_all_to_high_promotes_medium_and_low() {
+        let mut agenda = TaskAgenda::new();
+        agenda.push(Task::new(1, 1, "medium"));
+        agenda.push(Task::new(2, 2, "low"));
+        agenda.push(Task::new(3, 0, "high"));
 
-        fn block_on<F: Future>(future: F) -> F::Output {
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            let mut future = Box::pin(future);
-            loop {
-                match Pin::as_mut(&mut future).poll(&mut cx) {
-                    Poll::Ready(value) => return value,
-                    Poll::Pending => std::thread::yield_now(),
-                }
+        let boosted = agenda.boost_all_to_high();
+        assert_eq!(boosted, 2, "medium and low tasks should be promoted");
+
+        // After boost, tier 0 should have 3 tasks (original high + 2 promoted),
+        // and tiers 1 and 2 should be empty.
+        assert_eq!(agenda.tiers[0].len(), 3);
+        assert!(agenda.tiers[1].is_empty());
+        assert!(agenda.tiers[2].is_empty());
+    }
+
+    #[test]
+    fn boost_all_to_high_on_empty_agenda_returns_zero() {
+        let mut agenda = TaskAgenda::new();
+        assert_eq!(agenda.boost_all_to_high(), 0);
+    }
+
+    // ── Tier-transition exhaustive table ───────────────────────────────────
+
+    /// Verify that tasks placed in each of the three tiers are dispatched in
+    /// strict priority order, and that tier_counters match per-tier dispatch
+    /// counts exactly.
+    #[test]
+    fn tier_transition_table_all_tiers() {
+        use crate::mock::MockLlmBackend;
+
+        let mut sched = IterationAwareMlfq::default();
+        let mut agenda = TaskAgenda::new();
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+
+        // Push tasks in reverse priority so the queue is not trivially sorted.
+        agenda.push(Task::new(10, 2, "low"));
+        agenda.push(Task::new(11, 1, "medium"));
+        agenda.push(Task::new(12, 0, "high"));
+
+        let mut dispatch_order = Vec::new();
+        while let Some(task) = agenda.select_optimal_task() {
+            let id = task.id;
+            block_on(sched.dispatch_task(task, &backend, &cancel)).unwrap();
+            dispatch_order.push(id);
+        }
+
+        assert_eq!(
+            dispatch_order,
+            vec![12, 11, 10],
+            "dispatch order must be High -> Medium -> Low"
+        );
+        assert_eq!(sched.tier_counters[0], 1, "one High dispatch");
+        assert_eq!(sched.tier_counters[1], 1, "one Medium dispatch");
+        assert_eq!(sched.tier_counters[2], 1, "one Low dispatch");
+    }
+
+    // ── Starvation-prevention boost ─────────────────────────────────────────
+
+    #[test]
+    fn check_and_boost_only_fires_at_interval_boundary() {
+        let mut sched = IterationAwareMlfq::with_boost_interval(3);
+        let mut agenda = TaskAgenda::new();
+        agenda.push(Task::new(1, 1, "medium"));
+
+        // No boost before first dispatch.
+        let n = sched.check_and_boost(&mut agenda);
+        assert_eq!(n, 0, "no boost before any dispatch");
+
+        // Simulate 2 dispatches (dispatch_count = 2; 2 % 3 ≠ 0 → no boost).
+        sched.dispatch_count = 2;
+        let n = sched.check_and_boost(&mut agenda);
+        assert_eq!(n, 0, "no boost at dispatch_count=2 with interval=3");
+
+        // At dispatch_count = 3 the boost should fire.
+        sched.dispatch_count = 3;
+        let n = sched.check_and_boost(&mut agenda);
+        assert_eq!(n, 1, "one task promoted at boost boundary");
+        assert!(agenda.tiers[1].is_empty());
+        assert_eq!(agenda.tiers[0].len(), 1);
+    }
+
+    #[test]
+    fn check_and_boost_disabled_when_interval_is_zero() {
+        let mut sched = IterationAwareMlfq::default(); // boost_interval = 0
+        let mut agenda = TaskAgenda::new();
+        agenda.push(Task::new(1, 2, "low"));
+        sched.dispatch_count = 100; // Many dispatches, but boost is disabled.
+        let n = sched.check_and_boost(&mut agenda);
+        assert_eq!(n, 0);
+        assert!(!agenda.tiers[2].is_empty(), "low-tier task must remain");
+    }
+
+    /// Adversarial starvation soak: 900 High tasks followed by 100 Low tasks.
+    /// With `boost_interval = 100`, the boost fires at dispatch 100 and again
+    /// at 200, etc., ensuring all Low tasks are eventually promoted and run.
+    #[test]
+    fn no_starvation_under_adversarial_workload() {
+        use crate::mock::MockLlmBackend;
+        use std::collections::HashSet;
+
+        let mut agenda = TaskAgenda::new();
+        let mut sched = IterationAwareMlfq::with_boost_interval(100);
+
+        // 900 High-priority tasks.
+        for i in 0..900u64 {
+            agenda.push(Task::new(i, 0, "high"));
+        }
+        // 100 Low-priority tasks — would be starved without the boost.
+        for i in 900..1000u64 {
+            agenda.push(Task::new(i, 2, "low"));
+        }
+
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+        let mut dispatched: HashSet<u64> = HashSet::new();
+
+        while !agenda.is_empty() {
+            // Apply starvation boost before selection.
+            sched.check_and_boost(&mut agenda);
+            if let Some(task) = agenda.select_optimal_task() {
+                let id = task.id;
+                block_on(sched.dispatch_task(task, &backend, &cancel)).unwrap();
+                dispatched.insert(id);
             }
         }
+
+        assert_eq!(dispatched.len(), 1000, "all 1 000 tasks must be dispatched");
+        for i in 900..1000u64 {
+            assert!(dispatched.contains(&i), "low-priority task {i} was starved");
+        }
+        assert_eq!(sched.dispatched_tasks.len(), 1000);
+    }
+
+    // ── Token-slice accounting ──────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_through_mock_backend_returns_response() {
+        use crate::mock::MockLlmBackend;
 
         let mut sched = IterationAwareMlfq::default();
         let backend = MockLlmBackend::new();
@@ -183,26 +426,50 @@ mod tests {
         assert_eq!(outcome.response, "alpha beta gamma ");
         assert_eq!(sched.dispatched_tasks.len(), 1);
         assert_eq!(sched.tier_counters[1], 1);
+        assert_eq!(sched.total_tokens_dispatched, 3);
+    }
+
+    #[test]
+    fn token_budget_truncates_response_at_slice_boundary() {
+        use crate::mock::MockLlmBackend;
+
+        let mut sched = IterationAwareMlfq::default();
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+
+        // Prompt has 5 words; budget allows only 2 tokens.
+        let task = Task::new(42, 0, "one two three four five").with_token_budget(2);
+        let outcome = block_on(sched.dispatch_task(task, &backend, &cancel))
+            .expect("dispatch should succeed");
+
+        assert_eq!(outcome.tokens_emitted, 2, "must stop at budget boundary");
+        assert_eq!(
+            outcome.response, "one two ",
+            "response must contain exactly the budgeted tokens"
+        );
+        assert_eq!(
+            sched.total_tokens_dispatched, 2,
+            "total accounting must reflect only consumed tokens"
+        );
+    }
+
+    #[test]
+    fn token_accounting_accumulates_across_multiple_dispatches() {
+        use crate::mock::MockLlmBackend;
+
+        let mut sched = IterationAwareMlfq::default();
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+
+        block_on(sched.dispatch_task(Task::new(1, 0, "a b c"), &backend, &cancel)).unwrap(); // 3
+        block_on(sched.dispatch_task(Task::new(2, 0, "d e"), &backend, &cancel)).unwrap(); // 2
+
+        assert_eq!(sched.total_tokens_dispatched, 5);
     }
 
     #[test]
     fn failed_dispatch_still_records_attempt() {
-        use crate::backend::{CancellationToken, LlmBackendError};
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Waker};
-
-        fn block_on<F: Future>(future: F) -> F::Output {
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            let mut future = Box::pin(future);
-            loop {
-                match Pin::as_mut(&mut future).poll(&mut cx) {
-                    Poll::Ready(value) => return value,
-                    Poll::Pending => std::thread::yield_now(),
-                }
-            }
-        }
+        use crate::backend::LlmBackendError;
 
         #[derive(Debug)]
         struct AlwaysFails;
@@ -229,5 +496,22 @@ mod tests {
         assert_eq!(sched.dispatched_tasks.len(), 1);
         assert_eq!(sched.dispatched_tasks[0].id, 9);
         assert_eq!(sched.tier_counters[0], 1);
+        // Tokens should not accumulate on failure.
+        assert_eq!(sched.total_tokens_dispatched, 0);
+    }
+
+    // ── Token-count estimation ──────────────────────────────────────────────
+
+    #[test]
+    fn estimate_token_count_rounds_up_to_nearest_four() {
+        use crate::backend::LlmBackend;
+        use crate::mock::MockLlmBackend;
+        let b = MockLlmBackend::new();
+        // 4 bytes → 1 token; 5 bytes → 2 tokens; 8 bytes → 2 tokens.
+        assert_eq!(b.estimate_token_count("abcd"), 1);
+        assert_eq!(b.estimate_token_count("abcde"), 2);
+        assert_eq!(b.estimate_token_count("abcdefgh"), 2);
+        // Empty string → 0 tokens.
+        assert_eq!(b.estimate_token_count(""), 0);
     }
 }

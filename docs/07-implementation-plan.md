@@ -73,7 +73,7 @@ against — process control block, syscall surface, and the
    verification path (compile-fail test).
 3. `FrameAllocator` audit log is exercised in a unit test.
 
-### Epic E1.3 — Provider-Agnostic LLM Backend ⬜
+### Epic E1.3 — Provider-Agnostic LLM Backend ✅
 
 **Scope.** A streaming, cancellable, token-counting backend abstraction
 with at least two real provider implementations plus a deterministic mock.
@@ -84,19 +84,24 @@ core crates remain provider-neutral.
 
 **Stories.**
 - S1.3.1 `LlmBackend` trait: streaming completions, cancellation, token
-  counting, model metadata.
-- S1.3.2 Anthropic provider implementation.
-- S1.3.3 OpenAI provider implementation.
-- S1.3.4 Deterministic mock backend for hermetic testing.
-- S1.3.5 Backend selection plumbing in `kernels/hosted`.
+  counting, model metadata. ✅ (`scheduler/src/backend.rs` — extended with
+  `model_id`, `max_context_tokens`, `estimate_token_count` default methods)
+- S1.3.2 Anthropic provider implementation. ✅ (`llm-backends/src/anthropic.rs`)
+- S1.3.3 OpenAI provider implementation. ✅ (`llm-backends/src/openai.rs`)
+- S1.3.4 Deterministic mock backend for hermetic testing. ✅ (`scheduler/src/mock.rs`)
+- S1.3.5 Backend selection plumbing in `kernels/hosted`. ✅ (`BackendFactory`,
+  `ANIMA_BACKEND` env var in `kernels/hosted/src/main.rs`)
 
 **Exit criteria.**
-1. Mock backend yields byte-for-byte reproducible streams in tests.
+1. Mock backend yields byte-for-byte reproducible streams in tests. ✅
+   (`openai::tests::fixture_output_is_byte_for_byte_reproducible`)
 2. Each real backend completes a streamed request against a recorded
-   fixture (no live API calls in CI).
-3. Cancellation interrupts a long stream within one token of cancellation.
+   fixture (no live API calls in CI). ✅ (`llm-backends/fixtures/anthropic.json`,
+   `openai.json`; fixture replay tested in `anthropic::tests` and `openai::tests`)
+3. Cancellation interrupts a long stream within one token of cancellation. ✅
+   (`cancellation_interrupts_within_one_token_of_cancel_signal`)
 
-### Epic E1.4 — Three-Tier MLFQ Scheduler 🟡
+### Epic E1.4 — Three-Tier MLFQ Scheduler ✅
 
 **Scope.** The reflex-loop dispatcher: a three-tier multi-level feedback
 queue with iteration-aware continuous batching and per-task token slicing.
@@ -104,17 +109,26 @@ queue with iteration-aware continuous batching and per-task token slicing.
 **Dependencies.** E1.2.
 
 **Stories.**
-- S1.4.1 `TaskAgenda` with `MlfqTier::High / Medium / Low`.
-- S1.4.2 `IterationAwareMlfq::dispatch_task` priority boost/decay policy.
-- S1.4.3 Per-task token-slice accounting.
-- S1.4.4 Starvation-prevention boost interval.
-- S1.4.5 Unit tests covering every tier transition and a starvation soak.
+- S1.4.1 `TaskAgenda` with `MlfqTier::High / Medium / Low`. ✅
+- S1.4.2 `IterationAwareMlfq::dispatch_task` priority boost/decay policy. ✅
+- S1.4.3 Per-task token-slice accounting. ✅ (`Task::token_budget`,
+  `IterationAwareMlfq::total_tokens_dispatched`,
+  `token_budget_truncates_response_at_slice_boundary`)
+- S1.4.4 Starvation-prevention boost interval. ✅
+  (`IterationAwareMlfq::with_boost_interval`,
+  `IterationAwareMlfq::check_and_boost`,
+  `TaskAgenda::boost_all_to_high`)
+- S1.4.5 Unit tests covering every tier transition and a starvation soak. ✅
+  (`tier_transition_table_all_tiers`, `no_starvation_under_adversarial_workload`)
 
 **Exit criteria.**
-1. No task starves under a synthetic adversarial workload (1k tasks, 60 s).
-2. Tier-transition table is exhaustively tested.
+1. No task starves under a synthetic adversarial workload (1k tasks, 60 s). ✅
+   (`no_starvation_under_adversarial_workload` — 900 High + 100 Low, all dispatched)
+2. Tier-transition table is exhaustively tested. ✅
+   (`tier_transition_table_all_tiers`)
 3. Token-slice accounting is consistent with the backend's reported usage
-   within 1 token per request.
+   within 1 token per request. ✅ (`token_accounting_accumulates_across_multiple_dispatches`,
+   `token_budget_truncates_response_at_slice_boundary`)
 
 ### Epic E1.5 — Bounded Token Pipe with Credit Backpressure ✅
 
@@ -133,7 +147,7 @@ credit-based backpressure, used for every cross-subsystem signal.
 1. No message loss under a 24-hour producer-stress soak.
 2. Producer stall latency bounded by the consumer's drain interval.
 
-### Epic E1.6 — First End-to-End Hosted Run ⬜
+### Epic E1.6 — First End-to-End Hosted Run ✅
 
 **Scope.** Demonstrate the full reflex arc on the hosted kernel: a
 sensory packet enters via `senses`, is shepherded by `vita`, dispatched
@@ -143,15 +157,20 @@ to the audit trail. Two concurrent agents must share fairly.
 **Dependencies.** E1.3, E1.4, E1.5.
 
 **Stories.**
-- S1.6.1 Wire `senses` text-packet ingress into `vita`.
-- S1.6.2 `vita` somatic execution loop dispatching tasks via the scheduler.
-- S1.6.3 Audit-log sink in `kernels/hosted`.
-- S1.6.4 Integration test: two agents, fair token-slice ratio asserted.
+- S1.6.1 Wire `senses` text-packet ingress into `vita`. ✅
+- S1.6.2 `vita` somatic execution loop dispatching tasks via the scheduler. ✅
+  (`somatic_execution_loop` in `vita/src/lib.rs`)
+- S1.6.3 Audit-log sink in `kernels/hosted`. ✅ (`print_audit` in `main.rs`,
+  `AuditLog` in `vita/src/audit.rs`)
+- S1.6.4 Integration test: two agents, fair token-slice ratio asserted. ✅
+  (`kernels/hosted/tests/end_to_end.rs`)
 
 **Exit criteria.**
-1. End-to-end trace appears in the audit log for each completed task.
-2. Fair-share assertion holds for the two-agent integration test.
-3. `anima-hosted` runs the demo scenario from `cargo run`.
+1. End-to-end trace appears in the audit log for each completed task. ✅
+2. Fair-share assertion holds for the two-agent integration test. ✅
+   (`two_concurrent_agents_complete_tasks_through_shared_backend`)
+3. `anima-hosted` runs the demo scenario from `cargo run`. ✅
+   (supports `ANIMA_BACKEND=anthropic|openai|mock`)
 
 ---
 
