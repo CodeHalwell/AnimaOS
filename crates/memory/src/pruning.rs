@@ -120,6 +120,36 @@ impl L1PruningStore {
             floor_enforced,
         }
     }
+
+    /// Runs a pruning pass and returns both the report *and* the evicted nodes.
+    ///
+    /// This is identical to [`run_pruning_pass_with`][Self::run_pruning_pass_with]
+    /// but additionally collects every `(key, node)` pair that was removed so
+    /// callers can demote them to L3 (E2.6).
+    pub fn drain_pruned_with(
+        &mut self,
+        elapsed: f32,
+        floor: f32,
+    ) -> (PruningReport, Vec<(String, MemoryNode)>) {
+        let floor_enforced = floor.max(SEMANTIC_FLOOR);
+        let nodes_before = self.nodes.len();
+        let mut evicted = Vec::new();
+        self.nodes.retain(|key, node| {
+            if node.activation_at(elapsed) > floor_enforced {
+                true
+            } else {
+                evicted.push((key.clone(), node.clone()));
+                false
+            }
+        });
+        let nodes_removed = nodes_before - self.nodes.len();
+        let report = PruningReport {
+            nodes_before,
+            nodes_removed,
+            floor_enforced,
+        };
+        (report, evicted)
+    }
 }
 
 // ── L2 pruning ────────────────────────────────────────────────────────────────

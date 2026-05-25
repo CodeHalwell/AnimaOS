@@ -8,7 +8,11 @@ pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
 
-pub use archival::{ArchivalStore, ArchivalStoreError, ArchivedItem};
+pub use archival::{
+    archive_memory_node, embed_memory_node, retrieve_top_k_from_l3_for_l2, ArchivalEntry,
+    ArchivalStore, ArchivalStoreError, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError,
+    Provenance, SourceTier,
+};
 pub use decay::{EmotionalContext, MemoryNode};
 pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;

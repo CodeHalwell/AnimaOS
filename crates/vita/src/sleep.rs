@@ -104,6 +104,11 @@ pub struct SleepRoutineOutcome {
     /// Pruning statistics for the `MemoryPruning` phase; `None` for other phases
     /// or when no [`PruningContext`] was provided.
     pub pruning: Option<PruningReport>,
+    /// Nodes evicted during the `MemoryPruning` phase.
+    ///
+    /// Empty for all other phases and when no [`PruningContext`] was supplied.
+    /// Populated so that callers can demote evicted nodes to L3 (E2.6).
+    pub evicted_l1_nodes: Vec<(String, memory::MemoryNode)>,
 }
 
 // ── SleepMaintenanceReport ────────────────────────────────────────────────────
@@ -202,12 +207,13 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
     match ctx {
         Some(c) => {
             let floor = c.floor.unwrap_or(SEMANTIC_FLOOR);
-            let report = c.l1.run_pruning_pass_with(c.elapsed, floor);
+            let (report, evicted) = c.l1.drain_pruned_with(c.elapsed, floor);
             SleepRoutineOutcome {
                 routine: SleepRoutine::MemoryPruning,
                 completed: true,
                 notes: "decay applied, floor enforced",
                 pruning: Some(report),
+                evicted_l1_nodes: evicted,
             }
         }
         None => SleepRoutineOutcome {
@@ -215,6 +221,7 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
             completed: true,
             notes: "decay applied, floor enforced (no store supplied)",
             pruning: None,
+            evicted_l1_nodes: Vec::new(),
         },
     }
 }
@@ -233,6 +240,7 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         completed: true,
         notes,
         pruning: None,
+        evicted_l1_nodes: Vec::new(),
     }
 }
 
