@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-//! AnimaOS kernel-core: the privileged trusted computing base.
+//! AnimaOS corpus: the privileged trusted computing base — the body.
 //!
 //! This crate is intentionally small. `unsafe` is permitted but is confined to
 //! audited modules with explicit safety invariants documented at each call site.

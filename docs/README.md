@@ -39,9 +39,9 @@ This directory contains the full design for Anima. Read in order if you are new;
 
 ## Status
 
-Design-stage. No code has been written against this specification yet. The roadmap in `05-roadmap.md` defines the path from this document set to a booting microVM.
+Early implementation. The Cargo workspace, the eight crates named in `01-architecture.md`, and the hosted kernel target are in place; the MLFQ scheduler, bounded token pipe, three-tier memory shells, circuit breaker, capability typestate, stress-index monitor, and sensory bridge primitives are all merged and tested. Phase 1's exit criteria are partially met. See `05-roadmap.md` for the per-milestone state.
 
-The intention is for the documents in this suite to be the authoritative reference during implementation, updated in lockstep with the codebase. Each crate's README should link back to the relevant section here.
+The documents in this suite are the authoritative reference during implementation and are updated in lockstep with the codebase. Anatomical crate names in the documentation map one-to-one to Cargo packages: `corpus`, `vita`, `praxis`, `senses`, and `interoception` use those package names directly, while the `self` crate is published as `anima-self` (imported as `anima_self`) because `self` is a reserved Rust keyword. See the glossary for the full mapping.
 
 ## Provenance
 

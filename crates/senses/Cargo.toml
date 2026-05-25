@@ -1,5 +1,5 @@
 [package]
-name = "security"
+name = "senses"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

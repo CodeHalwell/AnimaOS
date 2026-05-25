@@ -43,8 +43,8 @@ impl MemoryNode {
             initial_activation,
             lambda,
             emotion: EmotionalContext::default(),
-            alpha: 0.1,
-            sigma: 0.1,
+            alpha: 1.5,
+            sigma: 2.0,
         }
     }
 
@@ -79,6 +79,16 @@ mod tests {
         let node = MemoryNode::new(0.9, 10.0);
         // After significant time decay, activation should clamp to SEMANTIC_FLOOR.
         assert!((node.activation_at(100.0) - SEMANTIC_FLOOR).abs() < 1e-6);
+    }
+
+    #[test]
+    fn default_emotional_weights_match_design_constants() {
+        // Pins alpha and sigma to the values documented in
+        // docs/02-subsystems.md §1.3 (S(t) modulator). Surprise is weighted
+        // slightly higher than arousal by design.
+        let node = MemoryNode::new(1.0, 0.0);
+        assert!((node.alpha - 1.5).abs() < f32::EPSILON);
+        assert!((node.sigma - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]

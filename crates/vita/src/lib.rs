@@ -6,10 +6,10 @@ pub mod sleep;
 
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
+use interoception::HomeostaticMonitor;
 use memory::VirtualContextManager;
-use observe::HomeostaticMonitor;
 use scheduler::{IterationAwareMlfq, TaskAgenda};
-use sensory_bridge::{HumanGuidance, SensoryBridge, SensoryBridgeError};
+use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError};
 use std::time::Duration;
 
 /// Lifecycle runtime state.
@@ -45,7 +45,7 @@ impl From<SensoryBridgeError> for LifecycleError {
 #[derive(Debug, Clone)]
 pub struct LifecycleManager {
     /// Human sensory bridge.
-    pub sensory_bridge: SensoryBridge,
+    pub senses: SensoryBridge,
     /// Active working memory.
     pub memory: VirtualContextManager,
     /// Task scheduler.
@@ -66,14 +66,14 @@ pub struct LifecycleManager {
 impl LifecycleManager {
     /// Constructs a new manager in the awake state.
     pub fn new(
-        sensory_bridge: SensoryBridge,
+        senses: SensoryBridge,
         memory: VirtualContextManager,
         config: LifecycleConfig,
         initial_bounds: HumanGuidance,
         max_iterations: Option<u32>,
     ) -> Self {
         Self {
-            sensory_bridge,
+            senses,
             memory,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
@@ -115,7 +115,7 @@ pub async fn somatic_execution_loop(
     monitor: &HomeostaticMonitor,
 ) -> Result<(), LifecycleError> {
     loop {
-        let human_guidance = lifecycle.sensory_bridge.read_active_bounds()?;
+        let human_guidance = lifecycle.senses.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
 
         let active_tokens = lifecycle.memory.get_l1_token_count();
@@ -146,7 +146,7 @@ pub async fn somatic_execution_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use observe::HomeostaticMonitor;
+    use interoception::HomeostaticMonitor;
     use scheduler::Task;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn lifecycle_enters_sleep_when_idle_and_low_stress() {
         let mut manager = LifecycleManager {
-            sensory_bridge: SensoryBridge::new(HumanGuidance {
+            senses: SensoryBridge::new(HumanGuidance {
                 policy_hint: "low-cost".to_string(),
             }),
             memory: VirtualContextManager::new(10),
@@ -200,7 +200,7 @@ mod tests {
         });
 
         let mut manager = LifecycleManager {
-            sensory_bridge: SensoryBridge::new(HumanGuidance {
+            senses: SensoryBridge::new(HumanGuidance {
                 policy_hint: "prioritize-tooling".to_string(),
             }),
             memory: VirtualContextManager::new(400),

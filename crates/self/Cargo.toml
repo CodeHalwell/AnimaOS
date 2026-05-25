@@ -1,0 +1,12 @@
+[package]
+# The conceptual `self` crate. Package name uses the `anima-self` prefix because
+# `self` is a reserved Rust keyword and cannot be imported directly. Code refers
+# to the crate as `anima_self`; docs refer to it conceptually as `self`.
+name = "anima-self"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "anima_self"
+path = "src/lib.rs"
