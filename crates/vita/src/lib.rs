@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
-use memory::VirtualContextManager;
+use memory::{L1PruningStore, VirtualContextManager};
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
+use sleep::PruningContext;
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +53,15 @@ pub struct LifecycleManager {
     pub agent_id: String,
     /// Human sensory bridge.
     pub senses: SensoryBridge,
-    /// Active working memory.
+    /// Active working memory (L1 token-count tracker).
     pub memory: VirtualContextManager,
+    /// L1 episodic memory store — the named-node layer that the pruning phase
+    /// operates on during each sleep cycle (E3.5).
+    pub l1_memory: L1PruningStore,
+    /// Elapsed seconds applied to each sleep-cycle pruning pass.  Defaults to
+    /// `1.0`; callers may adjust this to match the wall-clock cadence of their
+    /// sleep schedules.
+    pub pruning_elapsed: f32,
     /// Task scheduler.
     pub scheduler: IterationAwareMlfq,
     /// Agenda of pending tasks.
@@ -86,6 +94,8 @@ impl std::fmt::Debug for LifecycleManager {
             .field("config", &self.config)
             .field("policy_bounds", &self.policy_bounds)
             .field("agenda_len", &self.agenda.len())
+            .field("l1_memory_nodes", &self.l1_memory.len())
+            .field("pruning_elapsed", &self.pruning_elapsed)
             .field("backend", &self.backend.id())
             .field("audit_len", &self.audit.len())
             .field("iterations", &self.iterations)
@@ -109,6 +119,8 @@ impl LifecycleManager {
             agent_id: agent_id.into(),
             senses,
             memory,
+            l1_memory: L1PruningStore::new(),
+            pruning_elapsed: 1.0,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
             state: LifecycleState::Awake,
@@ -155,6 +167,10 @@ impl LifecycleManager {
     /// entry followed by audited maintenance-phase entries for each of the four
     /// sleep routines (E3.4 exit criterion 1).
     ///
+    /// The `MemoryPruning` phase now runs *real* L1 emotional-decay pruning via
+    /// [`L1PruningStore::run_pruning_pass_with`] using `self.pruning_elapsed`
+    /// as the elapsed time (E3.5).
+    ///
     /// Calling this method when already in the sleep state is a no-op to
     /// prevent duplicate transitions from the somatic loop.
     pub async fn transition_to_sleep_state(&mut self) -> Result<(), LifecycleError> {
@@ -164,8 +180,16 @@ impl LifecycleManager {
                 agent_id: self.agent_id.clone(),
             });
             // Run all four maintenance phases with per-phase audit entries.
+            // Pass the L1 pruning store so the MemoryPruning phase performs
+            // real emotional-decay pruning (E3.5).
             let agent_id = self.agent_id.clone();
-            sleep::run_maintenance_audited(&agent_id, &mut self.audit);
+            let elapsed = self.pruning_elapsed;
+            let ctx = PruningContext {
+                l1: &mut self.l1_memory,
+                elapsed,
+                floor: None,
+            };
+            sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
         }
         Ok(())
     }
@@ -187,9 +211,17 @@ impl LifecycleManager {
     /// Unlike [`transition_to_sleep_state`], this method always runs the cycle
     /// regardless of the current state — useful for on-demand maintenance and
     /// the E3.4 soak test.
+    ///
+    /// The `MemoryPruning` phase runs real L1 emotional-decay pruning (E3.5).
     pub fn run_sleep_cycle(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
-        sleep::run_maintenance_audited(&agent_id, &mut self.audit)
+        let elapsed = self.pruning_elapsed;
+        let ctx = PruningContext {
+            l1: &mut self.l1_memory,
+            elapsed,
+            floor: None,
+        };
+        sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx))
     }
 
     fn should_stop(&self) -> bool {
@@ -348,6 +380,7 @@ mod tests {
     use senses::SensoryPriority;
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
+    // E3.5 test helpers — explicit re-imports from the memory crate.
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::noop();
@@ -650,6 +683,122 @@ mod tests {
         assert_eq!(
             started_count, 400,
             "started count must equal completed count"
+        );
+    }
+
+    // ── E3.5 — Pruning phase wired into LifecycleManager ─────────────────────
+
+    /// E3.5: Inserting nodes into l1_memory and running a sleep cycle prunes
+    /// decayed entries.
+    #[test]
+    fn sleep_cycle_prunes_decayed_l1_nodes() {
+        let mut m = manager("prune-agent", None);
+        // Fast-decaying node — will be below floor at elapsed=1.0.
+        m.l1_memory
+            .insert("fast", memory::MemoryNode::new(0.9, 20.0));
+        // Stable node — never decays below initial activation.
+        m.l1_memory
+            .insert("stable", memory::MemoryNode::new(0.9, 0.0));
+
+        assert_eq!(m.l1_memory.len(), 2, "both nodes before pruning");
+
+        let report = m.run_sleep_cycle();
+        assert!(report.all_completed());
+
+        // MemoryPruning outcome should have a populated PruningReport.
+        let pr = report.outcomes[0]
+            .pruning
+            .as_ref()
+            .expect("MemoryPruning must carry a PruningReport when l1_memory is non-empty");
+
+        assert_eq!(pr.nodes_before, 2);
+        assert_eq!(pr.nodes_removed, 1, "fast-decaying node should be pruned");
+        assert_eq!(m.l1_memory.len(), 1, "one node should remain after pruning");
+        assert!(
+            m.l1_memory.get("stable").is_some(),
+            "stable node must survive"
+        );
+        assert!(
+            m.l1_memory.get("fast").is_none(),
+            "fast-decaying node must be evicted"
+        );
+    }
+
+    /// E3.5 exit criterion 1: pruning bounded by the semantic floor under stress.
+    #[test]
+    fn lifecycle_pruning_bounded_by_floor_under_stress() {
+        let mut m = manager("stress-agent", None);
+        // High-arousal node with slow decay: activation stays well above floor.
+        let mut stressed = memory::MemoryNode::new(0.7, 0.1);
+        stressed.emotion = memory::EmotionalContext {
+            arousal: 5.0,
+            surprise: 1.0,
+        };
+        m.l1_memory.insert("stressed", stressed);
+
+        let report = m.run_sleep_cycle();
+        assert!(report.all_completed());
+
+        let pr = report.outcomes[0].pruning.as_ref().unwrap();
+        assert_eq!(
+            pr.nodes_removed, 0,
+            "stressed node with high activation must not be pruned"
+        );
+        assert_eq!(m.l1_memory.len(), 1, "stressed node survives");
+    }
+
+    /// E3.5 exit criterion 2: no retained node has activation below the floor
+    /// after a sleep cycle with a populated l1_memory.
+    #[test]
+    fn lifecycle_no_retained_node_below_floor_after_sleep_cycle() {
+        use memory::decay::SEMANTIC_FLOOR;
+
+        let mut m = manager("invariant-agent", None);
+        let elapsed = m.pruning_elapsed;
+
+        // Insert 15 nodes with varying decay rates.
+        for i in 0..15u32 {
+            let lambda = i as f32 * 0.5;
+            m.l1_memory
+                .insert(format!("n{i}"), memory::MemoryNode::new(0.85, lambda));
+        }
+
+        m.run_sleep_cycle();
+
+        // Post-cycle: every surviving node is strictly above the semantic floor.
+        for (key, node) in m.l1_memory.iter() {
+            let activation: f32 = node.activation_at(elapsed);
+            assert!(
+                activation > SEMANTIC_FLOOR,
+                "retained node '{key}' has activation {activation:.4} ≤ floor {SEMANTIC_FLOOR:.4}"
+            );
+        }
+    }
+
+    /// E3.5: 100 consecutive sleep cycles with populated l1_memory remain stable.
+    #[test]
+    fn one_hundred_sleep_cycles_with_l1_memory_complete_without_error() {
+        let mut m = manager("soak-prune-agent", None);
+
+        // Seed the store with stable nodes (lambda=0 → never pruned).
+        for i in 0..10u32 {
+            m.l1_memory
+                .insert(format!("stable-{i}"), memory::MemoryNode::new(0.9, 0.0));
+        }
+
+        for cycle in 0..100 {
+            let report = m.run_sleep_cycle();
+            assert!(
+                report.all_completed(),
+                "sleep cycle {cycle} should complete"
+            );
+        }
+
+        // All 10 stable nodes must survive all 100 cycles.
+        assert_eq!(
+            m.l1_memory.len(),
+            10,
+            "stable nodes must persist across all 100 cycles"
         );
     }
 }

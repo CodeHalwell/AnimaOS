@@ -183,6 +183,21 @@ where
         self.capacity
     }
 
+    /// Removes all live entries (T1 and T2) for which `f(key, value)` returns
+    /// `false`.  Ghost lists (B1, B2) are left intact so the ARC adaptation
+    /// parameter `p` retains its history.
+    ///
+    /// Returns the number of entries removed.
+    fn retain<F>(&mut self, mut f: F) -> usize
+    where
+        F: FnMut(&K, &V) -> bool,
+    {
+        let before = self.total_live();
+        self.t1.retain(|(k, v)| f(k, v));
+        self.t2.retain(|(k, v)| f(k, v));
+        before - self.total_live()
+    }
+
     /// Approximate ARC hit rate on a trace for benchmarking.
     fn hit_rate_on_trace(&mut self, trace: &[K]) -> f64
     where
@@ -290,6 +305,19 @@ where
     /// Retrieves a value (without the promotion hint).
     pub fn get(&self, key: &K) -> Option<V> {
         self.get_with_hint(key).map(|(v, _)| v)
+    }
+
+    /// Removes all live entries for which `f(key, value)` returns `false`.
+    ///
+    /// Ghost-list state (B1 / B2) is preserved so the ARC adaptation
+    /// parameter `p` retains its history across the pruning pass.
+    ///
+    /// Returns the number of entries removed.
+    pub fn retain<F>(&self, f: F) -> usize
+    where
+        F: FnMut(&K, &V) -> bool,
+    {
+        self.inner.lock().unwrap().retain(f)
     }
 
     /// Computes the ARC hit rate on `trace`, treating missing values as

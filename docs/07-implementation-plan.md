@@ -414,7 +414,7 @@ stress and agenda state, and sequence the four sleep phases.
    `LifecycleManager::run_sleep_cycle()`; 400 `SleepPhaseCompleted{success:true}`
    entries verified; 400 `SleepPhaseStarted` entries verified)
 
-### Epic E3.5 — Pruning Phase with Emotional Decay ⬜
+### Epic E3.5 — Pruning Phase with Emotional Decay ✅
 
 **Scope.** The pruning phase implements `S(t)` activation decay against
 the semantic floor in both L1 and L2.
@@ -422,13 +422,26 @@ the semantic floor in both L1 and L2.
 **Dependencies.** E2.2, E3.4.
 
 **Stories.**
-- S3.5.1 `MemoryNode::activation_at` decay model.
-- S3.5.2 L1 and L2 pruning routines.
-- S3.5.3 Semantic floor enforcement.
+- S3.5.1 `MemoryNode::activation_at` decay model. ✅ (`memory/src/decay.rs` —
+  already implemented; `activation_at(t)` enforces `SEMANTIC_FLOOR`)
+- S3.5.2 L1 and L2 pruning routines. ✅ (`memory/src/pruning.rs` —
+  `L1PruningStore::run_pruning_pass_with(elapsed, floor)`;
+  `prune_l2_cache(cache, elapsed, floor)` via `ArcCache::retain`;
+  `PruningContext` in `vita/src/sleep.rs` wires the store into
+  `run_maintenance_audited`)
+- S3.5.3 Semantic floor enforcement. ✅ (`effective_floor = floor.max(SEMANTIC_FLOOR)` —
+  callers cannot prune below the semantic floor; `ArcCache::retain` preserves
+  ghost-list state so ARC adaptation is unaffected)
 
 **Exit criteria.**
-1. Pruning bounded by the configured floor under stress injection.
-2. No retained entry has activation below the floor after a pass.
+1. Pruning bounded by the configured floor under stress injection. ✅
+   (`pruning_bounded_by_semantic_floor_under_stress` in `memory::pruning`,
+   `pruning_bounded_by_floor_under_stress_injection` in `vita::sleep`,
+   `lifecycle_pruning_bounded_by_floor_under_stress` in `vita::lib`)
+2. No retained entry has activation below the floor after a pass. ✅
+   (`no_retained_node_has_activation_at_or_below_floor_after_pruning` in `memory::pruning`,
+   `no_retained_node_below_floor_after_sleep_pruning_pass` in `vita::sleep`,
+   `lifecycle_no_retained_node_below_floor_after_sleep_cycle` in `vita::lib`)
 
 ### Epic E3.6 — Replay Validation with Rollback ⬜
 
