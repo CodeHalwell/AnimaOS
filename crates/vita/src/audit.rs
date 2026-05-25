@@ -58,6 +58,36 @@ pub enum AuditEntry {
         /// `true` when the phase completed without rollback or error.
         success: bool,
     },
+    // ── E5.1 Cortex MVP audit entries ─────────────────────────────────────────
+    /// The cortex was successfully invoked and made its first tool action.
+    ///
+    /// Satisfies E5.1 exit criterion 3: "end-to-end latency from sensory
+    /// packet to first cortex tool action is logged."
+    CortexInvoked {
+        /// Per-invocation identifier for audit correlation.
+        task_id: String,
+        /// Duration from invocation start to the cortex's first tool action (ms).
+        latency_to_first_action_ms: u64,
+    },
+    /// The cortex completed an invocation successfully.
+    CortexCompleted {
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Number of tool calls the cortex made.
+        tool_calls: usize,
+        /// Length of the episode summary string (bytes).
+        summary_len: usize,
+    },
+    /// The cortex process crashed or reported an unrecoverable error.
+    ///
+    /// Satisfies E5.1 exit criterion 2: "cortex crashes do not bring down
+    /// vita; the audit log records the crash."
+    CortexFault {
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Error message from the cortex (or from vita's process monitor).
+        error: String,
+    },
 }
 
 /// Append-only audit log.

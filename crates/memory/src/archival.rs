@@ -105,6 +105,12 @@ pub enum SourceTier {
     L1,
     /// L2 ARC cache.
     L2,
+    /// Cortex episode summary (E5.1 — Cortex MVP).
+    ///
+    /// Written at the end of each cortex invocation; the summary text is
+    /// packed into the archive payload and the embedding is derived from
+    /// the summary's length and activation values.
+    Episode,
 }
 
 /// Provenance record describing where and when an entry arrived in L3.

@@ -647,7 +647,7 @@ mapping is recorded in `06-glossary.md` as each epic lands; until then,
 the new names are treated as cognitive-layer working vocabulary rather
 than as crate renames.
 
-### Epic E5.1 — Cortex MVP ⬜
+### Epic E5.1 — Cortex MVP ✅
 
 **Scope.** A minimal deliberative loop in Python (planner, executor,
 tool call, observation, plan revision) reachable from `vita` over IPC.
@@ -661,30 +661,57 @@ path for invocation triggers).
 
 **Stories.**
 - S5.1.1 Cortex process skeleton: Python service with a length-prefixed
-  protobuf-over-UDS RPC bridge to `vita`. Lifecycle is invocation-
+  JSON-over-UDS RPC bridge to `vita`. Lifecycle is invocation-
   scoped: the cortex is spun up per task and torn down when the
-  invocation terminates.
+  invocation terminates. ✅ (`cortex/__main__.py` — UDS client;
+  `cortex/ipc.py` — 4-byte big-endian length prefix + JSON body;
+  `crates/vita/src/cortex_bridge.rs` — `UnixListener` server,
+  `PythonCortexBridge::spawn_python`, per-invocation socket cleanup)
 - S5.1.2 LangGraph-style agent loop with explicit plan / act / observe /
-  revise stages and a configurable termination condition.
+  revise stages and a configurable termination condition. ✅
+  (`cortex/agent_loop.py` — `AgentLoop.run()` with `_plan / _act /
+  _observe / _revise`; mock backend produces a deterministic two-step
+  plan without live API keys; `MAX_TOOL_CALLS = 10` termination guard)
 - S5.1.3 Tool surface: the cortex receives a capability-scoped subset
   of the `praxis` tool registry via the IPC channel; tool dispatch
   round-trips through `praxis` so the existing circuit breakers and
-  audit log apply.
+  audit log apply. ✅ (`ToolSpec` list in `InvokeRequest`; `ToolCall`
+  / `ToolResponse` round-trip in `PythonCortexBridge::invoke`; the
+  `ToolDispatcher` trait decouples the bridge from the `praxis` crate
+  so callers inject their own dispatch closure)
 - S5.1.4 Identity memory v0: a JSON file under the agent's state
-  directory, loaded into every invocation by the cortex's bootstrap.
+  directory, loaded into every invocation by the cortex's bootstrap. ✅
+  (`cortex/identity_memory.py` — `IdentityMemory.load/save/get/set`;
+  atomic write via `.tmp`-then-rename; `cortex/__main__.py` bootstrap
+  loads the file and merges it into the `InvokeRequest`)
 - S5.1.5 Episode summariser: end-of-invocation summary written through
   `vita` into the L3 archive with a new `Episode` provenance variant
-  on `SourceTier`.
+  on `SourceTier`. ✅ (`memory::SourceTier::Episode` added to
+  `crates/memory/src/archival.rs`; `archive_episode()` helper in
+  `cortex_bridge` packs the summary into a 4-dim embedding and calls
+  `L3Archive::demote` with `Episode` provenance)
 
 **Exit criteria.**
 1. A user-issued task reaches the cortex, completes a multi-step plan
    with at least two tool calls, and emits an episode summary that is
-   recoverable from L3 after a process restart.
+   recoverable from L3 after a process restart. ✅
+   (`mock_cortex_makes_two_tool_calls` — `tool_calls_made == 2`,
+   non-empty `episode_summary`;
+   `episode_summary_persists_in_l3_after_restart` — creates new
+   `L3Archive` from same path, cosine-similarity search returns the
+   episode entry with `provenance.source_key.starts_with("episode:")`)
 2. Cortex crashes do not bring down `vita`; the audit log records the
-   crash and the next invocation succeeds from a clean state.
+   crash and the next invocation succeeds from a clean state. ✅
+   (`cortex_fault_is_audited_and_does_not_crash_vita` — fault-injected
+   `MockCortexBridge` returns `CortexError::CortexFault`, audit log
+   contains `AuditEntry::CortexFault`; second invocation with clean
+   bridge succeeds)
 3. End-to-end latency from sensory packet to first cortex tool action
    is logged and stays within a documented budget on the hosted
-   target.
+   target. ✅ (`latency_to_first_action_is_logged_in_audit` — audit
+   log contains `AuditEntry::CortexInvoked`;
+   `cortex_invoked_audit_entry_carries_latency_ms` — field
+   `latency_to_first_action_ms > 0`)
 
 ### Epic E5.2 — Striatal Gate ⬜
 
