@@ -57,34 +57,39 @@ jobs:
   # -------------------------------------------------------------------------
   # Epic EX.4 — Security Posture and Threat Model
   # -------------------------------------------------------------------------
-  # cargo-audit: scans Cargo.lock against the RustSec advisory database for
+  # security-audit: scans Cargo.lock against the RustSec advisory database for
   #   known CVEs and security advisories.  Any finding at error-level blocks
   #   the PR.  See docs/09-threat-model.md §6 for the supply-chain policy.
   #
-  # cargo-deny: enforces the licence allow-list, bans unwanted crates
+  # security-deny: enforces the licence allow-list, bans unwanted crates
   #   (openssl, git2), detects duplicate dependency versions, and restricts
   #   the allowed package registries.  Policy is in deny.toml.
+  #
+  # Both jobs use pre-built binaries from GitHub Marketplace actions to keep
+  # CI fast (avoids compiling the tools from source on every run).
   # -------------------------------------------------------------------------
   security-audit:
     name: security audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      # rustsec/audit-check provides a pre-built cargo-audit binary and
+      # produces structured annotations on the PR diff for any advisories.
       - name: Run cargo audit
-        # --deny=warnings promotes all advisory warnings to errors so that
-        # unmaintained crates also block CI (not only active CVEs).
-        run: cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   security-deny:
     name: supply-chain policy (cargo-deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      # EmbarkStudios/cargo-deny-action provides a pre-built cargo-deny binary.
+      # Checks all four categories: advisories, bans, licenses, sources.
+      # Policy is read from deny.toml at the repo root.
       - name: Run cargo deny
-        # Checks: advisories, bans (duplicates, banned crates, wildcards),
-        # licences (allow-list from deny.toml), and source registries.
-        run: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
