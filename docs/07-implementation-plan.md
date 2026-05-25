@@ -338,6 +338,87 @@ with the embedding pipeline and bidirectional L2↔L3 paths.
 
 ---
 
+### Epic E2.7 — TurboQuant Vector Quantisation ⬜
+
+**Scope.** Production-grade vector quantisation for the L2 warm cache
+and the L3 archive, derived from the TurboQuant algorithm (Zandieh
+et al., ICLR 2026) with Qdrant 1.18's MSE-variant extensions. The
+goals are 6×–32× memory reduction on stored vectors, an unbiased
+dot-product estimator suitable for HNSW symmetric scoring, no
+calibration dataset, and SIMD-accelerated scoring on hot paths. This
+epic establishes the substrate that E5.4 (Learned KV-Cache Controller)
+sits on top of.
+
+**Dependencies.** E2.2 (L2 cache), E2.6 (L3 archive). Lands as a
+cross-cutting storage substrate that both tiers adopt; ordering within
+Stage 2 is "after either E2.2 or E2.6, before Stage 3 closure."
+
+**Stories.**
+- S2.7.1 PolarQuant rotation: fast Hadamard random orthogonal rotation
+  applied to every vector before quantisation. Distributes per-
+  coordinate variance evenly so each coordinate approximates N(0, 1).
+  Rotation is fixed per segment so dot products and L2 distances are
+  preserved without inverting the rotation at scoring time.
+- S2.7.2 Lloyd-Max codebook: fixed lookup table of 2^b levels for the
+  standard normal, supporting bit depths 4, 2, 1.5, and 1. **MSE
+  variant only** — the codebook supports symmetric scoring between two
+  stored vectors as required for HNSW graph construction. The PROD
+  variant is rejected: it requires a float-side query at scoring time
+  and splits the bit budget between codebook and QJL correction.
+- S2.7.3 QJL inner-product bias correction: a Quantised Johnson-
+  Lindenstrauss residual projection that reduces the quantisation
+  residual to a single sign bit per coordinate, producing an unbiased
+  inner-product estimator at negligible extra storage.
+- S2.7.4 Length renormalisation: store one `f32` per vector recording
+  the ratio of the original length to the centroid-reconstruction
+  length, restored at scoring time. Avoids TurboQuant's persistent
+  length bias without paying for a full QJL projection (the Qdrant
+  1.18 fix borrowed from RaBitQ).
+- S2.7.5 Per-coordinate calibration (anisotropy compensation): a
+  one-time pre-pass per L3 segment uses the P-Square streaming
+  quantile algorithm (Jain & Chlamtac, 1985) over a Vitter
+  Algorithm-R reservoir sample to estimate `(shift, scale)` per
+  coordinate. Applied asymmetrically — folded into the query at search
+  time as a single scalar addition — so the hot scoring path is
+  unchanged in shape.
+- S2.7.6 L2 / dot / cosine metric support: store the original L2 norm
+  per vector and reconstruct L2 distance via the identity
+  `‖q − v‖² = ‖q‖² + ‖v‖² − 2·⟨q, v⟩`. L1 is explicitly **not**
+  supported (random orthogonal rotation preserves L2 but not L1).
+- S2.7.7 SIMD scoring kernels: x86_64 AVX-VNNI (`VPDPBUSD`) and ARMv8.2
+  NEON (`SDOT`) implementations for 4-bit and 2-bit; bit-plane scoring
+  via `AND` + `popcount` for 1-bit. Scalar fallback for portable builds
+  and for CI runners without VNNI/SDOT.
+- S2.7.8 Integration paths:
+  - L2 warm cache: `instant-distance` HNSW indices use TurboQuant-
+    quantised payloads on the read path, with rotation and codebook
+    parameters carried in the cache metadata.
+  - L3 archive: `L3Archive` is extended with a `Quantisation` enum
+    (`None`, `TurboQuant { bits }`). Existing archive files migrate
+    on the next sleep cycle (read full-precision, rewrite quantised).
+  - The L3 backing-store decision (custom TurboQuant over the existing
+    `L3Archive` / LanceDB vs. swapping to Qdrant 1.18 which already
+    ships TurboQuant) is recorded as Open Decision **OD6**; this epic
+    does not pre-commit.
+
+**Exit criteria.**
+1. On the documented benchmark set (the existing replay traces plus
+   the public retrieval datasets used in Qdrant's 1.18 release blog),
+   TurboQuant 4-bit reaches within 1–2 pp recall of the full-
+   precision baseline at 8× compression; TurboQuant 2-bit beats a
+   1-bit baseline by ≥ 9 pp recall at the same storage class.
+2. SIMD kernels are exercised in CI on at least one x86_64 and one
+   aarch64 runner; the scalar fallback path produces bit-identical
+   results to the SIMD path on a shared corpus.
+3. L3 retrieval is deterministic under fixed rotation and codebook
+   parameters (extends the E2.6 determinism criterion to the
+   quantised path).
+4. The per-segment calibration pre-pass completes within a documented
+   wall-clock budget at production segment sizes (placeholder:
+   ≤ 5 s for a 100 k-vector segment at d = 1536).
+
+---
+
 ## Stage 3 — Interoception and the Autonomic Sleep Cycle
 
 The interoceptive monitor and the full four-phase sleep cycle. This is
@@ -540,6 +621,356 @@ formats and persist them under `training_corpus/` in L3.
 
 ---
 
+## Stage 5 — Cognitive Layer
+
+The deliberative cortex, the gate-and-router arbitration, the learned
+KV-cache controller, the episodic/identity memory split, the
+interoceptive policy modulation, and the defence layer. This stage
+realises the cognitive-architecture spec in `08-cognitive-architecture.md`
+on top of the somatic substrate completed in Stages 1–3.
+
+**Stage sequencing.** Stage 5 executes *before* Stage 4 in the build
+order. The numeric ordering is preserved as Stage 5 / E5.x so that the
+existing E4.x epic identifiers (already referenced in `05-roadmap.md`,
+commits, PR titles, and audit-log placeholders) remain stable. Stage 4
+— the bare-metal port and production verification — runs once Stage 5
+has produced a working cortex, the learned cache controller has been
+integrated, and the kill-shot demonstrations in E5.8 have been
+recorded. This sequencing reflects the decision that the agent thesis
+is the primary deliverable and the bare-metal isolation is the means
+by which it ships.
+
+The vocabulary in this stage follows the cognitive-architecture spec
+(cortex, Striatal Gate, Thalamic Router, episodic memory, identity
+memory, defence layer). Where these names map to existing crates, the
+mapping is recorded in `06-glossary.md` as each epic lands; until then,
+the new names are treated as cognitive-layer working vocabulary rather
+than as crate renames.
+
+### Epic E5.1 — Cortex MVP ⬜
+
+**Scope.** A minimal deliberative loop in Python (planner, executor,
+tool call, observation, plan revision) reachable from `vita` over IPC.
+One static route, the existing `LlmBackend` provider set as the model
+surface, a small tool subset, identity memory as a flat JSON file, and
+episode summaries committed through the existing L3 archival path.
+
+**Dependencies.** Stage 1 complete (`LlmBackend`, scheduler, audit
+log), E2.6 (L3 archive for episode persistence), E3.3 (sensory packet
+path for invocation triggers).
+
+**Stories.**
+- S5.1.1 Cortex process skeleton: Python service with a length-prefixed
+  protobuf-over-UDS RPC bridge to `vita`. Lifecycle is invocation-
+  scoped: the cortex is spun up per task and torn down when the
+  invocation terminates.
+- S5.1.2 LangGraph-style agent loop with explicit plan / act / observe /
+  revise stages and a configurable termination condition.
+- S5.1.3 Tool surface: the cortex receives a capability-scoped subset
+  of the `praxis` tool registry via the IPC channel; tool dispatch
+  round-trips through `praxis` so the existing circuit breakers and
+  audit log apply.
+- S5.1.4 Identity memory v0: a JSON file under the agent's state
+  directory, loaded into every invocation by the cortex's bootstrap.
+- S5.1.5 Episode summariser: end-of-invocation summary written through
+  `vita` into the L3 archive with a new `Episode` provenance variant
+  on `SourceTier`.
+
+**Exit criteria.**
+1. A user-issued task reaches the cortex, completes a multi-step plan
+   with at least two tool calls, and emits an episode summary that is
+   recoverable from L3 after a process restart.
+2. Cortex crashes do not bring down `vita`; the audit log records the
+   crash and the next invocation succeeds from a clean state.
+3. End-to-end latency from sensory packet to first cortex tool action
+   is logged and stays within a documented budget on the hosted
+   target.
+
+### Epic E5.2 — Striatal Gate ⬜
+
+**Scope.** The arbitration point that decides whether a candidate
+event invokes the cortex, and at what cost class (cheap-local / mid-
+tier / frontier). First implementation is a hand-tuned threshold
+function; inputs are explicit and every decision is audited.
+
+**Dependencies.** E5.1, E3.2 (homeostatic stress index).
+
+**Stories.**
+- S5.2.1 Gate input contract: event features (urgency, novelty,
+  semantic class, user-facing flag), homeostatic signals
+  (`thermal_load`, `compute_pressure`, `memory_pressure`,
+  `power_budget`, `financial_budget`, `attention_demand`), recent
+  cortex history, and current budgets.
+- S5.2.2 Hand-tuned threshold function with documented coefficients
+  and a configuration surface for runtime tuning.
+- S5.2.3 Per-decision audit entry: inputs, threshold values, decision,
+  cost class, reasoning string. Auditable from the same log used by
+  the existing scheduler.
+- S5.2.4 Override mechanism: explicit user-issued or operator-issued
+  invocations bypass the gate, with the bypass recorded.
+- S5.2.5 Hookpoint for a learned gate: the threshold function is
+  exposed behind a trait so a learned model can replace it without
+  changing callers.
+
+**Exit criteria.**
+1. Every cortex invocation is preceded by a gate decision entry in the
+   audit log; no invocation bypasses the gate without an explicit
+   override entry.
+2. Threshold sensitivity to each homeostatic signal is covered by a
+   table-driven unit test, including the case where signals at their
+   neutral values produce baseline behaviour.
+3. A `anima why` CLI command reads the most recent gate decision and
+   prints its inputs and reasoning.
+
+### Epic E5.3 — Thalamic Router ⬜
+
+**Scope.** Route selection: which model, which tools, which memory
+scopes, which prompt scaffolding, and which termination conditions
+apply for a given cortex invocation. Static route table by default,
+with a hookpoint for learned routing in cases where the static mapping
+is insufficient.
+
+**Dependencies.** E5.1, E5.2.
+
+**Stories.**
+- S5.3.1 Route schema: `RouteId`, `ModelSelector`, `ToolScope`,
+  `MemoryScope`, `PromptScaffold`, `TerminationPolicy`.
+- S5.3.2 Static route table keyed on event class and gate cost class.
+  Three baseline routes: `cheap-local`, `mid-tier`, `frontier`.
+- S5.3.3 Router → cortex handshake: route configuration is passed in
+  the cortex invocation RPC; the cortex cannot request tools or memory
+  outside the route scope.
+- S5.3.4 Identity memory is loaded as part of the route's standard
+  context for every invocation (default scope).
+- S5.3.5 Hookpoint for learned routing: the route resolver is a trait
+  with the static table as its default implementation.
+
+**Exit criteria.**
+1. Each baseline route is exercised in an integration test that
+   asserts the cortex sees exactly the configured tool subset and
+   memory scope.
+2. A route misconfiguration (unknown tool reference, missing memory
+   scope) is rejected at startup, not at invocation time.
+
+### Epic E5.4 — Learned KV-Cache Controller (Semantic Gating over TurboQuant) ⬜
+
+**Scope.** A small recurrent or state-space module that observes
+hidden states, attention patterns, role flags, and tool-output markers
+and produces *semantic gating* decisions for KV-cache writing and
+retention at block (page) granularity. The controller sits on top of
+the TurboQuant-quantised cache substrate from E2.7: **TurboQuant
+handles bit-level compression of the values that are retained; the
+controller decides which blocks are worth retaining in the first
+place** (pinning user constraints, preserving error traces, dropping
+superseded intermediate state). Trained offline against a full-cache
+teacher on representative agentic traces, with adversarial needle
+insertions for retrieval safety. The headline comparison is no longer
+controller-vs-LRU at full precision — it is controller+TurboQuant
+versus LRU+TurboQuant at a matched block budget. The TurboQuant-only
+configuration is therefore both the substrate and the baseline this
+epic must beat.
+
+**Dependencies.** E5.1 (cortex traces as training data), E2.1 (block-
+structured context tracking), **E2.7** (TurboQuant substrate for both
+the controller's storage path and its baseline), and a backend whose
+KV-cache can be intercepted (the Anthropic/OpenAI backends do not
+expose this surface, so this work targets a local model first).
+
+**Stories.**
+- S5.4.1 Controller architecture: small SSM or GRU over hidden-state
+  features, role flags, and attention summaries, producing a per-block
+  gate output. Implementation under `llm-backends/` with a Rust shim
+  for invocation from `memory`/`scheduler`.
+- S5.4.2 Trace capture: replay-quality logging of cortex invocations
+  with token-level metadata sufficient to reconstruct a training
+  episode. Captured under an explicit opt-in flag because trace
+  payloads contain conversation content.
+- S5.4.3 Offline training pipeline: teacher = full cache, student =
+  controller-gated cache; loss = KL against teacher + cache budget
+  regularisation + retrieval-safety loss from adversarially inserted
+  needles.
+- S5.4.4 Runtime integration: the cortex's working memory path uses
+  the controller's gate decisions when the route's `MemoryScope` opts
+  in; on any controller fault the path falls back to **LRU eviction
+  over the same TurboQuant substrate**, not to full-precision storage.
+- S5.4.5 Evaluation harness: long-horizon retention benchmarks at a
+  matched block budget against two baselines — (a) LRU eviction over
+  TurboQuant (the substrate-equivalent baseline) and (b) full-precision
+  LRU (the substrate-comparison sanity check). Synthetic needle tasks
+  and recorded cortex traces both included.
+
+**Exit criteria.**
+1. At a matched block budget, controller+TurboQuant beats LRU+TurboQuant
+   by a documented margin on the retrieval-safety benchmark (placeholder:
+   ≥ 10 pp needle recall, ≥ 5 pp downstream task accuracy). The
+   controller is *not* required to also beat full-precision storage —
+   TurboQuant is the substrate, not the comparison point.
+2. Controller fault (NaN, timeout, OOM) reverts to LRU-over-TurboQuant
+   within the next gating decision and is recorded in the audit log.
+   Reverting to full-precision storage on fault is explicitly out of
+   scope: the substrate stays quantised.
+3. Training-data provenance is documented: each training episode is
+   tagged with its source (live cortex trace, synthetic needle, public
+   trace dataset) and aggregate counts are published per release.
+4. The "controller adds value over TurboQuant" claim is supported by an
+   ablation: controller weights frozen at random initialisation must
+   *not* beat LRU+TurboQuant by more than measurement noise. If the
+   ablation fails, the controller's value claim is rejected and the
+   stage ships TurboQuant alone.
+
+### Epic E5.5 — Episodic and Identity Memory ⬜
+
+**Scope.** Two memory tiers above L3 that are cognitive rather than
+substrate-level. Episodic memory records what happened across cortex
+invocations; identity memory holds stable, human-readable facts about
+the user, the machine, and the agent's own configuration.
+
+**Dependencies.** E5.1, E2.6.
+
+**Stories.**
+- S5.5.1 Episodic store schema: invocation id, event class, route id,
+  start/end timestamps, outcome, summary text, embedding for
+  retrieval. Initial implementation reuses the L3 archive with an
+  `Episode` provenance variant; promoted to a dedicated store if
+  cardinality warrants.
+- S5.5.2 Episodic retrieval as a cortex tool, with similarity search
+  and recency filtering.
+- S5.5.3 Identity memory file format: human-readable (YAML or JSON),
+  with a schema covering user preferences, recurring tasks, observed
+  patterns, system policies, and agent self-model fields. File lives
+  under the agent's state directory and is version-controlled in-
+  place.
+- S5.5.4 Identity-memory revision API: an `anima identity` CLI
+  subcommand to inspect and edit identity facts, with edits audited.
+- S5.5.5 Router integration: identity memory is loaded as standard
+  context (see S5.3.4); episodic retrieval is exposed only on routes
+  whose `MemoryScope` includes it.
+
+**Exit criteria.**
+1. A user can run `anima identity show` and `anima identity set <key>
+   <value>` to inspect and edit identity memory; edits round-trip
+   through the audit log.
+2. Episodic retrieval returns the correct episode for a recorded
+   benchmark of (query → expected-episode-id) pairs.
+3. Identity facts loaded at invocation time are visible in the
+   cortex's prompt assembly as a distinct section, not concatenated
+   with task context.
+
+### Epic E5.6 — Defence Layer (Immune Analogue) ⬜
+
+**Scope.** The defence component that screens cortex outputs and motor
+actions for prompt injection, internal incoherence, goal drift, reward
+hacking, and unsafe motor operations. Veto power, with vetoes audited
+and repeated vetoes escalating to user attention.
+
+**Dependencies.** E5.1, E5.3 (route-scoped tool access), the existing
+`anima-self` capability machinery.
+
+**Stories.**
+- S5.6.1 Prompt-injection detector for tool outputs and externally-
+  sourced text: heuristic plus a learned classifier (initial model
+  trained on a public injection corpus).
+- S5.6.2 Goal-drift monitor: compares current cortex actions against
+  the original objective embedding; flags divergence above a
+  threshold.
+- S5.6.3 Reward-hacking detector: cortex outputs that mark work
+  complete without observable evidence (tool calls, file changes,
+  network actions) are flagged.
+- S5.6.4 Unsafe motor action gate: filesystem operations on critical
+  paths (`/etc`, `/boot`, the agent's own state directory), network
+  calls to blocklisted hosts, and self-modification attempts are
+  reviewed against `anima-self` capability scope.
+- S5.6.5 Veto mechanics: vetoed actions are blocked, the cortex is
+  notified with a structured reason, and the veto is logged at a
+  higher severity than routine audit entries. Repeated vetoes (≥ N in
+  M minutes) raise an attention-demand event for the user.
+
+**Exit criteria.**
+1. A red-team corpus of prompt-injection samples is blocked with a
+   recorded false-positive rate; the corpus and rate are published per
+   release.
+2. Goal-drift and reward-hacking detectors each trigger at least once
+   in a recorded stress run with a deliberately misbehaving cortex
+   fixture.
+3. Every veto entry in the audit log carries the source detector, the
+   action that was blocked, and the cortex's stated intent.
+
+### Epic E5.7 — Interoceptive Modulation ⬜
+
+**Scope.** Wire the homeostatic signals into the gate, the router,
+and the cache controller so that body state continuously modulates
+cognitive behaviour. Demonstrate the modulations described in
+`08-cognitive-architecture.md` Section 8 with measurable behavioural
+change under induced stress.
+
+**Dependencies.** E5.2, E5.3, E5.4, E3.2.
+
+**Stories.**
+- S5.7.1 Signal contract: extend `interoception` to publish a stable
+  set of scalar signals (`thermal_load`, `compute_pressure`,
+  `memory_pressure`, `power_budget`, `financial_budget`,
+  `attention_demand`) on the audit/telemetry stream at 1 Hz.
+- S5.7.2 Financial budget sensor: track API spend per provider
+  against configurable daily/monthly budgets; emit `financial_budget`
+  as a normalised scalar.
+- S5.7.3 Power and attention sensors: read battery / AC state from the
+  host and idle / foreground signals from the windowing system on the
+  hosted target; both are gated by explicit opt-in.
+- S5.7.4 Gate modulation: thresholds rise under thermal stress, drop
+  under high attention demand, and require higher value estimates
+  under financial pressure.
+- S5.7.5 Router modulation: route selection shifts toward cheaper
+  models under power and financial pressure; planning horizon
+  shortens under low battery.
+- S5.7.6 Cache-controller modulation: the controller's state
+  incorporates a memory-pressure signal so eviction becomes more
+  aggressive under pressure.
+
+**Exit criteria.**
+1. A reproducible stress harness drives each signal across its full
+   range and the resulting gate / router / controller behaviour is
+   logged and asserted against a behavioural specification.
+2. The `anima why` CLI command from E5.2 includes the homeostatic
+   signal values at the time of the decision.
+
+### Epic E5.8 — Kill-Shot Demonstrations ⬜
+
+**Scope.** The two demonstrations that anchor the cognitive thesis:
+graceful-degradation-under-thermal-stress (headline) and long-horizon
+coding-session retention (technical credibility builder). Both are
+runnable on the hosted target and produce reproducible artefacts
+(logs, transcripts, audit trails) that can be referenced in the
+project's writeup.
+
+**Dependencies.** E5.4 (long-horizon retention demo), E5.7 (graceful-
+degradation demo).
+
+**Stories.**
+- S5.8.1 Demo A (headline): the same task is run on the hosted target
+  once with `thermal_load` clamped low and once with an external
+  compute load driving `thermal_load` high. Both runs complete; the
+  high-thermal run uses cheaper routes, shorter context, and more
+  reflexive policies; the comparison is rendered as a side-by-side
+  transcript with audit-log highlights.
+- S5.8.2 Demo B (technical credibility): a four-hour coding session
+  is replayed against the cortex with and without the learned cache
+  controller; retention of the user's original constraint, the error
+  traces, and the architectural decisions is measured and reported.
+- S5.8.3 Demo runner: a `cargo xtask demo --kind {graceful,retention}`
+  command that drives the demo end-to-end and writes its artefact
+  bundle under `artifacts/demos/<date>-<kind>/`.
+
+**Exit criteria.**
+1. Both demos produce reproducible artefacts on the hosted target
+   from a clean checkout, with no live API calls (recorded fixtures
+   only).
+2. The graceful-degradation demo's behavioural delta is statistically
+   significant against a paired baseline (n ≥ 8 runs per condition).
+3. The retention demo reports a measurable advantage for the
+   controller-gated cortex on the documented benchmark set.
+
+---
+
 ## Stage 4 — Bare-Metal Isolation and Production Verification
 
 Port to the microVM target, integrate `smoltcp` and `rustls`, complete
@@ -631,6 +1062,64 @@ suite, and a continuous 30-day soak run.
 
 ---
 
+## Open Decisions
+
+The following decisions are not yet resolved and gate the affected Stage
+5 epics. They mirror Section 13 of `08-cognitive-architecture.md` and
+must be closed (or the affected epic descoped) before that epic is
+admitted into a sprint.
+
+**OD1 — Distribution model.** Is AnimaOS a daemon that runs on existing
+OSes (Linux, macOS, Windows), a Linux distribution with the cognitive
+layer pre-integrated, or both? The microVM target in Stage 4 assumes
+the distribution path; the cortex MVP in E5.1 is currently scoped
+against the hosted target. The default working assumption is
+hosted-daemon for E5.x, microVM for the production target, with the
+distribution path explicitly out of scope until both stages close.
+
+**OD2 — Local-first vs. API-first default routing.** The Thalamic
+Router in E5.3 needs a default policy. Current working assumption:
+local-first with explicit user opt-in for API escalation. This needs to
+be validated against real workloads before E5.3 closes.
+
+**OD3 — Cache controller training data.** E5.4 depends on representative
+agentic traces. Phase 2 (= E5.1 + adjacent) will not produce enough
+data on its own. Candidate sources — synthetic generation, public
+agent trace datasets, human-in-the-loop curation — must be selected
+before E5.4 enters implementation. This is the largest technical risk
+in Stage 5.
+
+**OD4 — User-facing surface.** The form of cortex ↔ user communication
+(desktop notifications, dedicated UI, CLI, chat-style interface) is
+unspecified. The decision affects E5.1's exit criteria and E5.6's
+attention-escalation behaviour.
+
+**OD5 — Privacy and trust model.** Identity memory (E5.5), the
+sensorium opt-ins (E5.7), and the cortex's network surface (E5.6) all
+intersect a single privacy story that has not yet been written. Default
+posture is conservative — explicit opt-in for sensitive sensorium
+streams, explicit opt-in for API model use, all identity memory
+inspectable and editable — but the specification must exist before any
+non-developer use.
+
+**OD6 — L3 backing store for TurboQuant.** Epic E2.7 introduces
+TurboQuant quantisation over the L3 archive. Two implementation
+paths are credible: (a) keep the current `L3Archive` (and the
+LanceDB direction named in `01-architecture.md §3.4`) and add a
+custom TurboQuant layer in Rust against the existing API, or (b)
+swap the L3 backing store to Qdrant 1.18 which ships TurboQuant
+natively and provides the SIMD scoring kernels for free. Path (a)
+preserves the no-host-OS / unikernel posture and the existing
+provenance schema but requires writing the SIMD kernels ourselves.
+Path (b) trades a heavier dependency (and the bare-metal port
+question for Qdrant) for production-grade TurboQuant on day one.
+The decision affects E2.7, the technical-stack section of
+`01-architecture.md`, and the Stage 4 microVM port. Default
+working assumption: path (a) on the hosted target, with path (b)
+re-evaluated if Qdrant ships a `no_std` or unikernel-friendly mode.
+
+---
+
 ## Cross-Cutting Epics
 
 These epics run continuously across stages rather than belonging to a
@@ -667,9 +1156,20 @@ CI, and produce a security review at the end of each stage.
   is closed.
 - Stage-2 memory epics (E2.1, E2.2, E2.6) and praxis epics (E2.3, E2.4,
   E2.5) form two parallel tracks that converge at the end of the stage.
+  E2.7 (TurboQuant) sits across both memory tiers and may begin once
+  E2.2 and E2.6 are merged; it does not need to wait for E2.5.
 - Stage-3 sleep epics are strictly sequential after E3.4.
-- Stage-4 epics are strictly sequential up to E4.5; E4.6 may begin on
-  stable crates during Stage 2.
+- Stage 5 — E5.1 is gating for the rest of the stage; once it lands,
+  E5.2/E5.3 (gate + router) and E5.5 (memory split) can proceed in
+  parallel. E5.4 has the largest research risk and may not close on
+  the same timeline as the rest of Stage 5 — it should not gate stage
+  closure unless explicitly promoted. E5.6 hardens incrementally
+  throughout. E5.7 depends on E5.2/E5.3/E5.4 and converges them into
+  E5.8.
+- Stage 4 is gated on Stage 5 closure (per the Stage Sequencing note
+  at the top of Stage 5). Within Stage 4 the epics are strictly
+  sequential up to E4.5; E4.6 may begin on stable crates during
+  Stage 2.
 - All cross-cutting epics run in parallel with every stage.
 
 ## What Counts as Stage Closure
