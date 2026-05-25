@@ -8,7 +8,7 @@ pub mod sleep;
 pub use audit::{AuditEntry, AuditLog};
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
@@ -68,6 +68,11 @@ pub struct LifecycleManager {
     pub backend: Arc<dyn LlmBackend>,
     /// Per-agent audit log.
     pub audit: AuditLog,
+    /// Cancellation handle for the dispatch currently in flight. A fresh
+    /// [`CancellationToken`] is installed before every dispatch; external
+    /// callers (signal handlers, stress monitors, timeouts) can trip the
+    /// running task via [`LifecycleManager::cancel_current_task`].
+    task_cancel: Arc<Mutex<CancellationToken>>,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
@@ -111,9 +116,34 @@ impl LifecycleManager {
             config,
             backend,
             audit: AuditLog::new(),
+            task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             max_iterations,
             iterations: 0,
         }
+    }
+
+    /// Returns a clone of the cancellation handle for the dispatch currently
+    /// in flight (or the most recently installed one between dispatches).
+    /// Clones share state with the live token, so tripping the clone cancels
+    /// the running backend stream.
+    pub fn current_cancel_handle(&self) -> CancellationToken {
+        self.task_cancel.lock().expect("poisoned").clone()
+    }
+
+    /// Trips the cancellation token for the dispatch currently in flight.
+    /// Safe to call from any thread that holds a reference to the manager.
+    pub fn cancel_current_task(&self) {
+        self.task_cancel.lock().expect("poisoned").cancel();
+    }
+
+    /// Installs a fresh [`CancellationToken`] and returns a clone bound to it.
+    /// Called by [`somatic_execution_loop`] immediately before each dispatch
+    /// so previous cancellation requests do not affect the next task.
+    fn install_fresh_cancel(&self) -> CancellationToken {
+        let fresh = CancellationToken::new();
+        let handle = fresh.clone();
+        *self.task_cancel.lock().expect("poisoned") = fresh;
+        handle
     }
 
     /// Applies new human policy bounds.
@@ -182,7 +212,7 @@ pub async fn somatic_execution_loop(
                 prompt,
             });
 
-            let cancel = CancellationToken::new();
+            let cancel = lifecycle.install_fresh_cancel();
             let backend = Arc::clone(&lifecycle.backend);
             let dispatch_result = lifecycle
                 .scheduler
@@ -308,5 +338,30 @@ mod tests {
             .expect("expected TaskCompleted entry");
         assert_eq!(completed.0, 3);
         assert_eq!(completed.1, "hello mock backend ");
+    }
+
+    #[test]
+    fn cancel_current_task_trips_handle_observed_externally() {
+        let m = manager("agent-c", None);
+
+        // A handle obtained before installation must remain tied to the
+        // token currently stored on the manager.
+        let pre = m.current_cancel_handle();
+        assert!(!pre.is_cancelled());
+
+        // install_fresh_cancel must replace the stored token and return a
+        // clone that shares state with future current_cancel_handle reads.
+        let installed = m.install_fresh_cancel();
+        let observed = m.current_cancel_handle();
+        assert!(!installed.is_cancelled());
+        assert!(!observed.is_cancelled());
+
+        // Tripping via the public API must propagate to both the freshly
+        // installed handle and any later reads.
+        m.cancel_current_task();
+        assert!(installed.is_cancelled());
+        assert!(observed.is_cancelled());
+        // The pre-install handle is now detached and stays untripped.
+        assert!(!pre.is_cancelled());
     }
 }
