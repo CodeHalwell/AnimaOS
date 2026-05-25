@@ -53,6 +53,8 @@ version = "0.1.0"
 dependencies = [
  "scc",
  "scheduler",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

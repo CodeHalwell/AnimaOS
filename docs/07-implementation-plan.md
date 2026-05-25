@@ -298,7 +298,7 @@ WASI tool that exercises the full sandbox surface.
 2. Wasmtime startup cost amortised across the process lifetime
    (one-time init).
 
-### Epic E2.6 — LanceDB L3 Archive ⬜
+### Epic E2.6 — LanceDB L3 Archive ✅
 
 **Scope.** An embedded LanceDB instance under `/dev/anima/memory/l3`,
 with the embedding pipeline and bidirectional L2↔L3 paths.
@@ -306,14 +306,35 @@ with the embedding pipeline and bidirectional L2↔L3 paths.
 **Dependencies.** E2.2.
 
 **Stories.**
-- S2.6.1 LanceDB embed and lifecycle management.
-- S2.6.2 Embedding pipeline for memory entries.
-- S2.6.3 L2 → L3 demotion path with provenance.
-- S2.6.4 L3 → L2 retrieval via similarity scoring.
+- S2.6.1 LanceDB embed and lifecycle management. ✅ (`memory/src/archival.rs` —
+  `L3Archive` with file-backed JSON persistence; `open(path, dim, cap)` loads
+  an existing snapshot or creates fresh; `demote()` flushes atomically via
+  write-to-`.tmp`-then-rename on every insert; `LifecycleManager::l3_archive`
+  field added to `vita/src/lib.rs`)
+- S2.6.2 Embedding pipeline for memory entries. ✅ (`embed_memory_node(node)`
+  — 4-dim feature vector `[initial_activation, λ, α·arousal, σ·surprise]`;
+  `archive_memory_node(id, key, node)` packages a `MemoryNode` as `ArchivedItem`
+  with LE-bytes payload; both exported from `memory::archival`)
+- S2.6.3 L2 → L3 demotion path with provenance. ✅ (`SourceTier`, `Provenance`,
+  `ArchivalEntry`; `L3Archive::demote(item, provenance)` is idempotent by item ID;
+  `L1PruningStore::drain_pruned_with(elapsed, floor)` returns evicted nodes;
+  `SleepRoutineOutcome::evicted_l1_nodes` carries them out of `run_pruning_phase`;
+  `LifecycleManager::run_sleep_cycle` and `transition_to_sleep_state` both
+  demote evicted L1 nodes to `l3_archive` when present)
+- S2.6.4 L3 → L2 retrieval via similarity scoring. ✅ (`L3Archive::search(query, k)`
+  — cosine similarity ordered by (desc score, asc id) for deterministic output;
+  `retrieve_top_k_from_l3_for_l2(l3, query, k, l2_cache)` — top-k search and
+  re-admission into `ArcCache<String, MemoryNode>` in one call)
 
 **Exit criteria.**
-1. L3 survives a process restart with consistent retrieval.
-2. Demotion is idempotent; retrieval is deterministic for fixed seeds.
+1. L3 survives a process restart with consistent retrieval. ✅
+   (`l3_archive_survives_process_restart_with_consistent_retrieval` in
+   `memory::archival`; `l3_archive_survives_sleep_cycle_restart` in `vita::lib`)
+2. Demotion is idempotent; retrieval is deterministic for fixed seeds. ✅
+   (`demotion_is_idempotent` — second call for same ID returns `AlreadyPresent`
+   without modifying the archive; `search_results_are_deterministic_for_identical_query`
+   — tied items broken by ascending ID; `sleep_cycle_demotion_is_idempotent` in
+   `vita::lib`)
 
 ---
 

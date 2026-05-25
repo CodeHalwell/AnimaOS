@@ -62,6 +62,13 @@ pub struct LifecycleManager {
     /// `1.0`; callers may adjust this to match the wall-clock cadence of their
     /// sleep schedules.
     pub pruning_elapsed: f32,
+    /// L3 cerebral archive for memory consolidation across sleep cycles (E2.6).
+    ///
+    /// `None` when running without persistent storage (e.g. in tests that do not
+    /// require L3 persistence).
+    pub l3_archive: Option<memory::L3Archive>,
+    /// Monotonically increasing ID counter for L3 archive entries.
+    pub next_archive_id: u64,
     /// Task scheduler.
     pub scheduler: IterationAwareMlfq,
     /// Agenda of pending tasks.
@@ -121,6 +128,8 @@ impl LifecycleManager {
             memory,
             l1_memory: L1PruningStore::new(),
             pruning_elapsed: 1.0,
+            l3_archive: None,
+            next_archive_id: 0,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
             state: LifecycleState::Awake,
@@ -189,7 +198,20 @@ impl LifecycleManager {
                 elapsed,
                 floor: None,
             };
-            sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
+            let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
+
+            // E2.6: Demote evicted L1 nodes to L3 archive if present.
+            if let Some(l3) = self.l3_archive.as_mut() {
+                if let Some(outcome) = report.outcomes.first() {
+                    for (key, node) in &outcome.evicted_l1_nodes {
+                        let id = self.next_archive_id;
+                        self.next_archive_id += 1;
+                        let item = memory::archive_memory_node(id, key, node);
+                        let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
+                        let _ = l3.demote(item, prov);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -213,6 +235,7 @@ impl LifecycleManager {
     /// the E3.4 soak test.
     ///
     /// The `MemoryPruning` phase runs real L1 emotional-decay pruning (E3.5).
+    /// Evicted L1 nodes are demoted to the L3 archive when one is configured (E2.6).
     pub fn run_sleep_cycle(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
         let elapsed = self.pruning_elapsed;
@@ -221,7 +244,22 @@ impl LifecycleManager {
             elapsed,
             floor: None,
         };
-        sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx))
+        let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
+
+        // E2.6: Demote evicted L1 nodes to L3 archive if present.
+        if let Some(l3) = self.l3_archive.as_mut() {
+            if let Some(outcome) = report.outcomes.first() {
+                for (key, node) in &outcome.evicted_l1_nodes {
+                    let id = self.next_archive_id;
+                    self.next_archive_id += 1;
+                    let item = memory::archive_memory_node(id, key, node);
+                    let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
+                    let _ = l3.demote(item, prov);
+                }
+            }
+        }
+
+        report
     }
 
     fn should_stop(&self) -> bool {
@@ -800,5 +838,97 @@ mod tests {
             10,
             "stable nodes must persist across all 100 cycles"
         );
+    }
+
+    // ── E2.6 — L3 archive demotion from sleep cycle ───────────────────────────
+
+    /// E2.6 exit criterion 2a: demotion is idempotent; fast-decaying L1 nodes
+    /// end up in L3 after a sleep cycle.
+    #[test]
+    fn sleep_cycle_demotes_pruned_l1_nodes_to_l3() {
+        let path = std::env::temp_dir().join("animaos_test_e26_sleep_demote.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("l3-demote-agent", None);
+        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+
+        // Add a fast-decaying node that will be pruned at elapsed=1.0.
+        m.l1_memory
+            .insert("fast-decay", memory::MemoryNode::new(0.9, 20.0));
+        // Stable node — stays in L1, not demoted.
+        m.l1_memory
+            .insert("stable", memory::MemoryNode::new(0.9, 0.0));
+
+        m.run_sleep_cycle();
+
+        // The fast-decay node should have been demoted to L3.
+        let l3 = m.l3_archive.as_ref().unwrap();
+        assert_eq!(l3.len(), 1, "one pruned node should be in L3");
+
+        // Stable node remains in L1.
+        assert_eq!(m.l1_memory.len(), 1);
+        assert!(m.l1_memory.get("stable").is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E2.6 exit criterion 2b: demotion is idempotent — running a second sleep
+    /// cycle on the same store does not re-insert the already-present entry.
+    #[test]
+    fn sleep_cycle_demotion_is_idempotent() {
+        let path = std::env::temp_dir().join("animaos_test_e26_idempotent.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("l3-idem-agent", None);
+        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+
+        m.l1_memory
+            .insert("fast", memory::MemoryNode::new(0.9, 20.0));
+        m.run_sleep_cycle();
+        assert_eq!(m.l3_archive.as_ref().unwrap().len(), 1);
+
+        // A second cycle with an empty L1 should not change L3 length.
+        m.run_sleep_cycle();
+        assert_eq!(
+            m.l3_archive.as_ref().unwrap().len(),
+            1,
+            "second cycle must not duplicate the already-archived entry"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E2.6 exit criterion 1: L3 archive survives a simulated process restart.
+    #[test]
+    fn l3_archive_survives_sleep_cycle_restart() {
+        let path = std::env::temp_dir().join("animaos_test_e26_restart.json");
+        let _ = std::fs::remove_file(&path);
+
+        // First "process": sleep cycle with fast-decaying node.
+        {
+            let mut m = manager("restart-agent", None);
+            m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+            m.l1_memory
+                .insert("fast", memory::MemoryNode::new(0.9, 20.0));
+            m.run_sleep_cycle();
+            assert_eq!(
+                m.l3_archive.as_ref().unwrap().len(),
+                1,
+                "one node should be in L3 before restart"
+            );
+            // m drops here, simulating process exit.
+        }
+
+        // Second "process": reopen archive from disk.
+        {
+            let l3 = memory::L3Archive::open(&path, 4, 100).unwrap();
+            assert_eq!(l3.len(), 1, "L3 must survive process restart");
+            // Search should return the demoted node.
+            let query = memory::embed_memory_node(&memory::MemoryNode::new(0.9, 20.0));
+            let results = l3.search(&query, 1);
+            assert_eq!(results.len(), 1, "retrieval after restart must work");
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }
