@@ -32,14 +32,10 @@ fn build_agent(
 ) -> LifecycleManager {
     let mut manager = LifecycleManager::new(
         id,
-        SensoryBridge::new(HumanGuidance {
-            policy_hint: format!("policy-for-{id}"),
-        }),
+        SensoryBridge::new(HumanGuidance::new(format!("policy-for-{id}"))),
         VirtualContextManager::with_capacity(0, 4096),
         LifecycleConfig { max_context: 4096 },
-        HumanGuidance {
-            policy_hint: "boot".to_string(),
-        },
+        HumanGuidance::new("boot"),
         backend,
         Some(max_iterations),
     );

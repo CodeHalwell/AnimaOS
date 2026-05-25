@@ -3,6 +3,12 @@
 //! The audit log is the end-of-pipeline observability surface called out in the
 //! Phase 1 roadmap exit criteria: every task that traverses senses → vita →
 //! scheduler → backend must leave a trace here.
+//!
+//! # E3.4 additions
+//!
+//! Sleep-maintenance phase entries ([`AuditEntry::SleepPhaseStarted`] and
+//! [`AuditEntry::SleepPhaseCompleted`]) were added to support audited end-to-end
+//! tracing of each sleep cycle (exit criterion 1 of E3.4).
 
 /// A single observable lifecycle event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +37,27 @@ pub enum AuditEntry {
     SleepEntered { agent_id: String },
     /// Lifecycle transitioned (back) into the waking state.
     WakeEntered { agent_id: String },
+    /// A sleep-maintenance phase was started.
+    ///
+    /// Always followed by a matching [`AuditEntry::SleepPhaseCompleted`] for
+    /// the same `(agent_id, phase)` pair.
+    SleepPhaseStarted {
+        /// Agent that owns the sleep cycle.
+        agent_id: String,
+        /// Human-readable phase name (e.g. `"MemoryPruning"`).
+        phase: String,
+    },
+    /// A sleep-maintenance phase finished.
+    ///
+    /// Paired with a preceding [`AuditEntry::SleepPhaseStarted`].
+    SleepPhaseCompleted {
+        /// Agent that owns the sleep cycle.
+        agent_id: String,
+        /// Phase name matching the corresponding `SleepPhaseStarted` entry.
+        phase: String,
+        /// `true` when the phase completed without rollback or error.
+        success: bool,
+    },
 }
 
 /// Append-only audit log.
