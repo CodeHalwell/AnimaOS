@@ -272,6 +272,14 @@ impl L3Archive {
         self.index.contains_key(&id)
     }
 
+    /// Returns all archive entries sorted by ascending item ID for deterministic
+    /// iteration order.
+    pub fn entries(&self) -> Vec<&ArchivalEntry> {
+        let mut entries: Vec<&ArchivalEntry> = self.index.values().collect();
+        entries.sort_by_key(|e| e.item.id);
+        entries
+    }
+
     /// Demotes `item` with `provenance` into the archive.
     ///
     /// Returns [`DemotionOutcome::AlreadyPresent`] without modifying the archive

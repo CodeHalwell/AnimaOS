@@ -33,7 +33,7 @@
 //! field that callers can inspect to observe the pruning statistics.
 
 use memory::decay::SEMANTIC_FLOOR;
-use memory::{L1PruningStore, PruningReport};
+use memory::{L1PruningStore, L3Archive, PruningReport, ReplayConfig, ReplayReport};
 
 use crate::audit::{AuditEntry, AuditLog};
 
@@ -87,6 +87,24 @@ pub struct PruningContext<'a> {
     pub floor: Option<f32>,
 }
 
+// ── ReplayContext ─────────────────────────────────────────────────────────────
+
+/// Context passed to the `GenerativeReplay` sleep phase (E3.6).
+///
+/// When supplied to [`run_maintenance_audited`] the phase will call
+/// [`memory::run_replay_validation`] against `l3` using `config`, then
+/// populate the [`SleepRoutineOutcome::replay`] field and return any
+/// rollback nodes in [`SleepRoutineOutcome::replay_rollback_nodes`].
+///
+/// The L3 archive is borrowed immutably — rollback re-insertion is performed
+/// by the caller after the maintenance pass completes.
+pub struct ReplayContext<'a> {
+    /// L3 archive to validate against.
+    pub l3: &'a L3Archive,
+    /// Replay configuration (threshold, sample size, rollback flag).
+    pub config: ReplayConfig,
+}
+
 // ── SleepRoutineOutcome ───────────────────────────────────────────────────────
 
 /// Outcome of a single sleep routine run.
@@ -109,6 +127,12 @@ pub struct SleepRoutineOutcome {
     /// Empty for all other phases and when no [`PruningContext`] was supplied.
     /// Populated so that callers can demote evicted nodes to L3 (E2.6).
     pub evicted_l1_nodes: Vec<(String, memory::MemoryNode)>,
+    /// Replay statistics for the `GenerativeReplay` phase; `None` for other
+    /// phases or when no [`ReplayContext`] was provided.
+    pub replay: Option<ReplayReport>,
+    /// Nodes that failed the replay check and should be re-inserted into L1
+    /// (rollback).  Empty when rollback was not triggered or was disabled.
+    pub replay_rollback_nodes: Vec<(String, memory::MemoryNode)>,
 }
 
 // ── SleepMaintenanceReport ────────────────────────────────────────────────────
@@ -155,6 +179,7 @@ pub fn run_maintenance_audited(
     agent_id: &str,
     audit: &mut AuditLog,
     mut pruning_ctx: Option<PruningContext<'_>>,
+    mut replay_ctx: Option<ReplayContext<'_>>,
 ) -> SleepMaintenanceReport {
     let mut outcomes = Vec::with_capacity(PHASES.len());
 
@@ -169,6 +194,8 @@ pub fn run_maintenance_audited(
         // The MemoryPruning phase consumes the pruning context (at most once).
         let outcome = if routine == SleepRoutine::MemoryPruning {
             run_pruning_phase(pruning_ctx.take())
+        } else if routine == SleepRoutine::GenerativeReplay {
+            run_replay_phase(replay_ctx.take())
         } else {
             run_routine_stub(routine)
         };
@@ -214,6 +241,8 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
                 notes: "decay applied, floor enforced",
                 pruning: Some(report),
                 evicted_l1_nodes: evicted,
+                replay: None,
+                replay_rollback_nodes: Vec::new(),
             }
         }
         None => SleepRoutineOutcome {
@@ -222,7 +251,37 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
             notes: "decay applied, floor enforced (no store supplied)",
             pruning: None,
             evicted_l1_nodes: Vec::new(),
+            replay: None,
+            replay_rollback_nodes: Vec::new(),
         },
+    }
+}
+
+/// Executes the `GenerativeReplay` phase (E3.6).
+///
+/// When `ctx` is `Some`, runs [`memory::run_replay_validation`] against the
+/// L3 archive and populates the outcome with a [`ReplayReport`] and any
+/// rollback nodes.  When `ctx` is `None`, falls back to the no-op stub.
+fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
+    match ctx {
+        Some(c) => {
+            let (report, rollback_nodes) = memory::run_replay_validation(c.l3, &c.config);
+            let notes = if report.triggered_rollback {
+                "replay validated, rollback triggered"
+            } else {
+                "replay verified, no rollback required"
+            };
+            SleepRoutineOutcome {
+                routine: SleepRoutine::GenerativeReplay,
+                completed: true,
+                notes,
+                pruning: None,
+                evicted_l1_nodes: Vec::new(),
+                replay: Some(report),
+                replay_rollback_nodes: rollback_nodes,
+            }
+        }
+        None => run_routine_stub(SleepRoutine::GenerativeReplay),
     }
 }
 
@@ -241,6 +300,8 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         notes,
         pruning: None,
         evicted_l1_nodes: Vec::new(),
+        replay: None,
+        replay_rollback_nodes: Vec::new(),
     }
 }
 
@@ -278,7 +339,7 @@ mod tests {
     #[test]
     fn audited_maintenance_emits_start_and_complete_for_each_phase() {
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, None);
+        let report = run_maintenance_audited("test-agent", &mut audit, None, None);
 
         assert!(report.all_completed(), "all phases should complete");
 
@@ -314,7 +375,7 @@ mod tests {
     #[test]
     fn audited_maintenance_carries_agent_id_in_every_entry() {
         let mut audit = AuditLog::new();
-        run_maintenance_audited("soak-agent", &mut audit, None);
+        run_maintenance_audited("soak-agent", &mut audit, None, None);
 
         for entry in audit.entries() {
             match entry {
@@ -353,7 +414,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx));
+        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None);
 
         assert!(report.all_completed());
 
@@ -403,7 +464,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx));
+        let report = run_maintenance_audited("test-agent", &mut audit, Some(ctx), None);
 
         assert!(report.all_completed());
         let pr = report.outcomes[0]
@@ -438,7 +499,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        run_maintenance_audited("invariant-agent", &mut audit, Some(ctx));
+        run_maintenance_audited("invariant-agent", &mut audit, Some(ctx), None);
 
         // Post-pass: every surviving node must be strictly above SEMANTIC_FLOOR.
         // We verify by re-checking each stored node directly.
@@ -466,7 +527,7 @@ mod tests {
         };
 
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("agent", &mut audit, Some(ctx));
+        let report = run_maintenance_audited("agent", &mut audit, Some(ctx), None);
 
         let pr = report.outcomes[0].pruning.as_ref().unwrap();
         assert_eq!(pr.floor_enforced, 0.4_f32);
@@ -479,7 +540,7 @@ mod tests {
     #[test]
     fn pruning_report_absent_when_no_context_supplied() {
         let mut audit = AuditLog::new();
-        let report = run_maintenance_audited("no-ctx-agent", &mut audit, None);
+        let report = run_maintenance_audited("no-ctx-agent", &mut audit, None, None);
 
         let outcome = &report.outcomes[0];
         assert_eq!(outcome.routine, SleepRoutine::MemoryPruning);
@@ -487,5 +548,102 @@ mod tests {
             outcome.pruning.is_none(),
             "pruning report must be None when no context is supplied"
         );
+    }
+
+    // ── E3.6 — Replay validation with rollback ────────────────────────────────
+
+    /// E3.6 exit criterion 2: replay report is logged for every sleep cycle
+    /// when a ReplayContext is supplied.
+    #[test]
+    fn replay_report_is_logged_for_every_cycle_with_context() {
+        use memory::{archive_memory_node, L3Archive, MemoryNode, Provenance, SourceTier};
+
+        let path = std::env::temp_dir().join("sleep_replay_logged.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut l3 = L3Archive::open(&path, 4, 100).unwrap();
+        // Add a node with a unique embedding so retrieval is perfect.
+        let node = MemoryNode::new(0.8, 0.2);
+        let item = archive_memory_node(1, "k1", &node);
+        let prov = Provenance::now(SourceTier::L1, "k1");
+        l3.demote(item, prov).unwrap();
+
+        for _cycle in 0..3 {
+            let mut audit = AuditLog::new();
+            let replay_ctx = ReplayContext {
+                l3: &l3,
+                config: memory::ReplayConfig::default(),
+            };
+            let report = run_maintenance_audited("agent", &mut audit, None, Some(replay_ctx));
+
+            // The GenerativeReplay outcome (index 1) must carry a ReplayReport.
+            let replay_outcome = &report.outcomes[1];
+            assert_eq!(replay_outcome.routine, SleepRoutine::GenerativeReplay);
+            assert!(
+                replay_outcome.replay.is_some(),
+                "replay report must be populated when ReplayContext is supplied"
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E3.6 exit criterion 1: rollback is triggered when accuracy is below the threshold.
+    #[test]
+    fn rollback_triggered_in_sleep_phase_when_accuracy_below_threshold() {
+        use memory::{archive_memory_node, L3Archive, MemoryNode, Provenance, SourceTier};
+
+        let path = std::env::temp_dir().join("sleep_replay_rollback.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut l3 = L3Archive::open(&path, 4, 100).unwrap();
+        // Three nodes with identical embeddings → retrieval always returns ID=1 →
+        // accuracy = 1/3 < threshold 0.5 → rollback triggered.
+        let node = MemoryNode::new(0.9, 0.1);
+        for i in 1..=3 {
+            let item = archive_memory_node(i, &format!("key-{i}"), &node);
+            let prov = Provenance::now(SourceTier::L1, &format!("key-{i}"));
+            l3.demote(item, prov).unwrap();
+        }
+
+        let mut audit = AuditLog::new();
+        let replay_ctx = ReplayContext {
+            l3: &l3,
+            config: memory::ReplayConfig {
+                accuracy_threshold: 0.5,
+                max_sample_size: 16,
+                rollback_enabled: true,
+            },
+        };
+        let report = run_maintenance_audited("rollback-agent", &mut audit, None, Some(replay_ctx));
+
+        let replay_outcome = &report.outcomes[1];
+        let rr = replay_outcome
+            .replay
+            .as_ref()
+            .expect("replay report must be present");
+
+        assert!(rr.triggered_rollback, "rollback must be triggered");
+        assert!(rr.rolled_back > 0);
+        assert!(
+            !replay_outcome.replay_rollback_nodes.is_empty(),
+            "rollback nodes must be returned in the outcome"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without a ReplayContext, the GenerativeReplay phase runs the no-op stub.
+    #[test]
+    fn replay_phase_uses_stub_when_no_context_supplied() {
+        let mut audit = AuditLog::new();
+        let report = run_maintenance_audited("no-replay-agent", &mut audit, None, None);
+        let replay_outcome = &report.outcomes[1];
+        assert_eq!(replay_outcome.routine, SleepRoutine::GenerativeReplay);
+        assert!(
+            replay_outcome.replay.is_none(),
+            "replay report must be None when no context is supplied"
+        );
+        assert!(replay_outcome.replay_rollback_nodes.is_empty());
     }
 }
