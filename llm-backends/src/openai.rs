@@ -105,7 +105,7 @@ mod tests {
         use std::pin::Pin;
         use std::task::{Context, Poll, Waker};
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         let mut f = Box::pin(f);
         loop {
             match Pin::as_mut(&mut f).poll(&mut cx) {
