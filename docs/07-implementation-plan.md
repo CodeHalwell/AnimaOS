@@ -278,7 +278,7 @@ circuit breaker whose state is exposed to interoception.
 1. State transitions covered by exhaustive table-driven tests.
 2. Telemetry stream reflects state change within the next tick.
 
-### Epic E2.5 — Wasmtime Sandbox for Untrusted Tools ⬜
+### Epic E2.5 — Wasmtime Sandbox for Untrusted Tools ✅
 
 **Scope.** Host a Wasmtime runtime under `praxis/compute/` with gas
 metering, memory limits, and capability-based imports. Ship one sample
@@ -287,16 +287,37 @@ WASI tool that exercises the full sandbox surface.
 **Dependencies.** E2.3.
 
 **Stories.**
-- S2.5.1 Wasmtime runtime initialised once and shared.
-- S2.5.2 Gas meter integrated with the scheduler's token slice.
-- S2.5.3 Capability-gated WASI imports.
-- S2.5.4 Sample sandboxed math evaluator.
+- S2.5.1 Wasmtime runtime initialised once and shared. ✅ (`praxis/src/compute.rs` —
+  `WasmSandbox` wraps a shared `Arc<Engine>` created once in `WasmSandbox::new()`;
+  `engine()` returns a clone-able `&Arc<Engine>` for multi-call reuse;
+  `sandbox_engine_created_once_and_shared` and
+  `engine_shared_across_multiple_invocations` pin the invariant)
+- S2.5.2 Gas meter integrated with the scheduler's token slice. ✅ (`SandboxConfig::fuel_limit`
+  — per-call fuel budget threaded into `Store::set_fuel()`; `SandboxResult::fuel_consumed`
+  reports units used; `fuel_consumed_is_positive_for_arithmetic` and
+  `simple_arithmetic_does_not_exhaust_generous_fuel_budget` verify accounting)
+- S2.5.3 Capability-gated WASI imports. ✅ (`SandboxCapabilities { allow_stdout, allow_stderr }`
+  — `build_linker()` links `env::write_stdout` / `env::write_stderr` only when the flag
+  is set; modules calling unlisted imports fail at link time before any code runs;
+  `missing_capability_blocks_instantiation` asserts `Trap` without capability;
+  `granted_capability_allows_instantiation` asserts `Ok` with capability)
+- S2.5.4 Sample sandboxed math evaluator. ✅ (`SandboxedMathEvaluator` — a `ToolDriver`
+  registered as `"wasm-math"`; arithmetic (add/sub/mul/div) compiled from embedded WAT
+  and executed inside a fresh isolated `Store`; JSON payload `{"op":"add","a":1,"b":2}`
+  → `{"result":3}`; verified by `sandboxed_math_evaluator_add_via_tool_driver`)
 
 **Exit criteria.**
 1. Adversarial WASI module (infinite loop, memory exhaustion attempt) is
-   bounded inside the configured limits.
-2. Wasmtime startup cost amortised across the process lifetime
-   (one-time init).
+   bounded inside the configured limits. ✅
+   (`adversarial_infinite_loop_is_bounded_by_fuel` — `ADVERSARIAL_LOOP_WAT` spins
+   until fuel=0, returns `SandboxError::FuelExhausted`;
+   `adversarial_memory_exhaustion_is_bounded_by_limit` — `ADVERSARIAL_MEMORY_WAT`
+   attempts 65 535-page growth (≈ 4 GiB), denied by `ResourceLimiter`, returns
+   `SandboxError::MemoryExhausted`)
+2. Wasmtime startup cost amortised across the process lifetime (one-time init). ✅
+   (`sandbox_engine_created_once_and_shared` — `Arc::ptr_eq` proves same allocation;
+   `engine_shared_across_multiple_invocations` — 5 calls reuse the same engine Arc,
+   ref-count stays at 2 throughout)
 
 ### Epic E2.6 — LanceDB L3 Archive ✅
 
