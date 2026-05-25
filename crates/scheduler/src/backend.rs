@@ -28,7 +28,7 @@ pub type CompletionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<StreamingCompletion>, LlmBackendError>> + Send + 'a>>;
 
 /// Trait implemented by every concrete LLM provider integration.
-pub trait LlmBackend: Send + Sync + std::fmt::Debug {
+pub trait LlmBackend: Send + Sync {
     /// Returns the stable backend identifier (e.g., `"openai"`, `"anthropic"`).
     fn id(&self) -> &'static str;
 

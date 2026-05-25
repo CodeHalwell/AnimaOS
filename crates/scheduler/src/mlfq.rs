@@ -89,8 +89,10 @@ pub struct IterationAwareMlfq {
 
 impl IterationAwareMlfq {
     /// Dispatches a task through the provided LLM backend, draining the streaming
-    /// completion into a single [`TaskOutcome`]. Records per-tier dispatch stats
-    /// regardless of success or failure so accounting stays honest.
+    /// completion into a single [`TaskOutcome`]. Both `dispatched_tasks` and
+    /// `tier_counters` are updated for every attempted dispatch — success and
+    /// failure alike — so callers inspecting either surface see a complete
+    /// record of what the scheduler tried to run.
     pub async fn dispatch_task(
         &mut self,
         task: Task,
@@ -99,6 +101,7 @@ impl IterationAwareMlfq {
     ) -> Result<TaskOutcome, LlmBackendError> {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tier_counters[tier] = self.tier_counters[tier].saturating_add(1);
+        self.dispatched_tasks.push(task.clone());
 
         let stream = backend.stream_completion(&task.prompt, cancel).await?;
 
@@ -115,7 +118,6 @@ impl IterationAwareMlfq {
             }
         }
 
-        self.dispatched_tasks.push(task.clone());
         Ok(TaskOutcome {
             task,
             response,
@@ -181,5 +183,51 @@ mod tests {
         assert_eq!(outcome.response, "alpha beta gamma ");
         assert_eq!(sched.dispatched_tasks.len(), 1);
         assert_eq!(sched.tier_counters[1], 1);
+    }
+
+    #[test]
+    fn failed_dispatch_still_records_attempt() {
+        use crate::backend::{CancellationToken, LlmBackendError};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        fn block_on<F: Future>(future: F) -> F::Output {
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            let mut future = Box::pin(future);
+            loop {
+                match Pin::as_mut(&mut future).poll(&mut cx) {
+                    Poll::Ready(value) => return value,
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        struct AlwaysFails;
+        impl crate::backend::LlmBackend for AlwaysFails {
+            fn id(&self) -> &'static str {
+                "always-fails"
+            }
+            fn stream_completion<'a>(
+                &'a self,
+                _prompt: &'a str,
+                _cancel: &'a CancellationToken,
+            ) -> crate::backend::CompletionFuture<'a> {
+                Box::pin(async { Err(LlmBackendError::Provider("boom".into())) })
+            }
+        }
+
+        let mut sched = IterationAwareMlfq::default();
+        let backend = AlwaysFails;
+        let cancel = CancellationToken::new();
+        let err = block_on(sched.dispatch_task(Task::new(9, 0, "anything"), &backend, &cancel))
+            .expect_err("dispatch should fail");
+
+        assert_eq!(err, LlmBackendError::Provider("boom".into()));
+        assert_eq!(sched.dispatched_tasks.len(), 1);
+        assert_eq!(sched.dispatched_tasks[0].id, 9);
+        assert_eq!(sched.tier_counters[0], 1);
     }
 }
