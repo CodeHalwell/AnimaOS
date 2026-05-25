@@ -15,7 +15,7 @@ use interoception::HomeostaticMonitor;
 use memory::{L1PruningStore, VirtualContextManager};
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
-use sleep::PruningContext;
+use sleep::{PruningContext, ReplayContext};
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,10 @@ pub struct LifecycleManager {
     pub l3_archive: Option<memory::L3Archive>,
     /// Monotonically increasing ID counter for L3 archive entries.
     pub next_archive_id: u64,
+    /// Replay configuration for the `GenerativeReplay` sleep phase (E3.6).
+    ///
+    /// Applied every sleep cycle when an L3 archive is configured.
+    pub replay_config: memory::ReplayConfig,
     /// Task scheduler.
     pub scheduler: IterationAwareMlfq,
     /// Agenda of pending tasks.
@@ -103,6 +107,10 @@ impl std::fmt::Debug for LifecycleManager {
             .field("agenda_len", &self.agenda.len())
             .field("l1_memory_nodes", &self.l1_memory.len())
             .field("pruning_elapsed", &self.pruning_elapsed)
+            .field(
+                "replay_config_threshold",
+                &self.replay_config.accuracy_threshold,
+            )
             .field("backend", &self.backend.id())
             .field("audit_len", &self.audit.len())
             .field("iterations", &self.iterations)
@@ -130,6 +138,7 @@ impl LifecycleManager {
             pruning_elapsed: 1.0,
             l3_archive: None,
             next_archive_id: 0,
+            replay_config: memory::ReplayConfig::default(),
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
             state: LifecycleState::Awake,
@@ -193,12 +202,20 @@ impl LifecycleManager {
             // real emotional-decay pruning (E3.5).
             let agent_id = self.agent_id.clone();
             let elapsed = self.pruning_elapsed;
+
+            // Replay context: immutable borrow of l3_archive (different field from l1_memory).
+            let replay_ctx = self.l3_archive.as_ref().map(|l3| sleep::ReplayContext {
+                l3,
+                config: self.replay_config.clone(),
+            });
+
             let ctx = PruningContext {
                 l1: &mut self.l1_memory,
                 elapsed,
                 floor: None,
             };
-            let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
+            let report =
+                sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx), replay_ctx);
 
             // E2.6: Demote evicted L1 nodes to L3 archive if present.
             if let Some(l3) = self.l3_archive.as_mut() {
@@ -210,6 +227,13 @@ impl LifecycleManager {
                         let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
                         let _ = l3.demote(item, prov);
                     }
+                }
+            }
+
+            // E3.6: Re-insert rollback nodes from GenerativeReplay into L1.
+            if let Some(replay_outcome) = report.outcomes.get(1) {
+                for (key, node) in &replay_outcome.replay_rollback_nodes {
+                    self.l1_memory.insert(key.clone(), node.clone());
                 }
             }
         }
@@ -239,12 +263,22 @@ impl LifecycleManager {
     pub fn run_sleep_cycle(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
         let elapsed = self.pruning_elapsed;
+
+        // Build replay context (immutable borrow of l3_archive) before pruning
+        // context (mutable borrow of l1_memory) — different fields, so both
+        // borrows can coexist (E3.6).
+        let replay_ctx = self.l3_archive.as_ref().map(|l3| ReplayContext {
+            l3,
+            config: self.replay_config.clone(),
+        });
+
         let ctx = PruningContext {
             l1: &mut self.l1_memory,
             elapsed,
             floor: None,
         };
-        let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
+        let report =
+            sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx), replay_ctx);
 
         // E2.6: Demote evicted L1 nodes to L3 archive if present.
         if let Some(l3) = self.l3_archive.as_mut() {
@@ -256,6 +290,13 @@ impl LifecycleManager {
                     let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
                     let _ = l3.demote(item, prov);
                 }
+            }
+        }
+
+        // E3.6: Re-insert rollback nodes from the GenerativeReplay phase into L1.
+        if let Some(replay_outcome) = report.outcomes.get(1) {
+            for (key, node) in &replay_outcome.replay_rollback_nodes {
+                self.l1_memory.insert(key.clone(), node.clone());
             }
         }
 
@@ -928,6 +969,176 @@ mod tests {
             let results = l3.search(&query, 1);
             assert_eq!(results.len(), 1, "retrieval after restart must work");
         }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── E3.6 — Replay validation wired into LifecycleManager ─────────────────
+
+    /// E3.6 exit criterion 2: replay accuracy is logged for every sleep cycle
+    /// when an L3 archive is configured.
+    #[test]
+    fn sleep_cycle_logs_replay_accuracy_when_l3_is_configured() {
+        let path = std::env::temp_dir().join("animaos_test_e36_accuracy.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("replay-log-agent", None);
+        // Fast-decaying node — will be pruned and archived in the first cycle.
+        m.l1_memory
+            .insert("fast", memory::MemoryNode::new(0.9, 20.0));
+        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+
+        // Cycle 1: L3 is empty before maintenance, so queries_run = 0.
+        let report1 = m.run_sleep_cycle();
+        let rr1 = report1.outcomes[1]
+            .replay
+            .as_ref()
+            .expect("replay report must be present when l3 is configured");
+        assert_eq!(rr1.queries_run, 0, "L3 was empty at the start of cycle 1");
+
+        // Cycle 2: the fast-decaying node is now in L3 with a unique embedding.
+        let report2 = m.run_sleep_cycle();
+        let rr2 = report2.outcomes[1]
+            .replay
+            .as_ref()
+            .expect("replay report must be present in cycle 2");
+        assert_eq!(rr2.queries_run, 1, "one entry in L3 → one query");
+        assert_eq!(
+            rr2.queries_validated, 1,
+            "unique embedding → perfect retrieval"
+        );
+        assert!(
+            (rr2.accuracy - 1.0).abs() < f32::EPSILON,
+            "accuracy must be 1.0 when retrieval is perfect"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E3.6 exit criterion 1: soak test demonstrates at least one rollback.
+    ///
+    /// Pre-populate L3 with entries that share the same embedding so that
+    /// `search(q, 1)` always returns the lowest-ID entry.  With 3 entries,
+    /// accuracy = 1/3 < threshold 0.5, triggering rollback.  The rolled-back
+    /// nodes are re-inserted into the L1 pruning store.
+    #[test]
+    fn soak_test_sleep_cycle_triggers_rollback_and_restores_l1_nodes() {
+        let path = std::env::temp_dir().join("animaos_test_e36_rollback_soak.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("rollback-soak-agent", None);
+
+        // Pre-populate L3 with 3 entries sharing the same embedding.
+        {
+            let mut l3 = memory::L3Archive::open(&path, 4, 100).unwrap();
+            let node = memory::MemoryNode::new(0.9, 0.1);
+            for i in 1..=3u64 {
+                let item = memory::archive_memory_node(i, &format!("rb-key-{i}"), &node);
+                let prov = memory::Provenance::now(memory::SourceTier::L1, &format!("rb-key-{i}"));
+                l3.demote(item, prov).unwrap();
+            }
+            m.l3_archive = Some(l3);
+        }
+
+        m.replay_config = memory::ReplayConfig {
+            accuracy_threshold: 0.5,
+            max_sample_size: 16,
+            rollback_enabled: true,
+        };
+
+        let report = m.run_sleep_cycle();
+
+        // The GenerativeReplay phase (index 1) must have triggered rollback.
+        let rr = report.outcomes[1]
+            .replay
+            .as_ref()
+            .expect("replay report must be present");
+        assert!(
+            rr.triggered_rollback,
+            "rollback must trigger when accuracy ({}) < threshold ({})",
+            rr.accuracy, rr.threshold
+        );
+        assert!(rr.rolled_back > 0, "at least one node must be rolled back");
+
+        // Rolled-back nodes must be re-inserted into L1 by run_sleep_cycle.
+        assert!(
+            !m.l1_memory.is_empty(),
+            "rollback nodes must be re-inserted into L1"
+        );
+        assert_eq!(
+            m.l1_memory.len(),
+            rr.rolled_back,
+            "l1_memory size must equal the rollback count"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without an L3 archive, the GenerativeReplay phase falls back to the stub.
+    #[test]
+    fn sleep_cycle_replay_uses_stub_when_no_l3_configured() {
+        let mut m = manager("no-l3-replay-agent", None);
+        let report = m.run_sleep_cycle();
+
+        let replay_outcome = &report.outcomes[1];
+        assert_eq!(replay_outcome.routine, SleepRoutine::GenerativeReplay);
+        assert!(
+            replay_outcome.replay.is_none(),
+            "replay report must be None when no L3 is configured"
+        );
+        assert!(replay_outcome.replay_rollback_nodes.is_empty());
+    }
+
+    /// 100 consecutive sleep cycles with L3 configured: every cycle logs
+    /// a replay report (E3.6 exit criterion 2).
+    #[test]
+    fn one_hundred_sleep_cycles_with_l3_log_replay_report_every_cycle() {
+        let path = std::env::temp_dir().join("animaos_test_e36_100cycles.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("100-cycles-replay-agent", None);
+        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 1000).unwrap());
+
+        // Seed with fast-decaying nodes with different embeddings (via arousal).
+        for i in 0..3u32 {
+            let mut node = memory::MemoryNode::new(0.9, 20.0);
+            node.emotion.arousal = i as f32 * 2.0;
+            m.l1_memory.insert(format!("n{i}"), node);
+        }
+
+        for cycle in 0..100 {
+            let report = m.run_sleep_cycle();
+            assert!(
+                report.all_completed(),
+                "sleep cycle {cycle} should complete"
+            );
+            // Every cycle must carry a replay report (E3.6 exit criterion 2).
+            let rr = report.outcomes[1]
+                .replay
+                .as_ref()
+                .expect("replay report must be present every cycle");
+            assert!(
+                rr.accuracy >= 0.0 && rr.accuracy <= 1.0,
+                "accuracy must be in [0, 1], got {} in cycle {}",
+                rr.accuracy,
+                cycle
+            );
+        }
+
+        // Verify via audit that GenerativeReplay completed 100 times.
+        let replay_completions = m
+            .audit
+            .entries()
+            .iter()
+            .filter(|e| {
+                matches!(e, AuditEntry::SleepPhaseCompleted { phase, .. }
+                    if phase == "GenerativeReplay")
+            })
+            .count();
+        assert_eq!(
+            replay_completions, 100,
+            "GenerativeReplay must complete every cycle (100 cycles × 1 = 100)"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

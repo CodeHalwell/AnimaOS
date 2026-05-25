@@ -7,6 +7,7 @@ pub mod decay;
 pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
+pub mod replay;
 
 pub use archival::{
     archive_memory_node, embed_memory_node, retrieve_top_k_from_l3_for_l2, ArchivalEntry,
@@ -17,6 +18,7 @@ pub use decay::{EmotionalContext, MemoryNode};
 pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
+pub use replay::{run_replay_validation, ReplayConfig, ReplayReport};
 
 /// Default block size in tokens, matching PagedAttention page granularity.
 pub const DEFAULT_BLOCK_SIZE: u32 = 16;

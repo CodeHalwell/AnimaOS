@@ -464,7 +464,7 @@ the semantic floor in both L1 and L2.
    `no_retained_node_below_floor_after_sleep_pruning_pass` in `vita::sleep`,
    `lifecycle_no_retained_node_below_floor_after_sleep_cycle` in `vita::lib`)
 
-### Epic E3.6 — Replay Validation with Rollback ⬜
+### Epic E3.6 — Replay Validation with Rollback ✅
 
 **Scope.** Generative replay against the L3 audit stream, with rollback
 when degradation crosses the configured threshold.
@@ -472,13 +472,39 @@ when degradation crosses the configured threshold.
 **Dependencies.** E2.6, E3.5.
 
 **Stories.**
-- S3.6.1 Replay sampling from L3.
-- S3.6.2 Accuracy threshold checker.
-- S3.6.3 Rollback path for prior pruning changes.
+- S3.6.1 Replay sampling from L3. ✅ (`memory/src/replay.rs` —
+  `run_replay_validation(l3, config)` samples up to `max_sample_size` entries
+  in ascending ID order from `L3Archive::entries()`, queries each with its own
+  embedding via `l3.search(query, 1)`, and checks whether the top-1 result ID
+  matches the expected entry ID; `ReplayContext<'a>` carries `&'a L3Archive`
+  and is wired into `vita::sleep::run_maintenance_audited`)
+- S3.6.2 Accuracy threshold checker. ✅ (`ReplayConfig::accuracy_threshold` —
+  `accuracy = validated / queries_run`; rollback triggered when
+  `accuracy < threshold` and `rollback_enabled = true`; `ReplayReport`
+  exposes `queries_run`, `queries_validated`, `accuracy`, `threshold`, and
+  `triggered_rollback`)
+- S3.6.3 Rollback path for prior pruning changes. ✅ (`run_replay_validation`
+  returns `Vec<(String, MemoryNode)>` of failed entries decoded from their
+  20-byte payloads; `SleepRoutineOutcome::replay_rollback_nodes` carries these
+  out of the sleep phase; `LifecycleManager::run_sleep_cycle` and
+  `transition_to_sleep_state` re-insert rollback nodes into `l1_memory` after
+  maintenance completes; `LifecycleManager::replay_config` controls threshold
+  and rollback behaviour)
 
 **Exit criteria.**
-1. Soak test demonstrates at least one rollback (proof the path works).
-2. Validation accuracy logged for every cycle.
+1. Soak test demonstrates at least one rollback (proof the path works). ✅
+   (`soak_test_sleep_cycle_triggers_rollback_and_restores_l1_nodes` in
+   `vita::lib` — pre-populates L3 with 3 entries sharing the same embedding
+   so accuracy = 1/3 < threshold 0.5; asserts `rr.triggered_rollback = true`
+   and `m.l1_memory.len() == rr.rolled_back`;
+   `rollback_triggered_when_duplicate_embeddings_cause_low_accuracy` in
+   `memory::replay` — same mechanism at the library level)
+2. Validation accuracy logged for every cycle. ✅ (`sleep_cycle_logs_replay_accuracy_when_l3_is_configured`
+   in `vita::lib` — verifies `replay` field is `Some` in `SleepRoutineOutcome`
+   for the `GenerativeReplay` phase on every cycle;
+   `one_hundred_sleep_cycles_with_l3_log_replay_report_every_cycle` — 100
+   cycles all carry a report; `accuracy_is_logged_for_every_cycle_even_when_perfect`
+   in `memory::replay`)
 
 ### Epic E3.7 — Dreaming Phase ⬜
 
