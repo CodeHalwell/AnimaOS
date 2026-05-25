@@ -38,6 +38,36 @@ pub trait LlmBackend: Send + Sync {
         prompt: &'a str,
         cancel: &'a CancellationToken,
     ) -> CompletionFuture<'a>;
+
+    // ── E1.3 extensions ───────────────────────────────────────────────────────
+
+    /// Returns the fully-qualified model identifier string carried in audit logs
+    /// and token-accounting records (e.g. `"claude-3-haiku-20240307"`).
+    ///
+    /// The default delegates to [`LlmBackend::id`] so existing impls compile
+    /// unchanged; concrete providers should override this with their model string.
+    fn model_id(&self) -> &str {
+        self.id()
+    }
+
+    /// Returns the maximum context window (in tokens) supported by this backend.
+    ///
+    /// Defaults to [`u32::MAX`], which is safe for mock / fixture backends that
+    /// do not enforce a hard limit.  Provider implementations should override
+    /// this with the value advertised by the provider API.
+    fn max_context_tokens(&self) -> u32 {
+        u32::MAX
+    }
+
+    /// Returns an estimate of the token count for `text`.
+    ///
+    /// The default heuristic rounds `len(text)` up to the nearest multiple of
+    /// four, yielding ≈4 bytes per token — accurate enough for scheduling
+    /// decisions.  Provider implementations should substitute the provider's
+    /// actual tokeniser.
+    fn estimate_token_count(&self, text: &str) -> u32 {
+        ((text.len() as u32).saturating_add(3)) / 4
+    }
 }
 
 /// Cooperative cancellation flag for streaming requests.

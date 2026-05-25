@@ -1,0 +1,26 @@
+{
+  "provider": "anthropic",
+  "model": "claude-3-haiku-20240307",
+  "fixtures": [
+    {
+      "prompt": "Hello, world",
+      "tokens": ["Hello", "!", " How", " can", " I", " assist", " you", " today", "?"],
+      "finish_reason": "end_turn"
+    },
+    {
+      "prompt": "What is the capital of France?",
+      "tokens": ["The", " capital", " of", " France", " is", " Paris", "."],
+      "finish_reason": "end_turn"
+    },
+    {
+      "prompt": "Count to five",
+      "tokens": ["1", ",", " 2", ",", " 3", ",", " 4", ",", " 5", "."],
+      "finish_reason": "end_turn"
+    },
+    {
+      "prompt": "Summarize AnimaOS",
+      "tokens": ["AnimaOS", " is", " a", " bare-metal", " somatic", " architecture", " for", " autonomous", " LLM", " agents", "."],
+      "finish_reason": "end_turn"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "fixtures": [
+    {
+      "prompt": "Hello, world",
+      "tokens": ["Hello", "!", " How", " can", " I", " help", " you", "?"],
+      "finish_reason": "stop"
+    },
+    {
+      "prompt": "What is the capital of France?",
+      "tokens": ["Paris", " is", " the", " capital", " of", " France", "."],
+      "finish_reason": "stop"
+    },
+    {
+      "prompt": "Count to five",
+      "tokens": ["One", ",", " two", ",", " three", ",", " four", ",", " five", "."],
+      "finish_reason": "stop"
+    },
+    {
+      "prompt": "Summarize AnimaOS",
+      "tokens": ["AnimaOS", " provides", " a", " somatic", " runtime", " for", " autonomous", " LLM", " agents", " on", " bare", "-", "metal", " hardware", "."],
+      "finish_reason": "stop"
+    }
+  ]
+}
