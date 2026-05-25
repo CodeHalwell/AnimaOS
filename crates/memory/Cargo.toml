@@ -3,3 +3,7 @@ name = "memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+scc = "3.7.1"
+scheduler = { version = "0.1.0", path = "../scheduler" }
