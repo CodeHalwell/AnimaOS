@@ -37,6 +37,7 @@ This directory contains the full design for Anima. Read in order if you are new;
 | [`05-roadmap.md`](./05-roadmap.md) | The 24-month phased implementation plan with milestones, exit criteria, and risks. |
 | [`06-glossary.md`](./06-glossary.md) | Terminology mapping: anatomical names ↔ engineering meanings. |
 | [`07-implementation-plan.md`](./07-implementation-plan.md) | Epic-by-epic delivery plan, aligned to the roadmap milestones, with stories and exit criteria. |
+| [`08-cognitive-architecture.md`](./08-cognitive-architecture.md) | Cognitive layer above the somatic substrate: cortex, gate, router, learned KV-cache controller, episodic/identity memory, defence layer. Reconciled into Stage 5 of the implementation plan. |
 
 ## Status
 

@@ -97,6 +97,7 @@ Anima uses an open-source, performant, and verifiable stack. External dependenci
 
 - **Embedded LanceDB** for deep vector indices and L3 archival logging.
 - **`instant-distance`** for fast, in-memory HNSW (Hierarchical Navigable Small World) neighbourhood lookups. Used in the warm path where LanceDB's persistence guarantees are unnecessary.
+- **TurboQuant** (Zandieh et al., ICLR 2026) for rotation-based online vector quantisation across the L2 warm cache and the L3 archive. The implementation follows Qdrant 1.18's MSE variant with length renormalisation, P-Square per-coordinate calibration, L2 / dot / cosine support, and SIMD scoring kernels (AVX-VNNI on x86_64, NEON `SDOT` on aarch64). Bit depths 4 / 2 / 1.5 / 1 are available; the default operating point is TQ4 (8× compression, recall within 1–2 pp of full precision on the documented benchmark set). TurboQuant is data-oblivious — no calibration dataset, no retraining — and replaces per-block scalar normalisation constants entirely. Whether the L3 backing store remains embedded LanceDB with a custom TurboQuant layer or migrates to Qdrant 1.18 (which ships TurboQuant natively) is tracked as an Open Decision in `07-implementation-plan.md` and resolved in Epic E2.7. L1 distance is not supported — random orthogonal rotation preserves L2 but not L1, so any workload requiring L1 must opt out of TurboQuant.
 
 ### 3.5 Network and Security
 
