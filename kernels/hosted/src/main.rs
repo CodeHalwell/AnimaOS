@@ -53,14 +53,10 @@ fn build_agent(
 ) -> LifecycleManager {
     let mut manager = LifecycleManager::new(
         agent_id,
-        SensoryBridge::new(HumanGuidance {
-            policy_hint: policy.to_string(),
-        }),
+        SensoryBridge::new(HumanGuidance::new(policy)),
         VirtualContextManager::with_capacity(0, 4096),
         LifecycleConfig { max_context: 4096 },
-        HumanGuidance {
-            policy_hint: "boot".to_string(),
-        },
+        HumanGuidance::new("boot"),
         backend,
         Some(max_iterations),
     );
@@ -107,6 +103,13 @@ fn print_audit(manager: &LifecycleManager) {
             }
             AuditEntry::SleepEntered { .. } => println!("  zzz sleep_entered"),
             AuditEntry::WakeEntered { .. } => println!("  ☀  wake_entered"),
+            AuditEntry::SleepPhaseStarted { phase, .. } => {
+                println!("  →   sleep_phase_started phase={phase}")
+            }
+            AuditEntry::SleepPhaseCompleted { phase, success, .. } => {
+                let mark = if *success { "✓" } else { "✗" };
+                println!("  {mark}   sleep_phase_completed phase={phase} success={success}");
+            }
         }
     }
 }

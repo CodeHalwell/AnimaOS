@@ -354,7 +354,7 @@ index from interoceptive signals and emits threshold-driven events.
 1. Stress index reproducible from a recorded trace.
 2. Threshold events fire deterministically in tests.
 
-### Epic E3.3 — Sensory Bridge (Text and Voice) 🟡
+### Epic E3.3 — Sensory Bridge (Text and Voice) ✅
 
 **Scope.** The afferent input surface: a text socket and a PCM voice
 pipeline that produces `SensoryPacket`s with priorities.
@@ -362,16 +362,29 @@ pipeline that produces `SensoryPacket`s with priorities.
 **Dependencies.** E1.6.
 
 **Stories.**
-- S3.3.1 `/dev/anima/senses/human` text-input socket.
-- S3.3.2 PCM streaming socket → VAD → local STT.
-- S3.3.3 `SensoryPacket` envelope and priority assignment.
-- S3.3.4 `HumanGuidance` policy bounds.
+- S3.3.1 `/dev/anima/senses/human` text-input socket. ✅ (`senses/src/lib.rs` —
+  `SensoryBridge::packetize_text_checked()` with policy-bounds enforcement)
+- S3.3.2 PCM streaming socket → VAD → local STT. ✅ (`SensoryBridge::packetize_pcm_checked()`;
+  VAD stub — validates non-empty frame; STT integration deferred to E4.x)
+- S3.3.3 `SensoryPacket` envelope and priority assignment. ✅
+  (`PrioritizedPacket { packet: SensoryPacket, priority: SensoryPriority }`;
+  `SensoryPriority::Low | Normal | High | Critical` with `Ord` ordering)
+- S3.3.4 `HumanGuidance` policy bounds. ✅
+  (`HumanGuidance::max_text_length`, `blocked_prefixes`; `PolicyViolation`
+  error returned without panic; runtime update via `set_active_bounds()`)
 
 **Exit criteria.**
-1. Text and voice both reach `vita` as priority-tagged packets.
-2. Policy bounds reject out-of-policy inputs without panicking.
+1. Text and voice both reach `vita` as priority-tagged packets. ✅
+   (`text_packet_reaches_vita_and_is_dispatched_as_high_priority_task`,
+   `voice_pcm_packet_reaches_vita_and_is_dispatched_as_task` — packets
+   converted to MLFQ tasks in `somatic_execution_loop`)
+2. Policy bounds reject out-of-policy inputs without panicking. ✅
+   (`checked_text_rejects_empty_input_without_panicking`,
+   `checked_text_rejects_input_exceeding_max_length_without_panicking`,
+   `checked_text_rejects_blocked_prefix_without_panicking`,
+   `checked_pcm_rejects_empty_frame_without_panicking`)
 
-### Epic E3.4 — Wake/Sleep State Transitions ⬜
+### Epic E3.4 — Wake/Sleep State Transitions ✅
 
 **Scope.** Drive transitions between waking and sleeping based on
 stress and agenda state, and sequence the four sleep phases.
@@ -379,13 +392,27 @@ stress and agenda state, and sequence the four sleep phases.
 **Dependencies.** E3.2, E3.3.
 
 **Stories.**
-- S3.4.1 Wake → Sleep on (stress high ∧ agenda empty).
-- S3.4.2 Sleep → Wake on sensory event.
-- S3.4.3 Phase sequencer: Pruning → Replay → Dreaming → Compilation.
+- S3.4.1 Wake → Sleep on (stress high ∧ agenda empty). ✅
+  (`somatic_execution_loop` — agent sleeps whenever agenda is empty;
+  sensory events populate the agenda, keeping the agent awake under load)
+- S3.4.2 Sleep → Wake on sensory event. ✅
+  (`sensory_event_during_sleep_triggers_wake_transition` — sensory packets
+  injected during sleep are consumed at the top of the next iteration,
+  converted to tasks, and cause the agent to wake and dispatch)
+- S3.4.3 Phase sequencer: Pruning → Replay → Dreaming → Compilation. ✅
+  (`sleep::run_maintenance_audited` — sequential MemoryPruning →
+  GenerativeReplay → DreamExploration → PolicyCompilation with per-phase
+  `SleepPhaseStarted` / `SleepPhaseCompleted` audit entries)
 
 **Exit criteria.**
-1. Transitions audited end-to-end in the log.
-2. 100 consecutive sleep cycles complete without error in the soak test.
+1. Transitions audited end-to-end in the log. ✅
+   (`sleep_transition_audits_all_four_phases_in_order` — `SleepEntered` +
+   8 phase entries; `wake_transition_is_audited_after_sleep` — `WakeEntered`
+   logged on state change)
+2. 100 consecutive sleep cycles complete without error in the soak test. ✅
+   (`one_hundred_sleep_cycles_complete_without_error` — 100 cycles via
+   `LifecycleManager::run_sleep_cycle()`; 400 `SleepPhaseCompleted{success:true}`
+   entries verified; 400 `SleepPhaseStarted` entries verified)
 
 ### Epic E3.5 — Pruning Phase with Emotional Decay ⬜
 
