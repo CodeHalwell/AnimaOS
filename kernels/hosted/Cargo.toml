@@ -15,3 +15,4 @@ interoception = { path = "../../crates/interoception" }
 scheduler = { path = "../../crates/scheduler" }
 senses = { path = "../../crates/senses" }
 llm-backends = { path = "../../llm-backends" }
+serde_json = { workspace = true }

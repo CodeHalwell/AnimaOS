@@ -1,0 +1,74 @@
+name: Benchmarks
+
+on:
+  # Nightly macro-benchmark job — runs automatically at 02:00 UTC every day.
+  schedule:
+    - cron: '0 2 * * *'
+  # Allow manual triggering from the Actions tab.
+  workflow_dispatch:
+  # Run on PRs targeting main to catch regressions before they land.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/scheduler/**'
+      - 'crates/memory/**'
+      - 'crates/praxis/**'
+      - '.github/workflows/bench.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Benchmarks are performance-sensitive; do not promote warnings to errors.
+  RUSTFLAGS: ""
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Criterion benchmark suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+            ${{ runner.os }}-cargo-
+
+      # ------------------------------------------------------------------
+      # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
+      # ------------------------------------------------------------------
+      - name: Benchmark scheduler
+        run: cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+
+      # ------------------------------------------------------------------
+      # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
+      # ------------------------------------------------------------------
+      - name: Benchmark memory
+        run: cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+
+      # ------------------------------------------------------------------
+      # Praxis — tool registry dispatch, routing filter, circuit breaker
+      # ------------------------------------------------------------------
+      - name: Benchmark praxis
+        run: cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+
+      # ------------------------------------------------------------------
+      # Upload HTML reports as artifacts (available for 30 days)
+      # ------------------------------------------------------------------
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports-${{ github.run_id }}
+          path: |
+            target/criterion/
+            bench-*.txt
+          retention-days: 30

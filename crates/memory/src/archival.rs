@@ -69,6 +69,14 @@ impl ArchivalStore {
         self.items.is_empty()
     }
 
+    /// Returns a slice of all stored items.
+    ///
+    /// Used by the TurboQuant integration layer (`turboquant::quantized_search_archival`)
+    /// to iterate over embeddings for quantised scoring (S2.7.8).
+    pub fn items(&self) -> &[ArchivedItem] {
+        &self.items
+    }
+
     /// Stores an item, validating its embedding dimensionality.
     pub fn store(&mut self, item: ArchivedItem) -> Result<(), ArchivalStoreError> {
         if item.embedding.len() != self.expected_dim {
@@ -105,6 +113,12 @@ pub enum SourceTier {
     L1,
     /// L2 ARC cache.
     L2,
+    /// Cortex episode summary (E5.1 — Cortex MVP).
+    ///
+    /// Written at the end of each cortex invocation; the summary text is
+    /// packed into the archive payload and the embedding is derived from
+    /// the summary's length and activation values.
+    Episode,
 }
 
 /// Provenance record describing where and when an entry arrived in L3.

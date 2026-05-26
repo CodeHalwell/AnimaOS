@@ -1,0 +1,88 @@
+# deny.toml — cargo-deny 0.19+ configuration for AnimaOS
+#
+# This file is the security and supply-chain policy for the AnimaOS workspace.
+# It is enforced in CI as part of Epic EX.4 (Security Posture and Threat Model).
+#
+# References:
+#   - docs/09-threat-model.md  — full threat model and rationale
+#   - .github/workflows/ci.yml — CI integration
+#   - https://embarkstudios.github.io/cargo-deny/
+
+# ---------------------------------------------------------------------------
+# Advisories — scan for known CVEs and RustSec entries
+# ---------------------------------------------------------------------------
+[advisories]
+# The advisory database is fetched fresh on each CI run from the RustSec repo.
+ignore = []
+# yanked crate versions are flagged as warnings by default; promote to error
+# if any yanked crate appears in Cargo.lock.
+
+# ---------------------------------------------------------------------------
+# Licenses — every dependency must carry a permissive licence compatible with
+# the MIT-licensed AnimaOS project.  Copyleft licences are denied.
+# ---------------------------------------------------------------------------
+[licenses]
+# Explicit allow-list.  Any dependency whose detected licence is not in this
+# list will produce a deny-level error in CI.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "Zlib",
+  "Unlicense",
+  "OpenSSL",
+  # MPL-2.0 is file-scoped copyleft (not project-viral). Allowed for transitive
+  # use; required by wasmtime's wasm-compose feature, which pulls in im-rc /
+  # bitmaps / sized-chunks (all MPL-2.0+).
+  "MPL-2.0",
+]
+# Lower confidence threshold — detection below this level produces a warning
+# so that ambiguous licence files don't silently pass.
+confidence-threshold = 0.8
+# Crates whose licence metadata cannot be parsed automatically must appear here
+# with a reason.  Keep this list minimal.
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans — unwanted crates and duplicate-version policy
+# ---------------------------------------------------------------------------
+[bans]
+# Multiple versions of the same crate inflate the binary and increase the
+# audit surface.  Warn on duplicates so CI surfaces them without hard-blocking.
+multiple-versions = "warn"
+# Wildcard version specifiers ("*") on registry dependencies are prohibited.
+# Note: cargo-deny also flags intra-workspace path dependencies (e.g.
+# `vita = { path = "../vita" }`) as wildcards because they deliberately omit
+# a version field.  We use "warn" here so that CI surfaces any genuine
+# wildcard external deps as warnings without hard-blocking on workspace-
+# internal path references.
+wildcards = "warn"
+# Specific crates that are never allowed in the dependency graph.
+deny = [
+  # openssl requires a system library that is unavailable on the microVM
+  # target.  Use rustls instead (already vendored via llm-backends).
+  { crate = "openssl", reason = "Use rustls instead; openssl requires a system library unavailable on the microVM target." },
+  # git2 links against libgit2 (C), which is likewise incompatible with the
+  # no_std / bare-metal target.
+  { crate = "git2", reason = "C bindings incompatible with the no_std / microVM target." },
+]
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources — only crates.io is the authorised package registry
+# ---------------------------------------------------------------------------
+[sources]
+# Unknown registries are hard errors; unknown git sources produce warnings
+# during active development (e.g. git path overrides) but must not appear
+# in released builds.
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

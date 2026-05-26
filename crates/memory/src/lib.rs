@@ -3,22 +3,37 @@
 //! Synaptic memory layer implementing the CLS three-tier hierarchy.
 
 pub mod archival;
+pub mod compilation;
 pub mod decay;
+pub mod dreaming;
 pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
 pub mod replay;
+pub mod turboquant;
 
 pub use archival::{
     archive_memory_node, embed_memory_node, retrieve_top_k_from_l3_for_l2, ArchivalEntry,
     ArchivalStore, ArchivalStoreError, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError,
     Provenance, SourceTier,
 };
+pub use compilation::{
+    compile_traces_to_pairs, emergency_consolidate, AlpacaRecord, AuditTraceEntry,
+    ChainOfThoughtRecord, CompilationConfig, CompilationReport, ConversationRecord,
+    ConversationTurn, TrainingFormat, TrainingPair,
+};
 pub use decay::{EmotionalContext, MemoryNode};
+pub use dreaming::{run_dream_walk, AssociativeEdge, DreamConfig, DreamReport};
 pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
 pub use replay::{run_replay_validation, ReplayConfig, ReplayReport};
+pub use turboquant::{
+    cosine_similarity_f32, dot_product_f32, l2_norm, pack_codes, quantized_search_archival,
+    quantized_search_l3, target_has_simd_support, unpack_codes, BitDepth, LloydMaxCodebook, Metric,
+    PSquareQuantile, PolarQuantRotation, QuantizedVector, TurboQuant, TurboQuantConfig,
+    TurboQuantError,
+};
 
 /// Default block size in tokens, matching PagedAttention page granularity.
 pub const DEFAULT_BLOCK_SIZE: u32 = 16;

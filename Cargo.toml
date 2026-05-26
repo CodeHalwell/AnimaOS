@@ -8,6 +8,8 @@ members = [
   "crates/self",
   "crates/interoception",
   "crates/senses",
+  "crates/defence",
+  "crates/kv-controller",
   "kernels/hosted",
   "llm-backends",
 ]
@@ -19,5 +21,8 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
+anyhow = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wasmtime = { version = "43", default-features = true }

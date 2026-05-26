@@ -5,16 +5,22 @@
 //! # Structure
 //!
 //! - [`circuit`] — Closed/Open/HalfOpen circuit breaker per tool pathway.
+//! - [`compute`] — Wasmtime sandbox for untrusted tool execution (E2.5).
 //! - [`envelope`] — [`ToolEnvelope`] type carrying calls across MCP/A2A buses.
 //! - [`registry`] — [`ToolRegistry`]: registration, discovery, and dispatch.
 //! - [`routing`] — [`length_robust_filter`]: relative-score tool selection.
 
 pub mod circuit;
+pub mod compute;
 pub mod envelope;
 pub mod registry;
 pub mod routing;
 
 pub use circuit::{BreakerState, CircuitBreaker};
+pub use compute::{
+    SandboxCapabilities, SandboxConfig, SandboxError, SandboxResult, SandboxedMathEvaluator,
+    WasmSandbox,
+};
 pub use envelope::{Bus, ToolEnvelope};
 pub use registry::{ClockTool, EchoTool, TextIoTool, ToolRegistry};
 pub use routing::{length_robust_filter, ToolCandidate};
