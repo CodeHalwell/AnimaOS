@@ -7,6 +7,7 @@ pub mod cortex_bridge;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
+pub mod kv_gate;
 pub mod router;
 pub mod sleep;
 
@@ -28,6 +29,7 @@ pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
 };
+pub use kv_gate::{gate_working_context, ContextBlock, GatePassResult};
 pub use router::{
     build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,

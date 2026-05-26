@@ -264,6 +264,34 @@ fn print_audit(manager: &LifecycleManager) {
                 );
                 println!("       reason: {reason}");
             }
+            // E5.4 KV-cache controller entries
+            AuditEntry::KvGatePass {
+                task_id,
+                total_blocks,
+                retained_blocks,
+                budget,
+                fallback_lru,
+                needles_retained,
+                total_needles,
+                ..
+            } => {
+                let mode = if *fallback_lru { "LRU-fallback" } else { "controller" };
+                println!(
+                    "  🔒 kv_gate_pass task={task_id} mode={mode} \
+                     retained={retained_blocks}/{total_blocks} budget={budget} \
+                     needles={needles_retained}/{total_needles}"
+                );
+            }
+            AuditEntry::KvControllerFaulted {
+                task_id,
+                fault_count,
+                ..
+            } => {
+                println!(
+                    "  ⚠  kv_controller_faulted task={task_id} fault_count={fault_count} \
+                     (switching to LRU fallback)"
+                );
+            }
         }
     }
 }

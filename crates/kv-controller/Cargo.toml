@@ -1,0 +1,12 @@
+[package]
+name = "kv-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Learned KV-cache gating controller — Epic E5.4"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]

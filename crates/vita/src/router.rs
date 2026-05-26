@@ -170,11 +170,16 @@ impl ToolScope {
 // ── Memory scope ──────────────────────────────────────────────────────────────
 
 /// Which memory tiers the cortex may read from and write to during this
-/// invocation (S5.3.4).
+/// invocation (S5.3.4), and whether the KV-cache gating controller (E5.4)
+/// is active for block-level eviction decisions.
 ///
 /// `identity` **must always be `true`** on every route — a route with
 /// `identity: false` is rejected at [`StaticRouter`] construction time with
 /// [`RouteError::IdentityMemoryDisabled`] (exit criterion 2 + S5.3.4).
+///
+/// `kv_controller` enables the E5.4 learned gate instead of plain LRU for
+/// block eviction decisions during this invocation.  Disabled by default on
+/// all baseline routes; opt-in per route (S5.4.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryScope {
     /// Identity memory (stable user/agent facts) — **must be `true`** per S5.3.4.
@@ -185,6 +190,15 @@ pub struct MemoryScope {
     pub l2: bool,
     /// L3 persistent archive.
     pub l3: bool,
+    /// Use the KV-cache gating controller (E5.4) for block-level eviction.
+    ///
+    /// When `true`, [`crate::kv_gate::gate_working_context`] is invoked before
+    /// each cortex turn to decide which blocks to retain.  On any controller
+    /// fault the decision falls back to LRU and a
+    /// [`crate::AuditEntry::KvControllerFaulted`] entry is written.
+    ///
+    /// Default: `false` on all baseline routes.
+    pub kv_controller: bool,
 }
 
 impl MemoryScope {
@@ -195,6 +209,7 @@ impl MemoryScope {
             l1: true,
             l2: false,
             l3: false,
+            kv_controller: false,
         }
     }
 
@@ -205,6 +220,7 @@ impl MemoryScope {
             l1: true,
             l2: true,
             l3: false,
+            kv_controller: false,
         }
     }
 
@@ -215,6 +231,15 @@ impl MemoryScope {
             l1: true,
             l2: true,
             l3: true,
+            kv_controller: false,
+        }
+    }
+
+    /// Full scope with the KV-cache controller enabled (frontier + E5.4).
+    pub fn full_with_kv_controller() -> Self {
+        Self {
+            kv_controller: true,
+            ..Self::full()
         }
     }
 
@@ -1193,6 +1218,7 @@ mod tests {
                 l1: true,
                 l2: true,
                 l3: true,
+                kv_controller: false,
             },
             prompt_scaffold: PromptScaffold::empty(),
             termination: TerminationPolicy::frontier(),

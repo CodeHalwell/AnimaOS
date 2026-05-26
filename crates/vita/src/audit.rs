@@ -238,6 +238,49 @@ pub enum AuditEntry {
         /// Human-readable explanation of why the route was changed.
         reason: String,
     },
+
+    // ── E5.4 KV-Cache Controller audit entries ────────────────────────────────
+
+    /// The KV-cache gating controller (E5.4) performed a block selection pass.
+    ///
+    /// Written each time [`crate::kv_gate::gate_working_context`] is called
+    /// with a controller-enabled route.  Satisfies E5.4 exit criterion 2:
+    /// "controller fault reverts to LRU within next gating decision and is
+    /// recorded in the audit log."
+    KvGatePass {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier (matches the cortex task ID).
+        task_id: String,
+        /// Total blocks evaluated in this pass.
+        total_blocks: usize,
+        /// Blocks retained after the gate decision.
+        retained_blocks: usize,
+        /// Block budget that was configured for this pass.
+        budget: usize,
+        /// `true` if the pass used LRU fallback (controller was faulted).
+        fallback_lru: bool,
+        /// Number of needle blocks (user constraints) retained.
+        needles_retained: usize,
+        /// Total needle blocks present.
+        total_needles: usize,
+    },
+
+    /// The KV-cache gating controller encountered a fault and switched to LRU.
+    ///
+    /// Written on the **first** call where the controller transitions from
+    /// `Active` to `Faulted`.  Subsequent faulted passes produce
+    /// `KvGatePass { fallback_lru: true }` entries only.
+    ///
+    /// Satisfies E5.4 exit criterion 2.
+    KvControllerFaulted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Number of faults the controller has accumulated.
+        fault_count: u32,
+    },
 }
 
 /// Append-only audit log.
