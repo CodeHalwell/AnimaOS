@@ -8,6 +8,7 @@ pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
 pub mod replay;
+pub mod turboquant;
 
 pub use archival::{
     archive_memory_node, embed_memory_node, retrieve_top_k_from_l3_for_l2, ArchivalEntry,
@@ -19,6 +20,12 @@ pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
 pub use replay::{run_replay_validation, ReplayConfig, ReplayReport};
+pub use turboquant::{
+    cosine_similarity_f32, dot_product_f32, l2_norm, pack_codes, quantized_search_archival,
+    quantized_search_l3, target_has_simd_support, unpack_codes, BitDepth, LloydMaxCodebook, Metric,
+    PSquareQuantile, PolarQuantRotation, QuantizedVector, TurboQuant, TurboQuantConfig,
+    TurboQuantError,
+};
 
 /// Default block size in tokens, matching PagedAttention page granularity.
 pub const DEFAULT_BLOCK_SIZE: u32 = 16;

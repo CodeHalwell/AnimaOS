@@ -69,6 +69,14 @@ impl ArchivalStore {
         self.items.is_empty()
     }
 
+    /// Returns a slice of all stored items.
+    ///
+    /// Used by the TurboQuant integration layer (`turboquant::quantized_search_archival`)
+    /// to iterate over embeddings for quantised scoring (S2.7.8).
+    pub fn items(&self) -> &[ArchivedItem] {
+        &self.items
+    }
+
     /// Stores an item, validating its embedding dimensionality.
     pub fn store(&mut self, item: ArchivedItem) -> Result<(), ArchivalStoreError> {
         if item.embedding.len() != self.expected_dim {
