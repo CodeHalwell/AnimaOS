@@ -121,7 +121,7 @@ impl wasmtime::ResourceLimiter for CallState {
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         if desired > self.memory_limit {
             self.memory_exceeded = true;
             Ok(false)
@@ -132,10 +132,10 @@ impl wasmtime::ResourceLimiter for CallState {
 
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
-    ) -> anyhow::Result<bool> {
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
         Ok(true)
     }
 }
@@ -238,7 +238,7 @@ impl WasmSandbox {
                     if mem_exceeded {
                         SandboxError::MemoryExhausted
                     } else {
-                        Self::classify_fuel_or_trap(e, fuel_remaining)
+                        Self::classify_fuel_or_trap(e.into(), fuel_remaining)
                     }
                 })?;
                 Ok(instance)
@@ -289,7 +289,7 @@ impl WasmSandbox {
             if mem_exceeded {
                 SandboxError::MemoryExhausted
             } else {
-                Self::classify_fuel_or_trap(e, fuel_remaining)
+                Self::classify_fuel_or_trap(e.into(), fuel_remaining)
             }
         })?;
 
