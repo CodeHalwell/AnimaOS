@@ -42,8 +42,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use memory::{ArchivalEntry, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError, Provenance,
-             SourceTier};
+use memory::{
+    ArchivalEntry, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError, Provenance, SourceTier,
+};
 use serde::{Deserialize, Serialize};
 
 // ── Episode record ─────────────────────────────────────────────────────────
@@ -119,7 +120,11 @@ impl EpisodeRecord {
 /// |  2  | `1 / (1 + age_secs)` — recency |
 /// |  3  | `(summary_len / 256).min(1.0)` |
 pub fn embed_episode(record: &EpisodeRecord) -> Vec<f32> {
-    let success = if record.is_success() { 1.0_f32 } else { 0.0_f32 };
+    let success = if record.is_success() {
+        1.0_f32
+    } else {
+        0.0_f32
+    };
     let duration_norm = 1.0_f32 / (1.0_f32 + record.duration_secs() as f32);
     let now_ns = EpisodeRecord::now_ns();
     let age_secs = now_ns.saturating_sub(record.ended_at_ns) as f64 / 1_000_000_000.0;
@@ -160,7 +165,7 @@ pub fn unpack_episode(entry: &ArchivalEntry) -> Option<EpisodeRecord> {
         return None;
     }
     let started_at_ns = u64::from_le_bytes(payload[0..8].try_into().ok()?);
-    let ended_at_ns   = u64::from_le_bytes(payload[8..16].try_into().ok()?);
+    let ended_at_ns = u64::from_le_bytes(payload[8..16].try_into().ok()?);
 
     // source_key: "invocation_id|event_class|route_id|outcome|summary"
     let key = &entry.provenance.source_key;
@@ -172,12 +177,12 @@ pub fn unpack_episode(entry: &ArchivalEntry) -> Option<EpisodeRecord> {
     }
     Some(EpisodeRecord {
         invocation_id: parts[0].to_owned(),
-        event_class:   parts[1].to_owned(),
-        route_id:      parts[2].to_owned(),
+        event_class: parts[1].to_owned(),
+        route_id: parts[2].to_owned(),
         started_at_ns,
         ended_at_ns,
-        outcome:  parts[3].to_owned(),
-        summary:  parts[4].to_owned(),
+        outcome: parts[3].to_owned(),
+        summary: parts[4].to_owned(),
     })
 }
 
@@ -186,7 +191,7 @@ pub fn make_episode_archived_item(id: u64, record: &EpisodeRecord) -> ArchivedIt
     ArchivedItem {
         id,
         embedding: embed_episode(record),
-        payload:   pack_episode_payload(record),
+        payload: pack_episode_payload(record),
     }
 }
 
@@ -197,11 +202,7 @@ pub fn make_episode_archived_item(id: u64, record: &EpisodeRecord) -> ArchivedIt
 pub fn make_episode_provenance(record: &EpisodeRecord) -> Provenance {
     let source_key = format!(
         "{}|{}|{}|{}|{}",
-        record.invocation_id,
-        record.event_class,
-        record.route_id,
-        record.outcome,
-        record.summary,
+        record.invocation_id, record.event_class, record.route_id, record.outcome, record.summary,
     );
     Provenance::now(SourceTier::Episode, &source_key)
 }
@@ -233,7 +234,11 @@ pub struct EpisodeQuery {
 impl EpisodeQuery {
     /// Convenience constructor: top-k query with no recency cutoff.
     pub fn top_k(embedding: Vec<f32>, k: usize) -> Self {
-        Self { embedding, k, cutoff_ns: None }
+        Self {
+            embedding,
+            k,
+            cutoff_ns: None,
+        }
     }
 
     /// Adds a recency window (in nanoseconds) to the query.
@@ -379,7 +384,10 @@ mod tests {
         let item_id = 42_u64;
         let item = make_episode_archived_item(item_id, &rec);
         let prov = make_episode_provenance(&rec);
-        let entry = memory::ArchivalEntry { item, provenance: prov };
+        let entry = memory::ArchivalEntry {
+            item,
+            provenance: prov,
+        };
         let unpacked = unpack_episode(&entry).expect("unpack must succeed");
         assert_eq!(unpacked.invocation_id, rec.invocation_id);
         assert_eq!(unpacked.event_class, rec.event_class);
@@ -396,7 +404,10 @@ mod tests {
         let rec = episode("inv-pipe", "success", "step 1 | step 2 | step 3");
         let item = make_episode_archived_item(1, &rec);
         let prov = make_episode_provenance(&rec);
-        let entry = memory::ArchivalEntry { item, provenance: prov };
+        let entry = memory::ArchivalEntry {
+            item,
+            provenance: prov,
+        };
         let unpacked = unpack_episode(&entry).expect("unpack must succeed");
         assert_eq!(unpacked.summary, "step 1 | step 2 | step 3");
     }
@@ -423,11 +434,13 @@ mod tests {
     fn episode_store_archives_into_l3_with_episode_provenance() {
         let (mut archive, path) = temp_archive("archive_provenance");
         let rec = episode("inv-3", "success", "archived episode");
-        EpisodeStore::archive(&mut archive, 1, &rec)
-            .expect("archive must succeed");
+        EpisodeStore::archive(&mut archive, 1, &rec).expect("archive must succeed");
         let entries = archive.entries();
         assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0].provenance.source_tier, SourceTier::Episode));
+        assert!(matches!(
+            entries[0].provenance.source_tier,
+            SourceTier::Episode
+        ));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -458,10 +471,8 @@ mod tests {
             summary: "cortex crashed".to_owned(),
         };
 
-        EpisodeStore::archive(&mut archive, 1, &success_rec)
-            .expect("archive success_rec");
-        EpisodeStore::archive(&mut archive, 2, &fault_rec)
-            .expect("archive fault_rec");
+        EpisodeStore::archive(&mut archive, 1, &success_rec).expect("archive success_rec");
+        EpisodeStore::archive(&mut archive, 2, &fault_rec).expect("archive fault_rec");
 
         // Query: similarity to the success embedding (dim-0 = 1.0 → "success").
         let success_emb = embed_episode(&success_rec);
@@ -487,7 +498,9 @@ mod tests {
         let node = memory::MemoryNode::new(0.9, 0.1);
         let somatic_item = memory::archive_memory_node(1, "somatic-key", &node);
         let somatic_prov = memory::Provenance::now(SourceTier::L1, "somatic-key");
-        archive.demote(somatic_item, somatic_prov).expect("demote somatic");
+        archive
+            .demote(somatic_item, somatic_prov)
+            .expect("demote somatic");
 
         // Insert one episode entry.
         let rec = episode("ep-1", "success", "solo episode");
@@ -513,7 +526,7 @@ mod tests {
             event_class: "UserQuery".to_owned(),
             route_id: "cheap-local".to_owned(),
             started_at_ns: 0,
-            ended_at_ns: 1,          // 1 ns after UNIX epoch — ancient
+            ended_at_ns: 1, // 1 ns after UNIX epoch — ancient
             outcome: "success".to_owned(),
             summary: "ancient episode".to_owned(),
         };
@@ -537,8 +550,8 @@ mod tests {
         // Apply a 1-hour recency cutoff.
         let one_hour_ns: u64 = 3_600 * 1_000_000_000;
         // Use a neutral query embedding so both records score equally before recency.
-        let query = EpisodeQuery::top_k(vec![0.5, 0.5, 0.5, 0.5], 5)
-            .with_recency_cutoff(one_hour_ns);
+        let query =
+            EpisodeQuery::top_k(vec![0.5, 0.5, 0.5, 0.5], 5).with_recency_cutoff(one_hour_ns);
         let results = EpisodeStore::retrieve(&archive, &query);
 
         // The "old" episode ends at ns=1, far before `now - 1h`, so it must be excluded.
@@ -548,7 +561,9 @@ mod tests {
             "old episode must be excluded by recency cutoff"
         );
         assert!(
-            results.iter().any(|m| m.record.invocation_id == "fresh-inv"),
+            results
+                .iter()
+                .any(|m| m.record.invocation_id == "fresh-inv"),
             "fresh episode must be included"
         );
 
@@ -615,7 +630,10 @@ mod tests {
         let dur = rec.duration_secs();
         assert!((dur - 2.0).abs() < 1e-6, "duration must be 2.0 s");
 
-        let fault = EpisodeRecord { outcome: "fault".to_owned(), ..rec.clone() };
+        let fault = EpisodeRecord {
+            outcome: "fault".to_owned(),
+            ..rec.clone()
+        };
         assert!(!fault.is_success());
     }
 }

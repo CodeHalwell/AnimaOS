@@ -141,7 +141,9 @@ pub struct AgentSelfModel {
 
 // ── Schema version ─────────────────────────────────────────────────────────
 
-fn default_schema_version() -> u32 { 1 }
+fn default_schema_version() -> u32 {
+    1
+}
 
 /// Full identity memory document.
 ///
@@ -251,13 +253,19 @@ impl IdentityMemory {
     /// after `open` returns.
     pub fn open(path: &Path) -> Result<Self, IdentityError> {
         if path.exists() {
-            let contents = std::fs::read_to_string(path)
-                .map_err(|e| IdentityError::Io(e.to_string()))?;
+            let contents =
+                std::fs::read_to_string(path).map_err(|e| IdentityError::Io(e.to_string()))?;
             let doc: IdentityDocument = serde_json::from_str(&contents)
                 .map_err(|e| IdentityError::ParseError(e.to_string()))?;
-            Ok(Self { path: path.to_owned(), document: doc })
+            Ok(Self {
+                path: path.to_owned(),
+                document: doc,
+            })
         } else {
-            let store = Self { path: path.to_owned(), document: IdentityDocument::default() };
+            let store = Self {
+                path: path.to_owned(),
+                document: IdentityDocument::default(),
+            };
             store.flush()?;
             Ok(store)
         }
@@ -350,16 +358,13 @@ impl IdentityMemory {
             return Ok(());
         }
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| IdentityError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| IdentityError::Io(e.to_string()))?;
         }
         let json = serde_json::to_string_pretty(&self.document)
             .map_err(|e| IdentityError::Io(e.to_string()))?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json.as_bytes())
-            .map_err(|e| IdentityError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| IdentityError::Io(e.to_string()))?;
+        std::fs::write(&tmp, json.as_bytes()).map_err(|e| IdentityError::Io(e.to_string()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| IdentityError::Io(e.to_string()))?;
         Ok(())
     }
 }
@@ -369,8 +374,8 @@ impl IdentityMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AuditLog;
     use crate::AuditEntry;
+    use crate::AuditLog;
 
     // S5.5.3 ─────────────────────────────────────────────────────────────────
 
@@ -421,13 +426,19 @@ mod tests {
         let mut store = IdentityMemory::in_memory();
         let mut log = AuditLog::new();
 
-        store.set_fact("name", "Alice", &mut log, "agent-1")
+        store
+            .set_fact("name", "Alice", &mut log, "agent-1")
             .expect("set_fact must succeed");
 
         assert_eq!(store.get_fact("name"), Some("Alice"));
         assert_eq!(log.len(), 1);
         match &log.entries()[0] {
-            AuditEntry::IdentityUpdated { agent_id, key, old_value, new_value } => {
+            AuditEntry::IdentityUpdated {
+                agent_id,
+                key,
+                old_value,
+                new_value,
+            } => {
                 assert_eq!(agent_id, "agent-1");
                 assert_eq!(key, "name");
                 assert!(old_value.is_none(), "old_value must be None for a new key");
@@ -443,12 +454,20 @@ mod tests {
         let mut store = IdentityMemory::in_memory();
         let mut log = AuditLog::new();
 
-        store.set_fact("role", "developer", &mut log, "agent-x").unwrap();
-        store.set_fact("role", "architect", &mut log, "agent-x").unwrap();
+        store
+            .set_fact("role", "developer", &mut log, "agent-x")
+            .unwrap();
+        store
+            .set_fact("role", "architect", &mut log, "agent-x")
+            .unwrap();
 
         assert_eq!(log.len(), 2);
         match &log.entries()[1] {
-            AuditEntry::IdentityUpdated { old_value, new_value, .. } => {
+            AuditEntry::IdentityUpdated {
+                old_value,
+                new_value,
+                ..
+            } => {
                 assert_eq!(old_value.as_deref(), Some("developer"));
                 assert_eq!(new_value, "architect");
             }
@@ -471,16 +490,19 @@ mod tests {
     /// (E2.6 exit criterion 1).
     #[test]
     fn identity_store_survives_process_restart() {
-        let path = std::env::temp_dir()
-            .join("animaos_test_identity_restart.json");
+        let path = std::env::temp_dir().join("animaos_test_identity_restart.json");
         let _ = std::fs::remove_file(&path);
 
         // First "process".
         {
             let mut store = IdentityMemory::open(&path).expect("open must succeed");
             let mut log = AuditLog::new();
-            store.set_fact("project", "AnimaOS", &mut log, "agent-restart").unwrap();
-            store.set_fact("version", "0.1.0", &mut log, "agent-restart").unwrap();
+            store
+                .set_fact("project", "AnimaOS", &mut log, "agent-restart")
+                .unwrap();
+            store
+                .set_fact("version", "0.1.0", &mut log, "agent-restart")
+                .unwrap();
         }
 
         // Second "process" — re-open from disk.
@@ -496,8 +518,7 @@ mod tests {
     /// `open` creates the file when it does not exist.
     #[test]
     fn open_creates_file_when_absent() {
-        let path = std::env::temp_dir()
-            .join("animaos_test_identity_create.json");
+        let path = std::env::temp_dir().join("animaos_test_identity_create.json");
         let _ = std::fs::remove_file(&path);
 
         assert!(!path.exists(), "test pre-condition: file must not exist");
@@ -510,8 +531,7 @@ mod tests {
     /// `open` rejects a file with invalid JSON.
     #[test]
     fn open_rejects_invalid_json() {
-        let path = std::env::temp_dir()
-            .join("animaos_test_identity_bad.json");
+        let path = std::env::temp_dir().join("animaos_test_identity_bad.json");
         std::fs::write(&path, b"not-json").unwrap();
         let err = IdentityMemory::open(&path).expect_err("must fail on bad JSON");
         assert!(matches!(err, IdentityError::ParseError(_)));
@@ -530,7 +550,9 @@ mod tests {
     fn identity_is_injectable_as_distinct_json_section() {
         let mut store = IdentityMemory::in_memory();
         let mut log = AuditLog::new();
-        store.set_fact("preferred_language", "Rust", &mut log, "agent-y").unwrap();
+        store
+            .set_fact("preferred_language", "Rust", &mut log, "agent-y")
+            .unwrap();
         store.document_mut().agent_self_model.name = Some("TestBot".to_owned());
 
         let json = store.to_json();
@@ -540,7 +562,13 @@ mod tests {
 
         // The cortex can recover the document.
         let recovered = IdentityDocument::from_json(&json).expect("recovery must succeed");
-        assert_eq!(recovered.facts.get("preferred_language").map(String::as_str), Some("Rust"));
+        assert_eq!(
+            recovered
+                .facts
+                .get("preferred_language")
+                .map(String::as_str),
+            Some("Rust")
+        );
         assert_eq!(recovered.agent_self_model.name.as_deref(), Some("TestBot"));
     }
 
@@ -565,17 +593,27 @@ mod tests {
         const AGENT: &str = "anima";
 
         // `anima identity set timezone "America/New_York"`
-        store.set_fact("timezone", "America/New_York", &mut log, AGENT).unwrap();
+        store
+            .set_fact("timezone", "America/New_York", &mut log, AGENT)
+            .unwrap();
 
         // `anima identity show timezone`
         let shown = store.get_fact("timezone");
-        assert_eq!(shown, Some("America/New_York"), "show must return the set value");
+        assert_eq!(
+            shown,
+            Some("America/New_York"),
+            "show must return the set value"
+        );
 
         // Audit trail must carry the change.
-        let entry = log.entries().iter().find(|e| {
-            matches!(e, AuditEntry::IdentityUpdated { key, .. } if key == "timezone")
-        });
-        assert!(entry.is_some(), "audit log must contain an IdentityUpdated entry for 'timezone'");
+        let entry = log
+            .entries()
+            .iter()
+            .find(|e| matches!(e, AuditEntry::IdentityUpdated { key, .. } if key == "timezone"));
+        assert!(
+            entry.is_some(),
+            "audit log must contain an IdentityUpdated entry for 'timezone'"
+        );
 
         if let Some(AuditEntry::IdentityUpdated { new_value, .. }) = entry {
             assert_eq!(new_value, "America/New_York");

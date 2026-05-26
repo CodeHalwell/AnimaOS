@@ -989,7 +989,7 @@ and repeated vetoes escalating to user attention.
 3. Every veto entry in the audit log carries the source detector, the
    action that was blocked, and the cortex's stated intent.
 
-### Epic E5.7 — Interoceptive Modulation ⬜
+### Epic E5.7 — Interoceptive Modulation ✅
 
 **Scope.** Wire the homeostatic signals into the gate, the router,
 and the cache controller so that body state continuously modulates
@@ -1003,29 +1003,69 @@ change under induced stress.
 - S5.7.1 Signal contract: extend `interoception` to publish a stable
   set of scalar signals (`thermal_load`, `compute_pressure`,
   `memory_pressure`, `power_budget`, `financial_budget`,
-  `attention_demand`) on the audit/telemetry stream at 1 Hz.
+  `attention_demand`) on the audit/telemetry stream at 1 Hz. ✅
+  (`interoception/src/signals.rs` — `InteroceptiveSignals` struct with
+  all 6 fields; `SignalPublisher` trait + `FnPublisher` + `NullPublisher`
+  for 1 Hz publication; `InteroceptiveSensorBundle::tick()` samples and
+  publishes in one call; `AuditEntry::InteroceptiveSnapshot` persists each
+  snapshot in the audit log; `HomeostaticSignals::from_interoceptive()`
+  bridges the sensor layer to the gate)
 - S5.7.2 Financial budget sensor: track API spend per provider
   against configurable daily/monthly budgets; emit `financial_budget`
-  as a normalised scalar.
+  as a normalised scalar. ✅ (`interoception/src/budget.rs` —
+  `FinancialBudgetSensor` with `SpendRecord` ledger, `CostTable`
+  (USD per 1 M tokens with wildcard fallback), `BudgetConfig`
+  (daily/monthly USD limits); `financial_budget_scalar(now_ns)` computes
+  remaining fraction; atomic per-day accounting via nanosecond epoch
+  buckets)
 - S5.7.3 Power and attention sensors: read battery / AC state from the
   host and idle / foreground signals from the windowing system on the
-  hosted target; both are gated by explicit opt-in.
+  hosted target; both are gated by explicit opt-in. ✅
+  (`interoception/src/power.rs` — `PowerSensor` with `PowerConfig::enabled`
+  opt-in; Linux sysfs `/sys/class/power_supply` reader; AC sentinel on
+  disabled or error; `AttentionSensor` with `AttentionConfig::enabled`
+  opt-in; `AttentionReading::attention_demand_scalar(ceiling_secs)` decays
+  linearly with idle time; both fallback conservatively when data unavailable)
 - S5.7.4 Gate modulation: thresholds rise under thermal stress, drop
   under high attention demand, and require higher value estimates
-  under financial pressure.
+  under financial pressure. ✅ (Already implemented in E5.2 via
+  `ThresholdGate::adaptive_threshold(&HomeostaticSignals)`; E5.7 adds
+  `HomeostaticSignals::from_interoceptive(&InteroceptiveSignals)` so real
+  sensor values are now wired into the gate; 3 new tests in `gate.rs`
+  verify the bridge and end-to-end behaviour under severe stress)
 - S5.7.5 Router modulation: route selection shifts toward cheaper
   models under power and financial pressure; planning horizon
-  shortens under low battery.
+  shortens under low battery. ✅ (`StaticRouter::resolve_with_modulation()`
+  applies three-rule priority table: (1) severe depletion < 0.20 → force
+  `cheap-local`; (2) moderate pressure 0.20–0.40 → downgrade `frontier`
+  → `mid-tier`; (3) thermal_load > 0.80 → downgrade `frontier` →
+  `mid-tier`; `ModulationDecision<'r>` carries requested vs effective route
+  + reason string; `AuditEntry::RouterModulated` logged when modulation
+  fires; `record_modulated_router_decision()` helper writes both entries)
 - S5.7.6 Cache-controller modulation: the controller's state
   incorporates a memory-pressure signal so eviction becomes more
-  aggressive under pressure.
+  aggressive under pressure. ⬜ *Deferred — depends on E5.4 (Learned
+  KV-Cache Controller) which has not yet landed.*
 
 **Exit criteria.**
 1. A reproducible stress harness drives each signal across its full
    range and the resulting gate / router / controller behaviour is
-   logged and asserted against a behavioural specification.
+   logged and asserted against a behavioural specification. ✅
+   (`stress_harness_sweeps_financial_budget_across_full_range` — 11 steps
+   from 0.0 to 1.0, asserts cheap-local/mid-tier/frontier at each boundary;
+   `stress_harness_sweeps_power_budget_across_full_range` — same sweep on
+   power_budget; `stress_harness_sweeps_thermal_load_across_full_range` —
+   11 steps, asserts mid-tier for thermal > 0.80; all 58 new tests pass;
+   `record_modulated_decision_emits_router_modulated_entry_when_modulated`
+   — audit trail verified)
 2. The `anima why` CLI command from E5.2 includes the homeostatic
-   signal values at the time of the decision.
+   signal values at the time of the decision. ✅ (`cmd_why()` in
+   `kernels/hosted/src/main.rs` — prints live `InteroceptiveSensorBundle`
+   snapshot (all 6 signals + aggregate_stress) before gate scenarios;
+   gate decisions include all 6 homeostatic fields (from E5.2);
+   new "Router modulation with live interoceptive signals" section sweeps
+   6 scenarios from neutral through severe financial/power/thermal stress
+   and shows `RouterModulated` audit entry count)
 
 ### Epic E5.8 — Kill-Shot Demonstrations ⬜
 

@@ -52,7 +52,10 @@
 
 #![forbid(unsafe_code)]
 
-use crate::{AuditEntry, AuditLog, CostClass, InvokeMemoryScope, InvokeRequest, SemanticClass, ToolSpec};
+use crate::{
+    AuditEntry, AuditLog, CostClass, HomeostaticSignals, InvokeMemoryScope, InvokeRequest,
+    SemanticClass, ToolSpec,
+};
 
 // ── Route ID ──────────────────────────────────────────────────────────────────
 
@@ -140,7 +143,10 @@ pub struct ToolScope {
 impl ToolScope {
     /// Construct a new tool scope.
     pub fn new(name: impl Into<String>, allowed_tools: Vec<String>) -> Self {
-        Self { name: name.into(), allowed_tools }
+        Self {
+            name: name.into(),
+            allowed_tools,
+        }
     }
 
     /// Returns `true` when `tool_name` is explicitly permitted by this scope.
@@ -184,17 +190,32 @@ pub struct MemoryScope {
 impl MemoryScope {
     /// Minimal scope: identity + L1 only (cheap-local default).
     pub fn minimal() -> Self {
-        Self { identity: true, l1: true, l2: false, l3: false }
+        Self {
+            identity: true,
+            l1: true,
+            l2: false,
+            l3: false,
+        }
     }
 
     /// Mid scope: identity + L1 + L2 (mid-tier default).
     pub fn mid() -> Self {
-        Self { identity: true, l1: true, l2: true, l3: false }
+        Self {
+            identity: true,
+            l1: true,
+            l2: true,
+            l3: false,
+        }
     }
 
     /// Full scope: all tiers (frontier default).
     pub fn full() -> Self {
-        Self { identity: true, l1: true, l2: true, l3: true }
+        Self {
+            identity: true,
+            l1: true,
+            l2: true,
+            l3: true,
+        }
     }
 
     /// Convert to the IPC wire representation used in [`InvokeRequest`].
@@ -226,7 +247,10 @@ pub struct PromptScaffold {
 impl PromptScaffold {
     /// A no-op scaffold (empty prefix and suffix).
     pub fn empty() -> Self {
-        Self { system_prefix: String::new(), system_suffix: String::new() }
+        Self {
+            system_prefix: String::new(),
+            system_suffix: String::new(),
+        }
     }
 
     /// Apply this scaffold around a base task description.
@@ -256,17 +280,26 @@ pub struct TerminationPolicy {
 impl TerminationPolicy {
     /// Tight limits for cheap-local invocations (3 turns / 3 calls).
     pub fn cheap_local() -> Self {
-        Self { max_turns: 3, max_tool_calls: 3 }
+        Self {
+            max_turns: 3,
+            max_tool_calls: 3,
+        }
     }
 
     /// Balanced limits for mid-tier invocations (8 turns / 8 calls).
     pub fn mid_tier() -> Self {
-        Self { max_turns: 8, max_tool_calls: 8 }
+        Self {
+            max_turns: 8,
+            max_tool_calls: 8,
+        }
     }
 
     /// Generous limits for frontier invocations (20 turns / 20 calls).
     pub fn frontier() -> Self {
-        Self { max_turns: 20, max_tool_calls: 20 }
+        Self {
+            max_turns: 20,
+            max_tool_calls: 20,
+        }
     }
 }
 
@@ -352,15 +385,17 @@ impl std::fmt::Display for RouteError {
                 f,
                 "route '{route_id}': tool scope entry [{index}] has an empty name"
             ),
-            RouteError::ZeroMaxTurns { route_id } => write!(
-                f,
-                "route '{route_id}': termination.max_turns must be > 0"
-            ),
+            RouteError::ZeroMaxTurns { route_id } => {
+                write!(f, "route '{route_id}': termination.max_turns must be > 0")
+            }
             RouteError::ZeroMaxToolCalls { route_id } => write!(
                 f,
                 "route '{route_id}': termination.max_tool_calls must be > 0"
             ),
-            RouteError::UnknownTool { route_id, tool_name } => write!(
+            RouteError::UnknownTool {
+                route_id,
+                tool_name,
+            } => write!(
                 f,
                 "route '{route_id}': tool '{tool_name}' is not in the known-tools list"
             ),
@@ -434,11 +469,7 @@ pub trait Router: Send + Sync {
     /// - `semantic_class`: the event's semantic classification (reserved for
     ///   future per-class specialisation; currently ignored by [`StaticRouter`]).
     /// - `cost_class`: the cost tier selected by the Striatal Gate (E5.2).
-    fn resolve(
-        &self,
-        semantic_class: SemanticClass,
-        cost_class: CostClass,
-    ) -> &Route;
+    fn resolve(&self, semantic_class: SemanticClass, cost_class: CostClass) -> &Route;
 }
 
 // ── Static router (S5.3.2) ────────────────────────────────────────────────────
@@ -481,7 +512,11 @@ impl StaticRouter {
         validate_route(&mid_tier, known_tools)?;
         validate_route(&frontier, known_tools)?;
 
-        Ok(Self { cheap_local, mid_tier, frontier })
+        Ok(Self {
+            cheap_local,
+            mid_tier,
+            frontier,
+        })
     }
 
     /// Construct a `StaticRouter` using the three default baseline routes.
@@ -491,8 +526,7 @@ impl StaticRouter {
     /// [`ToolRegistry`] reference.
     pub fn with_defaults() -> Result<Self, RouteError> {
         let (cl, mt, fr) = default_routes();
-        let known_tools: Vec<String> =
-            vec!["clock".into(), "echo".into(), "text-io".into()];
+        let known_tools: Vec<String> = vec!["clock".into(), "echo".into(), "text-io".into()];
         Self::new(cl, mt, fr, &known_tools)
     }
 
@@ -517,11 +551,7 @@ impl Router for StaticRouter {
     ///
     /// `semantic_class` is accepted for forward compatibility but ignored by
     /// this implementation.
-    fn resolve(
-        &self,
-        _semantic_class: SemanticClass,
-        cost_class: CostClass,
-    ) -> &Route {
+    fn resolve(&self, _semantic_class: SemanticClass, cost_class: CostClass) -> &Route {
         match cost_class {
             CostClass::CheapLocal => &self.cheap_local,
             CostClass::MidTier => &self.mid_tier,
@@ -540,10 +570,7 @@ pub fn default_routes() -> (Route, Route, Route) {
     let cheap_local = Route {
         id: RouteId::new(RouteId::CHEAP_LOCAL),
         model: ModelSelector::CheapLocal,
-        tool_scope: ToolScope::new(
-            "core",
-            vec!["clock".to_string(), "echo".to_string()],
-        ),
+        tool_scope: ToolScope::new("core", vec!["clock".to_string(), "echo".to_string()]),
         memory_scope: MemoryScope::minimal(),
         prompt_scaffold: PromptScaffold {
             system_prefix: "[cheap-local] ".to_string(),
@@ -595,8 +622,158 @@ pub fn default_routes() -> (Route, Route, Route) {
 
 // ── Audit helper ──────────────────────────────────────────────────────────────
 
-/// Record a [`AuditEntry::RouterDecision`] in the audit log.
+// ── Homeostatic modulation (E5.7, S5.7.5) ────────────────────────────────────
+
+/// The outcome of a modulated route resolution (E5.7).
 ///
+/// When [`StaticRouter::resolve_with_modulation`] determines that homeostatic
+/// signals require a cheaper route than the gate's cost class would select,
+/// `was_modulated` is `true` and `effective_route` points to the downgraded
+/// route; `requested_route` always points to what the gate asked for.
+///
+/// Both fields are references into the `StaticRouter`, so the struct has the
+/// router's lifetime.
+#[derive(Debug)]
+pub struct ModulationDecision<'r> {
+    /// The route the gate's cost class would have selected (pre-modulation).
+    pub requested_route: &'r Route,
+    /// The route that will actually be used (post-modulation).
+    ///
+    /// Equal to `requested_route` when no modulation was applied.
+    pub effective_route: &'r Route,
+    /// Whether the effective route differs from the requested route.
+    pub was_modulated: bool,
+    /// Human-readable explanation of the modulation, if applied.
+    ///
+    /// `None` when `was_modulated = false`.
+    pub modulation_reason: Option<String>,
+}
+
+impl StaticRouter {
+    /// Resolve a route and apply homeostatic modulation (E5.7, S5.7.5).
+    ///
+    /// Modulation rules (applied in priority order):
+    ///
+    /// | Condition | Effect |
+    /// |-----------|--------|
+    /// | `financial_budget < 0.20` OR `power_budget < 0.20` | Force `cheap-local` |
+    /// | `financial_budget < 0.40` OR `power_budget < 0.40` | Downgrade `frontier` → `mid-tier` |
+    /// | `thermal_load > 0.80` | Downgrade `frontier` → `mid-tier` |
+    /// | otherwise | No modulation — route as selected by the gate |
+    ///
+    /// Under severe resource pressure (rule 1), even a `CheapLocal` gate
+    /// decision is passed through unchanged because it is already the cheapest
+    /// available route.
+    ///
+    /// # Return value
+    ///
+    /// A [`ModulationDecision`] carrying both the pre- and post-modulation
+    /// routes and a human-readable reason string when modulation was applied.
+    pub fn resolve_with_modulation(
+        &self,
+        semantic_class: SemanticClass,
+        cost_class: CostClass,
+        signals: &HomeostaticSignals,
+    ) -> ModulationDecision<'_> {
+        let requested_route = self.resolve(semantic_class, cost_class);
+
+        // Rule 1: Severe resource depletion — force cheap-local.
+        if signals.financial_budget < 0.20 || signals.power_budget < 0.20 {
+            let effective_route = self.resolve(semantic_class, CostClass::CheapLocal);
+            let was_modulated = effective_route.id != requested_route.id;
+            return ModulationDecision {
+                requested_route,
+                effective_route,
+                was_modulated,
+                modulation_reason: if was_modulated {
+                    Some(format!(
+                        "severe resource pressure (financial_budget={:.2}, power_budget={:.2}) \
+                         — forced to cheap-local",
+                        signals.financial_budget, signals.power_budget
+                    ))
+                } else {
+                    None
+                },
+            };
+        }
+
+        // Rule 2: Moderate resource depletion — downgrade frontier → mid-tier.
+        if (signals.financial_budget < 0.40 || signals.power_budget < 0.40)
+            && cost_class == CostClass::Frontier
+        {
+            let effective_route = self.resolve(semantic_class, CostClass::MidTier);
+            return ModulationDecision {
+                requested_route,
+                effective_route,
+                was_modulated: true,
+                modulation_reason: Some(format!(
+                    "moderate resource pressure (financial_budget={:.2}, power_budget={:.2}) \
+                     — downgraded frontier → mid-tier",
+                    signals.financial_budget, signals.power_budget
+                )),
+            };
+        }
+
+        // Rule 3: Thermal stress — downgrade frontier → mid-tier.
+        if signals.thermal_load > 0.80 && cost_class == CostClass::Frontier {
+            let effective_route = self.resolve(semantic_class, CostClass::MidTier);
+            return ModulationDecision {
+                requested_route,
+                effective_route,
+                was_modulated: true,
+                modulation_reason: Some(format!(
+                    "thermal stress (thermal_load={:.2}) — downgraded frontier → mid-tier",
+                    signals.thermal_load
+                )),
+            };
+        }
+
+        // No modulation applied.
+        ModulationDecision {
+            requested_route,
+            effective_route: requested_route,
+            was_modulated: false,
+            modulation_reason: None,
+        }
+    }
+}
+
+/// Record a modulated router decision in the audit log.
+///
+/// Extends [`record_router_decision`] with the modulation outcome so the
+/// `anima why` CLI can report both what the gate asked for and what the
+/// router delivered.
+pub fn record_modulated_router_decision(
+    audit: &mut AuditLog,
+    agent_id: &str,
+    event_id: &str,
+    decision: &ModulationDecision<'_>,
+    tools_available: usize,
+    tools_permitted: usize,
+) {
+    // Always record the effective route.
+    record_router_decision(
+        audit,
+        agent_id,
+        event_id,
+        decision.effective_route,
+        tools_available,
+        tools_permitted,
+    );
+    // If modulation changed the route, also log the modulation event.
+    if decision.was_modulated {
+        audit.push(AuditEntry::RouterModulated {
+            agent_id: agent_id.to_string(),
+            event_id: event_id.to_string(),
+            requested_route_id: decision.requested_route.id.0.clone(),
+            effective_route_id: decision.effective_route.id.0.clone(),
+            reason: decision.modulation_reason.clone().unwrap_or_default(),
+        });
+    }
+}
+
+// ── Audit helper ──────────────────────────────────────────────────────────────
+
 /// Called by [`build_routed_request`] (and by the vita dispatch loop) after
 /// a route is resolved so every routing decision is permanently traceable.
 pub fn record_router_decision(
@@ -670,16 +847,28 @@ mod tests {
     /// All three built-in tools as ToolSpec structs.
     fn all_builtin_tools() -> Vec<ToolSpec> {
         vec![
-            ToolSpec { name: "clock".into(), description: "Wall-clock time".into() },
-            ToolSpec { name: "echo".into(), description: "Echo payload".into() },
-            ToolSpec { name: "text-io".into(), description: "Text IO".into() },
+            ToolSpec {
+                name: "clock".into(),
+                description: "Wall-clock time".into(),
+            },
+            ToolSpec {
+                name: "echo".into(),
+                description: "Echo payload".into(),
+            },
+            ToolSpec {
+                name: "text-io".into(),
+                description: "Text IO".into(),
+            },
         ]
     }
 
     /// A ToolSpec list that includes a non-standard tool.
     fn extended_tools() -> Vec<ToolSpec> {
         let mut tools = all_builtin_tools();
-        tools.push(ToolSpec { name: "search".into(), description: "Web search".into() });
+        tools.push(ToolSpec {
+            name: "search".into(),
+            description: "Web search".into(),
+        });
         tools
     }
 
@@ -752,13 +941,23 @@ mod tests {
         );
 
         let tool_names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(tool_names.contains(&"clock"), "cheap-local must include clock");
-        assert!(tool_names.contains(&"echo"), "cheap-local must include echo");
+        assert!(
+            tool_names.contains(&"clock"),
+            "cheap-local must include clock"
+        );
+        assert!(
+            tool_names.contains(&"echo"),
+            "cheap-local must include echo"
+        );
         assert!(
             !tool_names.contains(&"text-io"),
             "cheap-local must NOT include text-io, got: {tool_names:?}"
         );
-        assert_eq!(tool_names.len(), 2, "cheap-local route must have exactly 2 tools");
+        assert_eq!(
+            tool_names.len(),
+            2,
+            "cheap-local route must have exactly 2 tools"
+        );
     }
 
     /// Mid-tier route: cortex sees `clock`, `echo`, AND `text-io`.
@@ -777,8 +976,15 @@ mod tests {
         let tool_names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"clock"), "mid-tier must include clock");
         assert!(tool_names.contains(&"echo"), "mid-tier must include echo");
-        assert!(tool_names.contains(&"text-io"), "mid-tier must include text-io");
-        assert_eq!(tool_names.len(), 3, "mid-tier route must have exactly 3 tools");
+        assert!(
+            tool_names.contains(&"text-io"),
+            "mid-tier must include text-io"
+        );
+        assert_eq!(
+            tool_names.len(),
+            3,
+            "mid-tier route must have exactly 3 tools"
+        );
     }
 
     /// Frontier route: cortex sees all three built-in tools.
@@ -798,7 +1004,11 @@ mod tests {
         assert!(tool_names.contains(&"clock"));
         assert!(tool_names.contains(&"echo"));
         assert!(tool_names.contains(&"text-io"));
-        assert_eq!(tool_names.len(), 3, "frontier route must have exactly 3 tools");
+        assert_eq!(
+            tool_names.len(),
+            3,
+            "frontier route must have exactly 3 tools"
+        );
     }
 
     /// Non-route tools are stripped even when offered in the available set.
@@ -1028,12 +1238,17 @@ mod tests {
             tool_scope: ToolScope::new("core", vec!["clock".into()]),
             memory_scope: MemoryScope::minimal(),
             prompt_scaffold: PromptScaffold::empty(),
-            termination: TerminationPolicy { max_turns: 0, max_tool_calls: 3 }, // zero
+            termination: TerminationPolicy {
+                max_turns: 0,
+                max_tool_calls: 3,
+            }, // zero
         };
         let result = StaticRouter::new(bad_cl, mt, fr, &[]);
         assert_eq!(
             result.unwrap_err(),
-            RouteError::ZeroMaxTurns { route_id: "zero-turns".into() }
+            RouteError::ZeroMaxTurns {
+                route_id: "zero-turns".into()
+            }
         );
     }
 
@@ -1047,12 +1262,17 @@ mod tests {
             tool_scope: ToolScope::new("core", vec!["clock".into()]),
             memory_scope: MemoryScope::mid(),
             prompt_scaffold: PromptScaffold::empty(),
-            termination: TerminationPolicy { max_turns: 8, max_tool_calls: 0 }, // zero
+            termination: TerminationPolicy {
+                max_turns: 8,
+                max_tool_calls: 0,
+            }, // zero
         };
         let result = StaticRouter::new(cl, bad_mt, fr, &[]);
         assert_eq!(
             result.unwrap_err(),
-            RouteError::ZeroMaxToolCalls { route_id: "zero-calls".into() }
+            RouteError::ZeroMaxToolCalls {
+                route_id: "zero-calls".into()
+            }
         );
     }
 
@@ -1222,9 +1442,18 @@ mod tests {
     fn tool_scope_filter_preserves_order_of_available_tools() {
         let scope = ToolScope::new("test", vec!["echo".into(), "clock".into()]);
         let available = vec![
-            ToolSpec { name: "clock".into(), description: "c".into() },
-            ToolSpec { name: "echo".into(), description: "e".into() },
-            ToolSpec { name: "text-io".into(), description: "t".into() },
+            ToolSpec {
+                name: "clock".into(),
+                description: "c".into(),
+            },
+            ToolSpec {
+                name: "echo".into(),
+                description: "e".into(),
+            },
+            ToolSpec {
+                name: "text-io".into(),
+                description: "t".into(),
+            },
         ];
         let filtered = scope.filter_tools(&available);
         // Order matches available[], not allowed_tools[]
@@ -1260,5 +1489,350 @@ mod tests {
         assert_eq!(invoke_scope.l1, scope.l1);
         assert_eq!(invoke_scope.l2, scope.l2);
         assert_eq!(invoke_scope.l3, scope.l3);
+    }
+
+    // ── E5.7 Homeostatic modulation stress harness ────────────────────────────
+    //
+    // Exit criterion 1: "A reproducible stress harness drives each signal
+    // across its full range and the resulting gate/router/controller behaviour
+    // is logged and asserted against a behavioural specification."
+
+    fn default_router() -> StaticRouter {
+        StaticRouter::with_defaults().expect("default router should construct without error")
+    }
+
+    fn neutral_signals() -> HomeostaticSignals {
+        HomeostaticSignals::neutral()
+    }
+
+    fn stressed_signals(financial: f32, power: f32, thermal: f32) -> HomeostaticSignals {
+        HomeostaticSignals {
+            thermal_load: thermal,
+            compute_pressure: thermal,
+            memory_pressure: 0.0,
+            power_budget: power,
+            financial_budget: financial,
+            attention_demand: 0.0,
+        }
+    }
+
+    // ── No-modulation baseline ────────────────────────────────────────────────
+
+    #[test]
+    fn neutral_signals_do_not_trigger_modulation_for_any_cost_class() {
+        let router = default_router();
+        let signals = neutral_signals();
+        for cost in [
+            CostClass::CheapLocal,
+            CostClass::MidTier,
+            CostClass::Frontier,
+        ] {
+            let decision = router.resolve_with_modulation(SemanticClass::UserQuery, cost, &signals);
+            assert!(
+                !decision.was_modulated,
+                "neutral signals should never trigger modulation for {:?}",
+                cost
+            );
+            assert_eq!(decision.effective_route.id, decision.requested_route.id);
+            assert!(decision.modulation_reason.is_none());
+        }
+    }
+
+    // ── Rule 1: severe financial depletion (< 0.20) ──────────────────────────
+
+    #[test]
+    fn severe_financial_depletion_forces_frontier_to_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(0.10, 1.0, 0.0); // financial=0.10
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(
+            decision.was_modulated,
+            "frontier must be downgraded under severe financial pressure"
+        );
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::CHEAP_LOCAL);
+        assert!(decision.modulation_reason.is_some());
+    }
+
+    #[test]
+    fn severe_financial_depletion_forces_mid_tier_to_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(0.10, 1.0, 0.0);
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::MidTier, &signals);
+        assert!(decision.was_modulated);
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::CHEAP_LOCAL);
+    }
+
+    #[test]
+    fn severe_financial_depletion_does_not_double_downgrade_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(0.10, 1.0, 0.0);
+        let decision = router.resolve_with_modulation(
+            SemanticClass::UserQuery,
+            CostClass::CheapLocal,
+            &signals,
+        );
+        // Already cheap-local — effective == requested (was_modulated = false).
+        assert!(
+            !decision.was_modulated,
+            "cheap-local under severe pressure should not report was_modulated"
+        );
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::CHEAP_LOCAL);
+    }
+
+    // ── Rule 1: severe power depletion (< 0.20) ──────────────────────────────
+
+    #[test]
+    fn severe_power_depletion_forces_frontier_to_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(1.0, 0.10, 0.0); // power=0.10
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(
+            decision.was_modulated,
+            "frontier must be downgraded under severe power depletion"
+        );
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::CHEAP_LOCAL);
+    }
+
+    // ── Rule 2: moderate financial pressure (0.20..0.40) ─────────────────────
+
+    #[test]
+    fn moderate_financial_pressure_downgraded_frontier_to_mid_tier() {
+        let router = default_router();
+        let signals = stressed_signals(0.30, 1.0, 0.0); // financial=0.30
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(
+            decision.was_modulated,
+            "frontier must be downgraded under moderate financial pressure"
+        );
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::MID_TIER);
+    }
+
+    #[test]
+    fn moderate_financial_pressure_does_not_affect_mid_tier_or_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(0.30, 1.0, 0.0);
+        for cost in [CostClass::MidTier, CostClass::CheapLocal] {
+            let decision = router.resolve_with_modulation(SemanticClass::UserQuery, cost, &signals);
+            assert!(
+                !decision.was_modulated,
+                "moderate financial pressure should not affect {:?}",
+                cost
+            );
+        }
+    }
+
+    // ── Rule 2: moderate power pressure (0.20..0.40) ─────────────────────────
+
+    #[test]
+    fn moderate_power_pressure_downgrades_frontier_to_mid_tier() {
+        let router = default_router();
+        let signals = stressed_signals(1.0, 0.30, 0.0); // power=0.30
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(decision.was_modulated);
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::MID_TIER);
+    }
+
+    // ── Rule 3: high thermal load (> 0.80) ───────────────────────────────────
+
+    #[test]
+    fn high_thermal_load_downgrades_frontier_to_mid_tier() {
+        let router = default_router();
+        let signals = stressed_signals(1.0, 1.0, 0.85); // thermal=0.85
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(
+            decision.was_modulated,
+            "thermal stress must downgrade frontier"
+        );
+        assert_eq!(decision.effective_route.id.as_str(), RouteId::MID_TIER);
+        let reason = decision.modulation_reason.unwrap();
+        assert!(
+            reason.contains("thermal"),
+            "reason should mention thermal: {reason}"
+        );
+    }
+
+    #[test]
+    fn thermal_at_threshold_boundary_does_not_trigger_modulation() {
+        let router = default_router();
+        // 0.80 is the boundary — rule requires strictly > 0.80
+        let signals = stressed_signals(1.0, 1.0, 0.80);
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        assert!(
+            !decision.was_modulated,
+            "thermal_load == 0.80 should not trigger rule 3 (strictly > 0.80 required)"
+        );
+    }
+
+    #[test]
+    fn high_thermal_does_not_affect_mid_tier_or_cheap_local() {
+        let router = default_router();
+        let signals = stressed_signals(1.0, 1.0, 0.90);
+        for cost in [CostClass::MidTier, CostClass::CheapLocal] {
+            let decision = router.resolve_with_modulation(SemanticClass::UserQuery, cost, &signals);
+            assert!(
+                !decision.was_modulated,
+                "thermal stress should not affect {:?}",
+                cost
+            );
+        }
+    }
+
+    // ── Full-range stress harness (exit criterion 1) ──────────────────────────
+
+    #[test]
+    fn stress_harness_sweeps_financial_budget_across_full_range() {
+        let router = default_router();
+        // Sweep financial_budget from 0.0 to 1.0 in 11 steps and verify
+        // the modulation rules engage and disengage at the documented boundaries.
+        let samples: Vec<f32> = (0..=10).map(|i| i as f32 / 10.0).collect();
+        for &fb in &samples {
+            let signals = stressed_signals(fb, 1.0, 0.0);
+            let decision = router.resolve_with_modulation(
+                SemanticClass::UserQuery,
+                CostClass::Frontier,
+                &signals,
+            );
+            if fb < 0.20 {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::CHEAP_LOCAL,
+                    "financial_budget={fb:.1}: expected cheap-local (severe)"
+                );
+            } else if fb < 0.40 {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::MID_TIER,
+                    "financial_budget={fb:.1}: expected mid-tier (moderate)"
+                );
+            } else {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::FRONTIER,
+                    "financial_budget={fb:.1}: expected frontier (no modulation)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stress_harness_sweeps_power_budget_across_full_range() {
+        let router = default_router();
+        let samples: Vec<f32> = (0..=10).map(|i| i as f32 / 10.0).collect();
+        for &pb in &samples {
+            let signals = stressed_signals(1.0, pb, 0.0);
+            let decision = router.resolve_with_modulation(
+                SemanticClass::UserQuery,
+                CostClass::Frontier,
+                &signals,
+            );
+            if pb < 0.20 {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::CHEAP_LOCAL,
+                    "power_budget={pb:.1}: expected cheap-local (severe)"
+                );
+            } else if pb < 0.40 {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::MID_TIER,
+                    "power_budget={pb:.1}: expected mid-tier (moderate)"
+                );
+            } else {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::FRONTIER,
+                    "power_budget={pb:.1}: expected frontier (no modulation)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stress_harness_sweeps_thermal_load_across_full_range() {
+        let router = default_router();
+        let samples: Vec<f32> = (0..=10).map(|i| i as f32 / 10.0).collect();
+        for &tl in &samples {
+            let signals = stressed_signals(1.0, 1.0, tl);
+            let decision = router.resolve_with_modulation(
+                SemanticClass::UserQuery,
+                CostClass::Frontier,
+                &signals,
+            );
+            if tl > 0.80 {
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::MID_TIER,
+                    "thermal_load={tl:.1}: expected mid-tier (thermal stress)"
+                );
+                assert!(decision.was_modulated);
+            } else {
+                // No thermal modulation for Frontier at 0.80 or below.
+                assert_eq!(
+                    decision.effective_route.id.as_str(),
+                    RouteId::FRONTIER,
+                    "thermal_load={tl:.1}: expected frontier (no modulation)"
+                );
+            }
+        }
+    }
+
+    // ── RouterModulated audit entry ───────────────────────────────────────────
+
+    #[test]
+    fn record_modulated_decision_emits_router_modulated_entry_when_modulated() {
+        let router = default_router();
+        let signals = stressed_signals(0.10, 1.0, 0.0); // severe financial
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::Frontier, &signals);
+        let mut audit = AuditLog::new();
+        record_modulated_router_decision(&mut audit, "agent-1", "evt-1", &decision, 3, 2);
+
+        // Expect RouterDecision + RouterModulated
+        let modulated_entries: Vec<_> = audit
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::RouterModulated { .. }))
+            .collect();
+        assert_eq!(
+            modulated_entries.len(),
+            1,
+            "one RouterModulated entry expected"
+        );
+        if let AuditEntry::RouterModulated {
+            requested_route_id,
+            effective_route_id,
+            ..
+        } = modulated_entries[0]
+        {
+            assert_eq!(requested_route_id, RouteId::FRONTIER);
+            assert_eq!(effective_route_id, RouteId::CHEAP_LOCAL);
+        }
+    }
+
+    #[test]
+    fn record_modulated_decision_does_not_emit_router_modulated_when_not_modulated() {
+        let router = default_router();
+        let signals = neutral_signals();
+        let decision =
+            router.resolve_with_modulation(SemanticClass::UserQuery, CostClass::MidTier, &signals);
+        let mut audit = AuditLog::new();
+        record_modulated_router_decision(&mut audit, "agent-1", "evt-1", &decision, 3, 3);
+
+        let modulated_count = audit
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::RouterModulated { .. }))
+            .count();
+        assert_eq!(
+            modulated_count, 0,
+            "no RouterModulated entry when signals are neutral"
+        );
     }
 }

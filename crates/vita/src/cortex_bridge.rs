@@ -84,17 +84,32 @@ pub struct InvokeMemoryScope {
 impl InvokeMemoryScope {
     /// Minimal scope: identity + L1 only.
     pub fn minimal() -> Self {
-        Self { identity: true, l1: true, l2: false, l3: false }
+        Self {
+            identity: true,
+            l1: true,
+            l2: false,
+            l3: false,
+        }
     }
 
     /// Mid scope: identity + L1 + L2.
     pub fn mid() -> Self {
-        Self { identity: true, l1: true, l2: true, l3: false }
+        Self {
+            identity: true,
+            l1: true,
+            l2: true,
+            l3: false,
+        }
     }
 
     /// Full scope: all tiers accessible.
     pub fn full() -> Self {
-        Self { identity: true, l1: true, l2: true, l3: true }
+        Self {
+            identity: true,
+            l1: true,
+            l2: true,
+            l3: true,
+        }
     }
 }
 

@@ -125,6 +125,26 @@ impl HomeostaticSignals {
             attention_demand: 0.0,
         }
     }
+
+    /// Convert an [`interoception::InteroceptiveSignals`] snapshot into the
+    /// gate's homeostatic input format (E5.7, S5.7.4).
+    ///
+    /// This is the canonical wiring point that bridges the interoception sensor
+    /// layer (provider of real signal values) and the Striatal Gate (consumer
+    /// of those values for threshold arbitration).
+    ///
+    /// Field mapping is one-to-one — both structs share the same six-signal
+    /// contract (S5.7.1).
+    pub fn from_interoceptive(signals: &interoception::InteroceptiveSignals) -> Self {
+        Self {
+            thermal_load: signals.thermal_load,
+            compute_pressure: signals.compute_pressure,
+            memory_pressure: signals.memory_pressure,
+            power_budget: signals.power_budget,
+            financial_budget: signals.financial_budget,
+            attention_demand: signals.attention_demand,
+        }
+    }
 }
 
 // ── Gate decision ─────────────────────────────────────────────────────────────
@@ -956,6 +976,58 @@ mod tests {
             d.reasoning.contains("override") || d.reasoning.contains("forced"),
             "reasoning for override must mention override, got: {:?}",
             d.reasoning
+        );
+    }
+
+    // ── E5.7: HomeostaticSignals::from_interoceptive ──────────────────────────
+
+    #[test]
+    fn from_interoceptive_converts_neutral_signals_correctly() {
+        let i = interoception::InteroceptiveSignals::neutral();
+        let h = HomeostaticSignals::from_interoceptive(&i);
+        assert_eq!(h.thermal_load, i.thermal_load);
+        assert_eq!(h.compute_pressure, i.compute_pressure);
+        assert_eq!(h.memory_pressure, i.memory_pressure);
+        assert_eq!(h.power_budget, i.power_budget);
+        assert_eq!(h.financial_budget, i.financial_budget);
+        assert_eq!(h.attention_demand, i.attention_demand);
+    }
+
+    #[test]
+    fn from_interoceptive_converts_maximum_stress_correctly() {
+        let i = interoception::InteroceptiveSignals::maximum_stress();
+        let h = HomeostaticSignals::from_interoceptive(&i);
+        assert_eq!(h.thermal_load, 1.0);
+        assert_eq!(h.power_budget, 0.0);
+        assert_eq!(h.financial_budget, 0.0);
+    }
+
+    #[test]
+    fn from_interoceptive_wires_correctly_into_gate_threshold() {
+        // Verify that a maximum-stress snapshot raises the gate threshold
+        // enough to block a moderate-value event.
+        let gate = default_gate();
+        let i = interoception::InteroceptiveSignals {
+            thermal_load: 0.9,
+            compute_pressure: 0.9,
+            memory_pressure: 0.5,
+            power_budget: 0.0,     // flat battery
+            financial_budget: 0.0, // budget exhausted
+            attention_demand: 0.0,
+        };
+        let h = HomeostaticSignals::from_interoceptive(&i);
+        let event = EventFeatures {
+            urgency: 0.5,
+            novelty: 0.3,
+            semantic_class: SemanticClass::BackgroundTask,
+            user_facing: false,
+        };
+        let d = gate.decide("stress-test", &event, &h, &GateOverride::None);
+        // Under severe resource stress the threshold should be high enough
+        // to block a moderate event.
+        assert!(
+            !d.invoke,
+            "severe resource stress must raise threshold enough to block moderate event"
         );
     }
 }

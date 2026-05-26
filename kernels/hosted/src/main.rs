@@ -226,6 +226,44 @@ fn print_audit(manager: &LifecycleManager) {
                     "  📝 identity_updated agent={agent_id} key={key:?} → {new_value:?}{old_tag}"
                 );
             }
+            // E5.7 interoceptive modulation audit entries
+            AuditEntry::InteroceptiveSnapshot {
+                agent_id,
+                tick_ns,
+                thermal_load,
+                compute_pressure,
+                memory_pressure,
+                power_budget,
+                financial_budget,
+                attention_demand,
+                aggregate_stress,
+            } => {
+                println!(
+                    "  📊 interoceptive_snapshot agent={agent_id} tick_ns={tick_ns}"
+                );
+                println!(
+                    "       thermal={thermal_load:.3} compute={compute_pressure:.3} \
+                     memory={memory_pressure:.3}"
+                );
+                println!(
+                    "       power={power_budget:.3} financial={financial_budget:.3} \
+                     attention={attention_demand:.3}"
+                );
+                println!("       aggregate_stress={aggregate_stress:.3}");
+            }
+            AuditEntry::RouterModulated {
+                event_id,
+                requested_route_id,
+                effective_route_id,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  ⬇  router_modulated event={event_id} \
+                     requested={requested_route_id} → effective={effective_route_id}"
+                );
+                println!("       reason: {reason}");
+            }
         }
     }
 }
@@ -259,7 +297,10 @@ fn cmd_identity(args: &[String]) {
             } else {
                 // Show the full identity document.
                 let json = store.to_json();
-                println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                );
             }
         }
         Some("set") => {
@@ -272,8 +313,12 @@ fn cmd_identity(args: &[String]) {
                             // round-trip (E5.5 exit criterion 1).
                             for entry in log.entries() {
                                 if let AuditEntry::IdentityUpdated {
-                                    key, new_value, old_value, ..
-                                } = entry {
+                                    key,
+                                    new_value,
+                                    old_value,
+                                    ..
+                                } = entry
+                                {
                                     let old_tag = match old_value {
                                         Some(v) => format!(" (was {v:?})"),
                                         None => " (new key)".to_owned(),
@@ -297,16 +342,57 @@ fn cmd_identity(args: &[String]) {
     }
 }
 
-// ── `anima why` subcommand (E5.2 exit criterion 3) ───────────────────────────
+// ── `anima why` subcommand (E5.2 exit criterion 3 + E5.7 exit criterion 2) ───
 
 /// Exercises the Striatal Gate on representative events, records the decisions
 /// to an in-process audit log, and prints the most recent `GateDecision` entry.
 ///
-/// Output format mirrors what a persistent audit-log reader would display.
+/// In E5.7 the function is extended to also sample the interoceptive sensor
+/// bundle and display the live signal snapshot alongside gate decisions,
+/// satisfying E5.7 exit criterion 2: "The `anima why` CLI command includes the
+/// homeostatic signal values at the time of the decision."
 fn cmd_why() {
+    use interoception::{HomeostaticMonitor, InteroceptiveSensorBundle};
     use vita::AuditLog;
 
-    println!("anima why — Striatal Gate decision explainer (E5.2)\n");
+    println!("anima why — Striatal Gate + Interoceptive Modulation (E5.2 / E5.7)\n");
+
+    // ── Live interoceptive snapshot (E5.7, exit criterion 2) ─────────────────
+    let sensor_bundle = InteroceptiveSensorBundle::with_defaults();
+    let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
+    monitor.record_ttft(1.0); // baseline (no stress)
+
+    // Use epoch 0 as the timestamp sentinel for this demo (no real spend).
+    let live_signals = sensor_bundle.sample(&monitor, 0, 4096, 0);
+    let live_homeostatic = HomeostaticSignals::from_interoceptive(&live_signals);
+
+    println!("━━━ Live interoceptive snapshot (from sensors)");
+    println!(
+        "  thermal_load    : {:.3}  (TTFT-ratio proxy)",
+        live_signals.thermal_load
+    );
+    println!(
+        "  compute_pressure: {:.3}  (TTFT-ratio proxy)",
+        live_signals.compute_pressure
+    );
+    println!(
+        "  memory_pressure : {:.3}  (L1 context fill)",
+        live_signals.memory_pressure
+    );
+    println!(
+        "  power_budget    : {:.3}  (disabled sensor → AC sentinel)",
+        live_signals.power_budget
+    );
+    println!(
+        "  financial_budget: {:.3}  (no spend recorded → full budget)",
+        live_signals.financial_budget
+    );
+    println!(
+        "  attention_demand: {:.3}  (disabled sensor → user-present sentinel)",
+        live_signals.attention_demand
+    );
+    println!("  aggregate_stress: {:.3}", live_signals.aggregate_stress());
+    println!();
 
     let gate = ThresholdGate::with_defaults();
     let mut log = AuditLog::new();
@@ -445,6 +531,77 @@ fn cmd_why() {
         println!("Most recent gate decision: event={event_id} verdict={verdict}");
         println!("Reasoning: {reasoning}");
     }
+
+    // ── E5.7 Router modulation demo ───────────────────────────────────────────
+    println!("\n━━━ E5.7 Router modulation with live interoceptive signals");
+    use vita::{record_modulated_router_decision, CostClass, SemanticClass as SC, StaticRouter};
+
+    let router =
+        StaticRouter::with_defaults().expect("default router should construct without error");
+
+    // Show how the router would modulate under various stress levels.
+    let modulation_scenarios: &[(&str, f32, f32, f32, CostClass)] = &[
+        ("neutral (full budgets)", 1.0, 1.0, 0.0, CostClass::Frontier),
+        ("mild thermal stress", 1.0, 1.0, 0.85, CostClass::Frontier),
+        (
+            "moderate financial (30%)",
+            0.30,
+            1.0,
+            0.0,
+            CostClass::Frontier,
+        ),
+        (
+            "severe financial (10%)",
+            0.10,
+            1.0,
+            0.0,
+            CostClass::Frontier,
+        ),
+        ("severe power (10%)", 1.0, 0.10, 0.0, CostClass::Frontier),
+        (
+            "live sensor signals",
+            live_homeostatic.financial_budget,
+            live_homeostatic.power_budget,
+            live_homeostatic.thermal_load,
+            CostClass::Frontier,
+        ),
+    ];
+
+    let mut mod_audit = AuditLog::new();
+    for (label, financial, power, thermal, cost_class) in modulation_scenarios {
+        let sigs = HomeostaticSignals {
+            thermal_load: *thermal,
+            compute_pressure: *thermal,
+            memory_pressure: 0.0,
+            power_budget: *power,
+            financial_budget: *financial,
+            attention_demand: 0.5,
+        };
+        let decision = router.resolve_with_modulation(SC::UserQuery, *cost_class, &sigs);
+        record_modulated_router_decision(&mut mod_audit, "anima", label, &decision, 3, 0);
+        let mod_tag = if decision.was_modulated {
+            format!(
+                " → {} [MODULATED: {}]",
+                decision.effective_route.id,
+                decision.modulation_reason.as_deref().unwrap_or("?")
+            )
+        } else {
+            format!(" → {} [no modulation]", decision.effective_route.id)
+        };
+        println!(
+            "  {label}: requested={}{mod_tag}",
+            decision.requested_route.id
+        );
+    }
+    println!();
+    println!(
+        "RouterModulated audit entries: {}",
+        mod_audit
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::RouterModulated { .. }))
+            .count()
+    );
 }
 
 fn main() {

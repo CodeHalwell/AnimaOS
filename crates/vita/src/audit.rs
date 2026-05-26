@@ -193,6 +193,51 @@ pub enum AuditEntry {
         /// Maximum total tool calls for this invocation.
         max_tool_calls: u32,
     },
+
+    // ── E5.7 Interoceptive Modulation audit entries ────────────────────────
+    /// A homeostatic signal snapshot published at 1 Hz (S5.7.1).
+    ///
+    /// Satisfies E5.7 exit criterion 1: every sensor tick is permanently
+    /// recorded so the stress harness can replay and assert the log.
+    InteroceptiveSnapshot {
+        /// Agent identifier (for multi-agent correlation).
+        agent_id: String,
+        /// Wall-clock timestamp in nanoseconds since the Unix epoch.
+        tick_ns: u64,
+        /// CPU/GPU thermal occupancy (`0.0` = cool, `1.0` = throttled).
+        thermal_load: f32,
+        /// Compute-pipeline saturation (`0.0` = idle, `1.0` = saturated).
+        compute_pressure: f32,
+        /// Working-memory fill fraction (`0.0` = empty, `1.0` = full).
+        memory_pressure: f32,
+        /// Available power budget (`1.0` = AC / full, `0.0` = flat battery).
+        power_budget: f32,
+        /// Remaining financial budget fraction (`1.0` = fresh, `0.0` = exhausted).
+        financial_budget: f32,
+        /// User presence/attention level (`1.0` = full, `0.0` = absent).
+        attention_demand: f32,
+        /// Weighted aggregate stress level derived from the above (see
+        /// [`interoception::InteroceptiveSignals::aggregate_stress`]).
+        aggregate_stress: f32,
+    },
+
+    /// The Thalamic Router downgraded a route due to homeostatic pressure
+    /// (E5.7, S5.7.5).
+    ///
+    /// Written only when modulation actually changes the route; immediately
+    /// follows the `RouterDecision` for the effective (downgraded) route.
+    RouterModulated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-event identifier for audit correlation.
+        event_id: String,
+        /// The route the gate's cost class would have selected.
+        requested_route_id: String,
+        /// The route actually used after modulation.
+        effective_route_id: String,
+        /// Human-readable explanation of why the route was changed.
+        reason: String,
+    },
 }
 
 /// Append-only audit log.
