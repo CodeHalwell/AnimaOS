@@ -1,0 +1,97 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-sleep" class="diag-svg">
+    <title id="dt-sleep">Wake/sleep state machine: Waking transitions to four sequential sleep phases — Pruning, Replay, Dreaming, Compilation — then returns to Waking.</title>
+
+    <defs>
+      <marker id="sl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#5a6675" />
+      </marker>
+      <marker id="sl-arr-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#7df9c8" />
+      </marker>
+      <marker id="sl-arr-y" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#ffb454" />
+      </marker>
+    </defs>
+
+    <!-- Waking state (top-left big circle) -->
+    <g>
+      <circle cx="180" cy="200" r="100" fill="#0d1218" stroke="#7df9c8" stroke-width="2"/>
+      <text x="180" y="180" text-anchor="middle" font-family="ui-monospace, monospace" font-size="14" font-weight="700" fill="#7df9c8">WAKING</text>
+      <text x="180" y="200" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#b8c2cc">active homeostatic loop</text>
+      <text x="180" y="220" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">somatic_execution_loop()</text>
+      <text x="180" y="244" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">read → stress → select → dispatch</text>
+    </g>
+
+    <!-- Sleep phases (right column, vertical) -->
+    <g>
+      <!-- Pruning -->
+      <rect x="500" y="60" width="320" height="80" rx="8" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.6"/>
+      <circle cx="528" cy="100" r="16" fill="#7df9c8"/>
+      <text x="528" y="105" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#07090c">1</text>
+      <text x="555" y="92" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#7df9c8">Pruning</text>
+      <text x="555" y="110" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">emotional decay · L1 + L2 eviction</text>
+      <text x="555" y="125" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">semantic floor 0.3 protects high-S₀ items</text>
+
+      <!-- Replay -->
+      <rect x="500" y="160" width="320" height="80" rx="8" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.6"/>
+      <circle cx="528" cy="200" r="16" fill="#5dd1ff"/>
+      <text x="528" y="205" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#07090c">2</text>
+      <text x="555" y="192" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#5dd1ff">Replay</text>
+      <text x="555" y="210" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">generative replay vs. pruned memory</text>
+      <text x="555" y="225" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">rollback if accuracy below threshold</text>
+
+      <!-- Dreaming -->
+      <rect x="500" y="260" width="320" height="80" rx="8" fill="#0d1218" stroke="#c084fc" stroke-opacity="0.6"/>
+      <circle cx="528" cy="300" r="16" fill="#c084fc"/>
+      <text x="528" y="305" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#07090c">3</text>
+      <text x="555" y="292" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#c084fc">Dreaming</text>
+      <text x="555" y="310" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">random graph walks across L3</text>
+      <text x="555" y="325" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">candidate associative edges → next prune</text>
+
+      <!-- Compilation -->
+      <rect x="500" y="360" width="320" height="80" rx="8" fill="#0d1218" stroke="#ffb454" stroke-opacity="0.6"/>
+      <circle cx="528" cy="400" r="16" fill="#ffb454"/>
+      <text x="528" y="405" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#07090c">4</text>
+      <text x="555" y="392" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#ffb454">Compilation</text>
+      <text x="555" y="410" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">traces → training-data formats</text>
+      <text x="555" y="425" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">persisted under training_corpus/</text>
+    </g>
+
+    <!-- Wake -> Pruning arrow -->
+    <path d="M 280 160 Q 380 100 500 100" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#sl-arr-g)"/>
+    <text x="340" y="120" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8" text-anchor="middle">agenda empty AND stress &lt; 0.4</text>
+
+    <!-- Sleep phase arrows (vertical chain) -->
+    <line x1="660" y1="140" x2="660" y2="160" stroke="#5a6675" stroke-width="1.5" marker-end="url(#sl-arr)"/>
+    <line x1="660" y1="240" x2="660" y2="260" stroke="#5a6675" stroke-width="1.5" marker-end="url(#sl-arr)"/>
+    <line x1="660" y1="340" x2="660" y2="360" stroke="#5a6675" stroke-width="1.5" marker-end="url(#sl-arr)"/>
+
+    <!-- Compilation -> Waking (return) -->
+    <path d="M 500 400 Q 360 400 280 270" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#sl-arr-g)"/>
+    <text x="340" y="395" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8" text-anchor="middle">wake trigger · sensory event · alarm</text>
+
+    <!-- Emergency consolidation loop -->
+    <path d="M 100 240 Q 60 320 110 360 Q 160 380 200 320 Q 220 280 200 250" fill="none" stroke="#ff6b6b" stroke-width="1.5" marker-end="url(#sl-arr-y)" stroke-dasharray="4 3"/>
+    <text x="120" y="430" font-family="ui-monospace, monospace" font-size="10" fill="#ff6b6b">stress ≥ 0.9 · emergency_consolidate()</text>
+    <text x="120" y="446" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">bypasses full sleep cycle</text>
+
+    <!-- Legend -->
+    <g font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">
+      <rect x="60" y="470" width="760" height="40" rx="6" fill="#0d1218" stroke="#1f2a35"/>
+      <circle cx="78" cy="490" r="4" fill="#7df9c8"/>
+      <text x="90" y="494">transition trigger</text>
+      <line x1="220" y1="490" x2="240" y2="490" stroke="#5a6675" stroke-width="1.5" marker-end="url(#sl-arr)"/>
+      <text x="250" y="494">phase progression</text>
+      <line x1="380" y1="490" x2="400" y2="490" stroke="#ff6b6b" stroke-width="1.5" stroke-dasharray="4 3"/>
+      <text x="410" y="494">emergency bypass</text>
+      <text x="600" y="494">vita owns all transitions</text>
+    </g>
+  </svg>
+  {caption && <figcaption>The agent enters sleep voluntarily when its agenda is empty and stress is low. Phases run sequentially. Emergency consolidation under critical stress bypasses the full cycle.</figcaption>}
+</figure>

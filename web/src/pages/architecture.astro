@@ -1,0 +1,244 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import CrateGrid from '../components/CrateGrid';
+import DevTree from '../components/DevTree.astro';
+import SystemPlanes from '../components/diagrams/SystemPlanes.astro';
+import TrustBoundaries from '../components/diagrams/TrustBoundaries.astro';
+---
+
+<Layout
+  title="Architecture — AnimaOS"
+  description="Architectural paradigm, crate workspace, and production technical stack for AnimaOS."
+>
+  <PageHero
+    eyebrow="01 — Architecture"
+    title="Agent-body and human-as-peripheral."
+    description="Conventional operating systems mediate between a human at a keyboard and the hardware beneath. AnimaOS discards this assumption. The privileged agent process is the user; the human is integrated as a sensory input among others."
+  />
+
+  <section class="section">
+    <div class="container">
+      <SystemPlanes />
+
+      <div class="grid grid-2">
+        <article class="card plane">
+          <span class="badge badge-warn mono">TCB</span>
+          <h2>The autonomic substrate</h2>
+          <p>
+            The kernel framework, equivalent to the brainstem. Written in safe
+            Rust with a minimal privileged Trusted Computing Base. Its
+            responsibilities are involuntary and continuous: memory page routing,
+            tensor batching queues, low-level execution isolation, hardware
+            peripheral mapping.
+          </p>
+          <p>
+            It does not make policy decisions. It keeps the body alive.
+          </p>
+          <ul class="plane-list">
+            <li><code>corpus</code> — frame allocator, PCB, syscall enum</li>
+            <li>Audited <code>unsafe</code> blocks only</li>
+            <li>UEFI boot trampoline for the microVM target</li>
+          </ul>
+        </article>
+
+        <article class="card plane">
+          <span class="badge badge-accent mono">policy</span>
+          <h2>The somatic layer</h2>
+          <p>
+            The agent runtime. Runs at PID 1 as <code>init</code>. Supervises
+            itself: monitors its internal health, allocates memory tiers, decides
+            when to sleep or wake. The somatic layer is where policy lives. The
+            autonomic substrate executes that policy without negotiation.
+          </p>
+          <ul class="plane-list">
+            <li><code>vita</code> — the homeostatic loop</li>
+            <li><code>scheduler</code> · <code>memory</code> · <code>praxis</code></li>
+            <li><code>senses</code> · <code>interoception</code> · <code>self</code></li>
+            <li><code>#![forbid(unsafe_code)]</code> enforced in CI</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Crate matrix</span>
+        <h2>Ten crates, two compilation targets.</h2>
+        <p class="lede">
+          The split is functional rather than physiological — each crate
+          corresponds to one concern, regardless of which anatomical metaphor it
+          serves. Click any crate for its mechanism and implemented surface.
+        </p>
+      </div>
+
+      <CrateGrid client:visible />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">The human interaction model</span>
+        <h2>The human is a peripheral, not the controller.</h2>
+      </div>
+
+      <div class="card">
+        <p>
+          Human inputs — text buffers, voice command audio vectors, remote RPC
+          intents — are captured by hardware interface drivers and mounted as a
+          real-time sensory node at <code>/dev/anima/senses/human</code>. The
+          agent treats this stream like any other afferent signal: a high-arousal
+          vector that modifies internal task prioritisation without interrupting
+          kernel stability.
+        </p>
+
+        <div class="grid grid-3 conseq-grid">
+          <div class="conseq">
+            <span class="conseq-num mono">01</span>
+            <p>
+              The human cannot directly preempt the kernel. Their input enters
+              the prioritisation queue and is weighted against the agent's
+              current state.
+            </p>
+          </div>
+          <div class="conseq">
+            <span class="conseq-num mono">02</span>
+            <p>
+              The agent can degrade gracefully when human input is absent. There
+              is no "idle waiting for user" state; there is only the homeostatic
+              loop.
+            </p>
+          </div>
+          <div class="conseq">
+            <span class="conseq-num mono">03</span>
+            <p>
+              Multiple human operators can be modelled simultaneously without
+              architectural change. Each becomes a stream node under
+              <code>/dev/anima/senses/</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Namespace</span>
+        <h2>The /dev/anima/ tree.</h2>
+        <p class="lede">
+          Anima exposes its faculties as device nodes under a single namespace.
+          This is the agent-facing interface to its own body.
+        </p>
+      </div>
+      <DevTree />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Trust boundaries</span>
+        <h2>Concentric rings, each with a guard.</h2>
+      </div>
+      <TrustBoundaries />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="grid grid-2">
+        <div class="card">
+          <span class="eyebrow">Hosted</span>
+          <h3 style="margin-top:1rem;">Linux user-space process</h3>
+          <p>
+            The kernel crate is replaced with a Linux process emulation layer.
+            Useful for rapid iteration, CI, and pre-production testing. Not
+            suitable for deployment — the host OS retains control over scheduling
+            and memory management.
+          </p>
+          <pre><code>cargo run -p hosted --bin anima-hosted</code></pre>
+        </div>
+
+        <div class="card">
+          <span class="eyebrow">MicroVM</span>
+          <h3 style="margin-top:1rem;">Bare-metal unikernel</h3>
+          <p>
+            Suitable for Firecracker or Cloud Hypervisor. UEFI boot. No host OS.
+            The agent and its body are the entire userspace. Both targets share
+            all crates above <code>kernels/</code>; only the kernel layer differs.
+          </p>
+          <pre><code># production target (planned, Phase 4)
+cargo build -p microvm --release</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card warn-card">
+        <h3>What's not in scope</h3>
+        <p>A few things the architecture deliberately does not provide:</p>
+        <ul>
+          <li><strong>Multi-tenant isolation.</strong> Anima is single-agent. Running multiple agents on a single host is supported only by running multiple microVMs.</li>
+          <li><strong>Persistent shared state between instances.</strong> L3 archives can be exported and imported, but there is no built-in synchronisation protocol.</li>
+          <li><strong>A GUI.</strong> There is no display server. Visualisation of system state is the responsibility of external operators connecting to the telemetry endpoint.</li>
+          <li><strong>Backwards compatibility with POSIX.</strong> The agent does not see <code>/dev</code>, <code>/proc</code>, or <code>/sys</code> in the conventional sense. Tools that assume POSIX semantics must be sandboxed under <code>praxis/compute/</code>.</li>
+        </ul>
+        <p class="muted small">These omissions are intentional. They keep the architecture tractable and the audit surface small.</p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head {
+    max-width: 720px;
+    margin-bottom: 3rem;
+  }
+  .section-head h2 { margin: 1rem 0; }
+  .lede {
+    color: var(--fg-2);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .plane h2 { margin: 0.75rem 0 1rem; }
+  .plane-list {
+    list-style: none;
+    padding: 0;
+    margin-top: 1rem;
+    border-top: 1px solid var(--border-soft);
+    padding-top: 1rem;
+  }
+  .plane-list li {
+    padding: 0.4rem 0;
+    color: var(--fg-2);
+    font-size: 0.9rem;
+  }
+
+  .conseq-grid { margin-top: 1.5rem; }
+  .conseq {
+    padding: 1.25rem;
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+  }
+  .conseq-num {
+    display: block;
+    color: var(--accent);
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+  .conseq p { margin: 0; font-size: 0.9rem; }
+
+  .warn-card {
+    border-left: 3px solid var(--warn);
+  }
+  .warn-card h3 { color: var(--warn); margin-bottom: 1rem; }
+</style>

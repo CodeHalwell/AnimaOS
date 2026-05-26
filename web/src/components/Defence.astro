@@ -1,0 +1,54 @@
+---
+interface Props {
+  name: string;
+  where: string;
+  how: string;
+}
+const { name, where, how } = Astro.props;
+---
+
+<div class="def">
+  <div class="def-left">
+    <div class="def-name">{name}</div>
+    <div class="def-where mono">{where}</div>
+  </div>
+  <div class="def-how">{how}</div>
+</div>
+
+<style>
+  .def {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  @media (max-width: 700px) {
+    .def { grid-template-columns: 1fr; gap: 0.5rem; }
+  }
+
+  .def-name {
+    font-weight: 600;
+    color: var(--fg-0);
+    margin-bottom: 0.25rem;
+  }
+
+  .def-where {
+    font-size: 0.75rem;
+    color: var(--accent);
+    background: var(--bg-2);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-soft);
+    display: inline-block;
+  }
+
+  .def-how {
+    color: var(--fg-1);
+    font-size: 0.92rem;
+    line-height: 1.65;
+  }
+</style>

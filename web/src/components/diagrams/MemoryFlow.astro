@@ -1,0 +1,88 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-mem" class="diag-svg">
+    <title id="dt-mem">Memory hierarchy: L1 working context, L2 ARC warm cache, L3 LanceDB archival store, with promotion and demotion flows.</title>
+
+    <defs>
+      <linearGradient id="lg-l1" x1="0" x2="1"><stop offset="0%" stop-color="#7df9c8" stop-opacity="0.25"/><stop offset="100%" stop-color="#7df9c8" stop-opacity="0.05"/></linearGradient>
+      <linearGradient id="lg-l2" x1="0" x2="1"><stop offset="0%" stop-color="#5dd1ff" stop-opacity="0.25"/><stop offset="100%" stop-color="#5dd1ff" stop-opacity="0.05"/></linearGradient>
+      <linearGradient id="lg-l3" x1="0" x2="1"><stop offset="0%" stop-color="#c084fc" stop-opacity="0.25"/><stop offset="100%" stop-color="#c084fc" stop-opacity="0.05"/></linearGradient>
+      <marker id="m-up" viewBox="0 0 10 10" refX="5" refY="0" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 10 L 5 0 L 10 10 Z" fill="#7df9c8" />
+      </marker>
+      <marker id="m-down" viewBox="0 0 10 10" refX="5" refY="10" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 5 10 L 10 0 Z" fill="#ffb454" />
+      </marker>
+    </defs>
+
+    <!-- L1 -->
+    <rect x="60" y="40" width="760" height="110" rx="10" fill="url(#lg-l1)" stroke="#7df9c8" stroke-opacity="0.5"/>
+    <text x="80" y="68" font-family="ui-monospace, monospace" font-size="20" font-weight="700" fill="#7df9c8">L1</text>
+    <text x="120" y="68" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#e6edf3">Working Context</text>
+    <text x="120" y="86" font-family="ui-monospace, monospace" font-size="11" fill="#8590a0">PagedAttention · mapped into the model's active attention field</text>
+
+    <!-- L1 contents -->
+    <g font-family="ui-monospace, monospace" font-size="10" fill="#b8c2cc">
+      <rect x="80" y="100" width="140" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="150" y="120" text-anchor="middle">system directives</text>
+      <rect x="230" y="100" width="140" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="300" y="120" text-anchor="middle">current task prompt</text>
+      <rect x="380" y="100" width="140" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="450" y="120" text-anchor="middle">recent tool outputs</text>
+      <rect x="530" y="100" width="140" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="600" y="120" text-anchor="middle">scratchpad</text>
+      <rect x="680" y="100" width="120" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="740" y="120" text-anchor="middle">human guidance</text>
+    </g>
+
+    <!-- Promotion / demotion arrows L1 <-> L2 -->
+    <g>
+      <text x="180" y="178" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8">↑ promote on retrieval match</text>
+      <text x="540" y="178" font-family="ui-monospace, monospace" font-size="10" fill="#ffb454">↓ demote when stress ≥ 0.75</text>
+      <line x1="220" y1="170" x2="220" y2="200" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#m-up)"/>
+      <line x1="660" y1="200" x2="660" y2="170" stroke="#ffb454" stroke-width="1.5" marker-end="url(#m-down)"/>
+    </g>
+
+    <!-- L2 -->
+    <rect x="60" y="210" width="760" height="110" rx="10" fill="url(#lg-l2)" stroke="#5dd1ff" stroke-opacity="0.5"/>
+    <text x="80" y="238" font-family="ui-monospace, monospace" font-size="20" font-weight="700" fill="#5dd1ff">L2</text>
+    <text x="120" y="238" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#e6edf3">Warm Memory Cache</text>
+    <text x="120" y="256" font-family="ui-monospace, monospace" font-size="11" fill="#8590a0">scc::HashMap · ARC eviction · host or microVM RAM</text>
+
+    <g font-family="ui-monospace, monospace" font-size="10" fill="#b8c2cc">
+      <rect x="80" y="270" width="170" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="165" y="290" text-anchor="middle">recent conversation turns</text>
+      <rect x="260" y="270" width="170" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="345" y="290" text-anchor="middle">retrieved L3 items</text>
+      <rect x="440" y="270" width="170" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="525" y="290" text-anchor="middle">computed embeddings</text>
+      <rect x="620" y="270" width="180" height="34" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+      <text x="710" y="290" text-anchor="middle">unmapped KV-cache blocks</text>
+    </g>
+
+    <g>
+      <text x="180" y="348" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8">↑ surface on dream walk</text>
+      <text x="540" y="348" font-family="ui-monospace, monospace" font-size="10" fill="#ffb454">↓ demote during sleep</text>
+      <line x1="220" y1="340" x2="220" y2="370" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#m-up)"/>
+      <line x1="660" y1="370" x2="660" y2="340" stroke="#ffb454" stroke-width="1.5" marker-end="url(#m-down)"/>
+    </g>
+
+    <!-- L3 -->
+    <rect x="60" y="380" width="760" height="60" rx="10" fill="url(#lg-l3)" stroke="#c084fc" stroke-opacity="0.5"/>
+    <text x="80" y="408" font-family="ui-monospace, monospace" font-size="20" font-weight="700" fill="#c084fc">L3</text>
+    <text x="120" y="408" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#e6edf3">Cerebral Archival Store</text>
+    <text x="120" y="426" font-family="ui-monospace, monospace" font-size="11" fill="#8590a0">embedded LanceDB · vector similarity · survives restarts · indefinite lifetime</text>
+
+    <!-- Side: cost/latency annotations -->
+    <g font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">
+      <text x="838" y="92" text-anchor="end">cost ≈ 0</text>
+      <text x="838" y="262" text-anchor="end">μs</text>
+      <text x="838" y="432" text-anchor="end">ms / vector lookup</text>
+    </g>
+  </svg>
+  {caption && <figcaption>Three tiers, promotion and demotion under different pressures. L1 is the model's active attention; L2 is a recency cache; L3 is persistent associative memory.</figcaption>}
+</figure>

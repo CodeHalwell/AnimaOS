@@ -1,0 +1,47 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import GlossarySearch from '../components/GlossarySearch';
+---
+
+<Layout
+  title="Glossary — AnimaOS"
+  description="Every anatomical and biological term mapped to its precise engineering meaning."
+>
+  <PageHero
+    eyebrow="06 — Glossary"
+    title="Every metaphor mapped to engineering."
+    description="A developer should be able to read any sentence in the documentation, look up any unfamiliar term here, and know exactly what code or system component it refers to. If a term in the documentation isn't here, that's a bug — file an issue."
+  />
+
+  <section class="section">
+    <div class="container">
+      <GlossarySearch client:load />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card">
+        <h3>Why the metaphor</h3>
+        <p>
+          The vocabulary is load-bearing. It is not decoration. The anatomical
+          terms describe the actual structure of the system in ways the
+          conventional OS vocabulary does not:
+        </p>
+        <ul>
+          <li><strong>"Afferent" and "efferent"</strong> make the input/output asymmetry explicit. "I/O" does not.</li>
+          <li><strong>"Interoception"</strong> distinguishes internal-state monitoring from external telemetry. "Metrics" does not.</li>
+          <li><strong>"Pruning, dreaming, compilation"</strong> capture what the sleep phases actually do. "Background tasks" does not.</li>
+          <li><strong>"Capability"</strong> was already a term of art in OS security; we keep it. "Soul" or "essence" would be silly. We use anatomy where it clarifies and engineering vocabulary where it suffices.</li>
+        </ul>
+        <p class="muted">
+          The risk of an overcooked metaphor is real. If you find a passage in
+          the documentation where the metaphor is doing more work than the
+          engineering, flag it. Anatomy serves the architecture, not the other
+          way around.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>

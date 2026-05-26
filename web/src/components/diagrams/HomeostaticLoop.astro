@@ -1,0 +1,86 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-hl" class="diag-svg">
+    <title id="dt-hl">The waking homeostatic loop: read sensory bounds, compute stress, decide sleep/emergency/dispatch, then iterate.</title>
+
+    <defs>
+      <marker id="hl-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#7df9c8" />
+      </marker>
+    </defs>
+
+    <!-- Center vita -->
+    <g>
+      <circle cx="440" cy="210" r="60" fill="#0d1218" stroke="#7df9c8" stroke-width="2"/>
+      <text x="440" y="206" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#7df9c8">vita</text>
+      <text x="440" y="226" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">integrator</text>
+    </g>
+
+    <!-- 6 outer nodes arranged in a hexagon -->
+    <!-- 1. read sensory bounds -->
+    <g>
+      <rect x="40" y="40" width="200" height="70" rx="8" fill="#0d1218" stroke="#c084fc" stroke-opacity="0.55"/>
+      <text x="56" y="62" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#c084fc">1 · read bounds</text>
+      <text x="56" y="80" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">senses.read_active_bounds()</text>
+      <text x="56" y="96" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ HumanGuidance</text>
+    </g>
+
+    <!-- 2. interoception -->
+    <g>
+      <rect x="640" y="40" width="200" height="70" rx="8" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.55"/>
+      <text x="656" y="62" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">2 · compute stress</text>
+      <text x="656" y="80" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">monitor.compute_systemic()</text>
+      <text x="656" y="96" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ s ∈ [0,1]</text>
+    </g>
+
+    <!-- 3. sleep check -->
+    <g>
+      <rect x="640" y="170" width="200" height="80" rx="8" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.55"/>
+      <text x="656" y="192" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#7df9c8">3 · sleep?</text>
+      <text x="656" y="210" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">agenda empty AND s &lt; 0.4</text>
+      <text x="656" y="226" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ transition_to_sleep()</text>
+      <text x="656" y="242" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ continue</text>
+    </g>
+
+    <!-- 4. emergency -->
+    <g>
+      <rect x="640" y="310" width="200" height="70" rx="8" fill="#0d1218" stroke="#ff6b6b" stroke-opacity="0.55"/>
+      <text x="656" y="332" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#ff6b6b">4 · emergency?</text>
+      <text x="656" y="350" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">if s ≥ 0.9</text>
+      <text x="656" y="366" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ emergency_consolidate()</text>
+    </g>
+
+    <!-- 5. select -->
+    <g>
+      <rect x="40" y="310" width="200" height="70" rx="8" fill="#0d1218" stroke="#ffb454" stroke-opacity="0.55"/>
+      <text x="56" y="332" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#ffb454">5 · select task</text>
+      <text x="56" y="350" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">agenda.select_optimal_task(s)</text>
+      <text x="56" y="366" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">stress-aware</text>
+    </g>
+
+    <!-- 6. dispatch -->
+    <g>
+      <rect x="40" y="170" width="200" height="80" rx="8" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.55"/>
+      <text x="56" y="192" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">6 · dispatch</text>
+      <text x="56" y="210" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">scheduler.dispatch_task(task)</text>
+      <text x="56" y="226" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">→ LlmBackend stream</text>
+      <text x="56" y="242" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">tokio::task::yield_now() else</text>
+    </g>
+
+    <!-- arrows wrapping in a ring -->
+    <path d="M 240 85 Q 340 80 380 175" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+    <path d="M 640 85 Q 540 80 500 175" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+    <path d="M 640 210 L 500 210" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+    <path d="M 640 345 Q 540 345 500 250" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+    <path d="M 240 345 Q 340 345 380 250" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+    <path d="M 240 210 L 380 210" fill="none" stroke="#7df9c8" stroke-width="1.5" marker-end="url(#hl-arr)"/>
+
+    <!-- around-loop indicator -->
+    <text x="440" y="400" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#5a6675">loop continues until stress + agenda agree on transition</text>
+  </svg>
+  {caption && <figcaption>Six steps per iteration. The loop is deliberately simple — all complexity is delegated to the subsystems. <code>vita</code> is the integrator, not the brain.</figcaption>}
+</figure>

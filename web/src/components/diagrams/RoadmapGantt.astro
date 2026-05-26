@@ -1,0 +1,81 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-gantt" class="diag-svg">
+    <title id="dt-gantt">24-month roadmap Gantt: four sequential phases with overlapping verification work in the later months.</title>
+
+    <!-- Month grid -->
+    <g font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">
+      <line x1="120" y1="40" x2="120" y2="280" stroke="#1f2a35"/>
+      <line x1="220" y1="40" x2="220" y2="280" stroke="#1f2a35"/>
+      <line x1="320" y1="40" x2="320" y2="280" stroke="#1f2a35"/>
+      <line x1="420" y1="40" x2="420" y2="280" stroke="#1f2a35"/>
+      <line x1="520" y1="40" x2="520" y2="280" stroke="#1f2a35"/>
+      <line x1="620" y1="40" x2="620" y2="280" stroke="#1f2a35"/>
+      <line x1="720" y1="40" x2="720" y2="280" stroke="#1f2a35"/>
+      <line x1="820" y1="40" x2="820" y2="280" stroke="#1f2a35"/>
+
+      <text x="120" y="32" text-anchor="middle">M1</text>
+      <text x="220" y="32" text-anchor="middle">M4</text>
+      <text x="320" y="32" text-anchor="middle">M7</text>
+      <text x="420" y="32" text-anchor="middle">M10</text>
+      <text x="520" y="32" text-anchor="middle">M13</text>
+      <text x="620" y="32" text-anchor="middle">M16</text>
+      <text x="720" y="32" text-anchor="middle">M19</text>
+      <text x="820" y="32" text-anchor="middle">M22</text>
+    </g>
+
+    <!-- Phase 1: M1-M3 -->
+    <g>
+      <rect x="40" y="60" width="76" height="32" rx="4" fill="#7df9c8"/>
+      <text x="78" y="80" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#07090c" font-weight="700">PHASE 1</text>
+      <text x="120" y="80" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8">Waking Hosted Core</text>
+      <text x="120" y="95" font-family="ui-monospace, monospace" font-size="8" fill="#5a6675">workspace · MLFQ · token pipes · end-to-end</text>
+    </g>
+
+    <!-- Phase 2: M4-M6 -->
+    <g>
+      <rect x="120" y="110" width="100" height="32" rx="4" fill="#5dd1ff"/>
+      <text x="170" y="130" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#07090c" font-weight="700">PHASE 2</text>
+      <text x="222" y="130" font-family="ui-monospace, monospace" font-size="10" fill="#5dd1ff">Memory &amp; Tool Bus</text>
+      <text x="222" y="145" font-family="ui-monospace, monospace" font-size="8" fill="#5a6675">L1/L2/L3 · praxis · breakers · wasmtime · LanceDB</text>
+    </g>
+
+    <!-- Phase 3: M7-M12 -->
+    <g>
+      <rect x="222" y="160" width="200" height="32" rx="4" fill="#c084fc"/>
+      <text x="320" y="180" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#07090c" font-weight="700">PHASE 3 · Interoception &amp; Sleep</text>
+      <text x="425" y="180" font-family="ui-monospace, monospace" font-size="10" fill="#c084fc">homeostatic loop · 4 sleep phases</text>
+      <text x="425" y="195" font-family="ui-monospace, monospace" font-size="8" fill="#5a6675">stress · sensory bridge · pruning · replay · dreaming · compilation</text>
+    </g>
+
+    <!-- Phase 4: M13-M24 -->
+    <g>
+      <rect x="425" y="210" width="395" height="32" rx="4" fill="#ffb454"/>
+      <text x="622" y="230" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#07090c" font-weight="700">PHASE 4 · Bare-Metal &amp; Verification</text>
+      <text x="425" y="258" font-family="ui-monospace, monospace" font-size="8" fill="#ffb454">no_std corpus → embassy → smoltcp → rustls → port → kani/miri → soak</text>
+    </g>
+
+    <!-- Verification overlay (M4 onwards, can start in Phase 2) -->
+    <g>
+      <rect x="220" y="278" width="600" height="14" rx="2" fill="none" stroke="#7df9c8" stroke-dasharray="3 3" stroke-opacity="0.5"/>
+      <text x="240" y="289" font-family="ui-monospace, monospace" font-size="8" fill="#7df9c8">verification infrastructure (parallelisable from Phase 2)</text>
+    </g>
+
+    <!-- exit criteria -->
+    <g font-family="ui-monospace, monospace" font-size="8" fill="#5a6675">
+      <text x="120" y="305">EXIT</text>
+      <text x="120" y="316">multi-agent fairness</text>
+      <text x="222" y="305">EXIT</text>
+      <text x="222" y="316">tool routing clean</text>
+      <text x="425" y="305">EXIT</text>
+      <text x="425" y="316">100 clean cycles</text>
+      <text x="722" y="305">EXIT</text>
+      <text x="722" y="316">microVM boot &lt; 2s · 30-day soak</text>
+    </g>
+  </svg>
+  {caption && <figcaption>The phases are sequenced; Phase 4 owns the longest window. Verification infrastructure (kani, miri, soak) parallelises from Phase 2 onward for stable crates.</figcaption>}
+</figure>

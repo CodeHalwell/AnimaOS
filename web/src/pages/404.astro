@@ -1,0 +1,18 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { withBase } from '../lib/url';
+---
+
+<Layout title="404 — sensory channel not found">
+  <section class="section">
+    <div class="container" style="text-align:center; padding: 4rem 0;">
+      <span class="eyebrow">404 · sensory channel not found</span>
+      <h1 style="margin: 1.5rem 0 1rem;">No node mounted at this path.</h1>
+      <p class="muted" style="max-width: 540px; margin: 0 auto 2rem;">
+        The <code>/dev/anima/</code> tree does not include a device for this
+        request. The afferent stream returned <code>EBADF</code>.
+      </p>
+      <a class="btn btn-primary" href={withBase('/')}>Return to /</a>
+    </div>
+  </section>
+</Layout>

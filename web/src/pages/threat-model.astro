@@ -1,0 +1,226 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import Defence from '../components/Defence.astro';
+import TrustBoundaries from '../components/diagrams/TrustBoundaries.astro';
+import CircuitBreaker from '../components/diagrams/CircuitBreaker.astro';
+---
+
+<Layout
+  title="Threat Model — AnimaOS"
+  description="Adversary capabilities, defended boundaries, and the defence-in-depth layers protecting an autonomous agent."
+>
+  <PageHero
+    eyebrow="09 — Threat Model"
+    title="Defence in depth, not defence by hope."
+    description="An autonomous agent that calls tools, executes code, and persists memory is a privileged process by any reasonable definition. The threat model treats every external surface as adversarial by default, with explicit boundaries between the trusted core, the cognitive layer, and the open world."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Trust boundaries</span>
+        <h2>Three boundaries, each with a guard.</h2>
+      </div>
+
+      <TrustBoundaries />
+
+      <div class="boundary-grid" style="margin-top: 2rem;">
+        <div class="boundary">
+          <div class="b-num mono">B1</div>
+          <h3>TCB ↔ somatic layer</h3>
+          <p>
+            <code>corpus</code> is the only crate permitted to manipulate raw
+            memory or call into hardware directly. Every syscall from the
+            somatic layer passes through the typestate capability barrier in
+            <code>self</code>. A task without a verified capability cannot
+            request a privileged operation.
+          </p>
+          <span class="b-guard mono">guard: anima-self typestate</span>
+        </div>
+
+        <div class="boundary">
+          <div class="b-num mono">B2</div>
+          <h3>Somatic layer ↔ tool surface</h3>
+          <p>
+            All outbound action passes through <code>praxis</code>. Length-robust
+            relative routing prevents context pollution from a hostile tool;
+            circuit breakers isolate a misbehaving tool from the system core; the
+            wasmtime sandbox bounds untrusted code by gas and memory.
+          </p>
+          <span class="b-guard mono">guard: praxis + wasmtime</span>
+        </div>
+
+        <div class="boundary">
+          <div class="b-num mono">B3</div>
+          <h3>Senses ↔ deliberation</h3>
+          <p>
+            Every input is treated as untrusted and parsed into a normalised
+            envelope before reaching policy code. The <code>defence</code> crate
+            sits between <code>senses</code> and the cortex: prompt-injection
+            detection, input filtering, output gating. Hostile input is
+            quarantined and rate-limited.
+          </p>
+          <span class="b-guard mono">guard: defence + senses</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Adversary capabilities</span>
+        <h2>What we assume the attacker can do.</h2>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card threat">
+          <h3>In scope</h3>
+          <ul>
+            <li>Send arbitrary text, voice, and RPC inputs through <code>/dev/anima/senses/human</code>.</li>
+            <li>Register a hostile tool that returns adversarial responses.</li>
+            <li>Compromise an MCP or A2A peer the agent is configured to trust.</li>
+            <li>Attempt prompt injection through any sensory channel.</li>
+            <li>Exhaust resources via gas-heavy or memory-heavy sandboxed code.</li>
+            <li>Probe the audit log for capability operations.</li>
+          </ul>
+        </div>
+
+        <div class="card threat">
+          <h3>Out of scope (handled by deployment)</h3>
+          <ul>
+            <li>Physical access to the host running the microVM.</li>
+            <li>Compromise of the Firecracker / Cloud Hypervisor itself.</li>
+            <li>Side-channel attacks on the host CPU (Spectre-class).</li>
+            <li>Subversion of upstream Rust crates via supply-chain attack — mitigated by <code>deny.toml</code>, but not eliminated.</li>
+            <li>Compromise of the LLM provider's infrastructure.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Defences</span>
+        <h2>Layered, each one cheap to keep alive.</h2>
+      </div>
+
+      <CircuitBreaker />
+
+      <div class="defence-list" style="margin-top: 2rem;">
+        <Defence
+          name="Unsafe quarantine"
+          where="corpus only"
+          how="Compile-time enforced via #![forbid(unsafe_code)] on every non-TCB crate. Memory-safety bugs are bounded by construction to ~hundreds of lines."
+        />
+        <Defence
+          name="Typestate capabilities"
+          where="anima-self"
+          how="Capability<Unverified> → Capability<Verified> transition consumes the value. A function expecting Verified cannot be called with Unverified. Roles fix issuance at build time."
+        />
+        <Defence
+          name="Length-robust routing"
+          where="praxis"
+          how="Tools admitted by relative score (τ_rel × max). A hostile tool with a high absolute score cannot crowd out legitimate matches; the filter is consistent across registry sizes."
+        />
+        <Defence
+          name="Circuit breakers"
+          where="praxis"
+          how="Closed → Open → HalfOpen state machine per tool. Repeated failures trip the breaker; cooldown timer + single probe before re-admission. Breaker state on telemetry."
+        />
+        <Defence
+          name="Wasmtime sandbox"
+          where="praxis/compute"
+          how="Gas-metered, memory-bounded, capability-typed imports. A hostile WASI module cannot exhaust CPU or RAM beyond its budget; cannot access syscalls without explicit imports."
+        />
+        <Defence
+          name="Defence layer"
+          where="defence"
+          how="Pre-cortex input filter (prompt-injection detection, schema validation) and post-cortex output gate (action review, rate limiting). Quarantine for suspect inputs."
+        />
+        <Defence
+          name="Audit stream"
+          where="memory L3"
+          how="Dedicated L3 namespace for capability operations and lifecycle events. Emotional weighting set high to prevent decay. Provides a forensic record for incident review."
+        />
+        <Defence
+          name="Stress-driven backoff"
+          where="vita + interoception"
+          how="A system under stress preferentially dispatches short, low-risk tasks. Long or high-risk tasks are deferred until after consolidation. Pressure-from-load and pressure-from-attack present the same way to the loop."
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card highlight-card">
+        <span class="badge badge-warn mono">posture</span>
+        <h3 style="margin: 0.75rem 0;">When in doubt, refuse.</h3>
+        <p>
+          The system's default action under ambiguous input is to refuse, not to
+          attempt. A request that cannot be parsed cleanly into a capability call
+          does not become a "best-effort" execution. It becomes an audit entry
+          and a rejection. This makes the system frustrating to misuse and
+          tractable to reason about.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head { max-width: 720px; margin-bottom: 3rem; }
+  .section-head h2 { margin: 1rem 0; }
+
+  .boundary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+  }
+  @media (max-width: 900px) { .boundary-grid { grid-template-columns: 1fr; } }
+
+  .boundary {
+    padding: 1.5rem;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--accent-2);
+    border-radius: var(--radius);
+  }
+
+  .b-num {
+    display: inline-block;
+    color: var(--accent-2);
+    font-weight: 700;
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .b-guard {
+    display: block;
+    margin-top: 1rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    color: var(--accent);
+    font-size: 0.78rem;
+  }
+
+  .threat ul { padding-left: 1.25rem; }
+  .threat li { color: var(--fg-1); margin-bottom: 0.5rem; font-size: 0.9rem; }
+  .threat h3 { margin-bottom: 0.75rem; }
+
+  .defence-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .highlight-card {
+    border-left: 3px solid var(--warn);
+  }
+</style>

@@ -1,0 +1,52 @@
+---
+interface Props {
+  name: string;
+  detail: string;
+}
+const { name, detail } = Astro.props;
+---
+
+<div class="sensor">
+  <div class="sensor-head">
+    <span class="sensor-bar" />
+    <h4>{name}</h4>
+  </div>
+  <p>{detail}</p>
+</div>
+
+<style>
+  .sensor {
+    padding: 1.25rem;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    height: 100%;
+  }
+
+  .sensor-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .sensor-bar {
+    width: 3px;
+    height: 14px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+
+  .sensor h4 {
+    font-size: 0.95rem;
+    margin: 0;
+    color: var(--fg-0);
+  }
+
+  .sensor p {
+    margin: 0;
+    color: var(--fg-2);
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+</style>
