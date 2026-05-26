@@ -129,6 +129,30 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::CortexFault { task_id, error, .. } => {
                 println!("  ✗  cortex_fault task={task_id} error={error}")
             }
+            // ── E5.6 — Defence Layer ──────────────────────────────────────────
+            AuditEntry::DefenceVeto {
+                invocation_id,
+                detector,
+                action_blocked,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  🛡  DEFENCE VETO inv={invocation_id} detector={detector} \
+                     action={action_blocked:?} reason={reason:?}"
+                );
+            }
+            AuditEntry::AttentionDemandEscalated {
+                invocation_id,
+                veto_count,
+                window_secs,
+                ..
+            } => {
+                println!(
+                    "  ⚠  ATTENTION ESCALATED inv={invocation_id} \
+                     vetoes={veto_count} window={window_secs}s"
+                );
+            }
         }
     }
 }

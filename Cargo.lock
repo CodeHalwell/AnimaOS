@@ -11,6 +11,13 @@ name = "corpus"
 version = "0.1.0"
 
 [[package]]
+name = "defence"
+version = "0.1.0"
+dependencies = [
+ "anima-self",
+]
+
+[[package]]
 name = "hosted"
 version = "0.1.0"
 dependencies = [
