@@ -150,7 +150,7 @@ impl InteroceptiveSensorBundle {
     ///
     /// | Signal | Source |
     /// |--------|--------|
-    /// | `thermal_load` | `monitor.compute_systemic_stress_index(0, 1).clamp(0,1)` — latency-only proxy |
+    /// | `thermal_load` | excess TTFT ratio above baseline: `(stress_index / beta − 1).clamp(0,1)` |
     /// | `compute_pressure` | same as `thermal_load` (TTFT ratio) |
     /// | `memory_pressure` | `active_tokens / max_context` |
     /// | `power_budget` | `power.power_budget_scalar()` |
@@ -163,10 +163,17 @@ impl InteroceptiveSensorBundle {
         max_context: u32,
         now_ns: u64,
     ) -> InteroceptiveSignals {
-        // Use the latency component of the stress index as a compute/thermal proxy.
-        // We query with `active_tokens = 0, max_context = 1` to isolate the
-        // latency term (memory_ratio = 0.0 when active_tokens = 0).
-        let latency_stress = monitor.compute_systemic_stress_index(0, 1).clamp(0.0, 1.0);
+        // Use the excess latency ratio above baseline as a compute/thermal proxy.
+        // `compute_systemic_stress_index(0, 1)` isolates the latency term
+        // (memory_ratio = 0.0 when active_tokens = 0), giving `beta * latency_ratio`.
+        // Dividing by `beta` recovers `latency_ratio`; subtracting 1.0 makes baseline
+        // (ratio = 1.0) map to 0.0 stress instead of permanently burning beta worth of
+        // signal even under completely neutral conditions.
+        let latency_stress = if monitor.beta > 0.0 {
+            (monitor.compute_systemic_stress_index(0, 1) / monitor.beta - 1.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         let memory_pressure = if max_context == 0 {
             0.0f32

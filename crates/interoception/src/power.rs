@@ -127,7 +127,12 @@ impl PowerSensor {
         let dir = fs::read_dir("/sys/class/power_supply").ok()?;
         for entry in dir.flatten() {
             let path = entry.path();
-            let type_str = fs::read_to_string(path.join("type")).ok()?;
+            // Skip entries where the type file is unreadable (e.g. permission
+            // restrictions on peripheral or virtual devices) rather than aborting
+            // the whole scan — the real Battery entry may appear later.
+            let Ok(type_str) = fs::read_to_string(path.join("type")) else {
+                continue;
+            };
             if type_str.trim() != "Battery" {
                 continue;
             }
@@ -137,7 +142,11 @@ impl PowerSensor {
             let capacity: f32 = cap_str.trim().parse().ok()?;
             let charge_fraction = (capacity / 100.0).clamp(0.0, 1.0);
             let is_charging = status == "Charging";
-            let on_battery = status != "Full" && !is_charging;
+            // Use "Discharging" as the authoritative battery indicator.
+            // "Not charging" (common on laptops with conservation thresholds at
+            // e.g. 60-80%) would otherwise be mis-classified as on-battery even
+            // though the system is running on unlimited AC power.
+            let on_battery = status == "Discharging";
             return Some(PowerReading {
                 on_battery,
                 charge_fraction,
@@ -191,7 +200,10 @@ impl AttentionReading {
             return 0.0;
         }
         let ceiling = idle_ceiling_secs.max(1.0);
-        (1.0 - (self.idle_secs / ceiling).min(1.0)) as f32
+        // Clamp idle_secs to ≥ 0 to guard against clock-drift or measurement
+        // anomalies that could produce a negative value and push the scalar > 1.0,
+        // violating the [0, 1] contract of InteroceptiveSignals.
+        (1.0 - (self.idle_secs.max(0.0) / ceiling).min(1.0)) as f32
     }
 }
 

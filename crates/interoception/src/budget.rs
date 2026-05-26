@@ -135,6 +135,13 @@ impl FinancialBudgetSensor {
     /// epoch.  Use `std::time::SystemTime::UNIX_EPOCH.elapsed()` or a
     /// monotonic approximation in production; use a fixed constant in tests.
     pub fn record_spend(&mut self, provider: &str, tokens: u64, model: &str, timestamp_ns: u64) {
+        // Prune stale records (any day other than the current UTC day) before
+        // appending.  `spend_usd_on_day` only sums records from today, so
+        // historical records accumulate unused and would cause O(N) growth.
+        const DAY_NS: u64 = 86_400_000_000_000;
+        let current_day = timestamp_ns / DAY_NS;
+        self.ledger
+            .retain(|r| r.timestamp_ns / DAY_NS == current_day);
         self.ledger.push(SpendRecord {
             provider: provider.to_owned(),
             tokens,
