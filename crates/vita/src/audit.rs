@@ -271,7 +271,6 @@ pub enum AuditEntry {
     },
 
     // ── E5.4 KV-Cache Controller audit entries ────────────────────────────────
-
     /// The KV-cache gating controller (E5.4) performed a block selection pass.
     ///
     /// Written each time [`crate::kv_gate::gate_working_context`] is called

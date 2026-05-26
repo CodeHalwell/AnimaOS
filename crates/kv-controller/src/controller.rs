@@ -150,11 +150,7 @@ impl ControllerWeights {
     ///
     /// Both slices must be exactly [`BlockFeatures::FEATURE_DIM`] long.
     pub fn dot(&self, features: &[f32; 7]) -> f32 {
-        self.w
-            .iter()
-            .zip(features.iter())
-            .map(|(w, f)| w * f)
-            .sum()
+        self.w.iter().zip(features.iter()).map(|(w, f)| w * f).sum()
     }
 }
 
@@ -339,10 +335,9 @@ impl KvController {
                 match self.gate.score(features) {
                     Ok(score) => {
                         // Apply TurboQuant similarity (E2.7 seam).
-                        let q_sim = self.quantizer.similarity(
-                            features.block_index,
-                            features.to_vec().as_ref(),
-                        );
+                        let q_sim = self
+                            .quantizer
+                            .similarity(features.block_index, features.to_vec().as_ref());
                         let combined = score * q_sim;
                         KvGateDecision {
                             block_index: features.block_index,
@@ -422,8 +417,11 @@ impl KvController {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0)) // tie-break: ascending index
         });
-        let retained: std::collections::HashSet<usize> =
-            indexed.iter().take(actual_budget).map(|(i, _)| *i).collect();
+        let retained: std::collections::HashSet<usize> = indexed
+            .iter()
+            .take(actual_budget)
+            .map(|(i, _)| *i)
+            .collect();
 
         features
             .iter()
@@ -508,7 +506,10 @@ mod tests {
         // Second call: state already Faulted — should not increment fault_count again.
         ctrl.gate_block(&f);
         // fault_count only records the *transition* call
-        assert_eq!(ctrl.fault_count, 1, "fault count should not increment after state is already Faulted");
+        assert_eq!(
+            ctrl.fault_count, 1,
+            "fault count should not increment after state is already Faulted"
+        );
     }
 
     #[test]
@@ -525,9 +526,8 @@ mod tests {
     #[test]
     fn select_blocks_respects_budget() {
         let mut ctrl = KvController::with_pre_trained_weights();
-        let features: Vec<BlockFeatures> = (0..10)
-            .map(|i| make_features(i, 10, i == 5, 0.3))
-            .collect();
+        let features: Vec<BlockFeatures> =
+            (0..10).map(|i| make_features(i, 10, i == 5, 0.3)).collect();
         let decisions = ctrl.select_blocks(&features, 4);
         let retained = decisions.iter().filter(|d| d.retain).count();
         assert_eq!(retained, 4, "exactly budget blocks should be retained");
@@ -535,9 +535,8 @@ mod tests {
 
     #[test]
     fn lru_rank_retains_most_recent_blocks() {
-        let features: Vec<BlockFeatures> = (0..10)
-            .map(|i| make_features(i, 10, false, 0.0))
-            .collect();
+        let features: Vec<BlockFeatures> =
+            (0..10).map(|i| make_features(i, 10, false, 0.0)).collect();
         let decisions = KvController::lru_rank(&features, 3);
         let retained_indices: Vec<usize> = decisions
             .iter()

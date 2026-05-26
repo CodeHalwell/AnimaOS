@@ -205,7 +205,13 @@ mod tests {
                 .enumerate()
                 .map(|(i, (is_needle, is_error, retained))| BlockTraceRecord {
                     features: BlockFeatures::new(
-                        i, 10, BlockRole::User, is_needle, is_error, false, 0.0,
+                        i,
+                        10,
+                        BlockRole::User,
+                        is_needle,
+                        is_error,
+                        false,
+                        0.0,
                     ),
                     gate_score: if retained { 0.9 } else { 0.1 },
                     retained,
@@ -227,7 +233,10 @@ mod tests {
         let trace = make_trace("t1", vec![(true, false, false)]);
         let pairs = compile_training_pairs(&trace);
         assert_eq!(pairs.len(), 1);
-        assert!(pairs[0].teacher_label, "needle block should have teacher_label=true");
+        assert!(
+            pairs[0].teacher_label,
+            "needle block should have teacher_label=true"
+        );
     }
 
     #[test]
@@ -244,10 +253,11 @@ mod tests {
     fn compile_pairs_assigns_error_weight_for_error_trace_blocks() {
         let trace = make_trace("t1", vec![(false, true, false)]);
         let pairs = compile_training_pairs(&trace);
-        assert!(pairs[0].teacher_label, "error-trace block should have teacher_label=true");
         assert!(
-            (pairs[0].loss_weight - TrainingPair::ERROR_TRACE_WEIGHT).abs() < 1e-6,
+            pairs[0].teacher_label,
+            "error-trace block should have teacher_label=true"
         );
+        assert!((pairs[0].loss_weight - TrainingPair::ERROR_TRACE_WEIGHT).abs() < 1e-6,);
     }
 
     #[test]
@@ -298,10 +308,10 @@ mod tests {
         let trace = make_trace(
             "t1",
             vec![
-                (true, false, false),   // needle → true
-                (false, false, true),   // retained → true
-                (false, false, false),  // evicted → false
-                (true, false, false),   // needle → true
+                (true, false, false),  // needle → true
+                (false, false, true),  // retained → true
+                (false, false, false), // evicted → false
+                (true, false, false),  // needle → true
             ],
         );
         let corpus = TrainingCorpus::new(&[trace]);

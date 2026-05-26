@@ -208,15 +208,8 @@ mod tests {
         let mut log = AuditLog::new();
         let blocks = make_blocks(10, &[0, 1]);
 
-        let result = gate_working_context(
-            &mut ctrl,
-            &blocks,
-            5,
-            0.5,
-            "agent-1",
-            "task-abc",
-            &mut log,
-        );
+        let result =
+            gate_working_context(&mut ctrl, &blocks, 5, 0.5, "agent-1", "task-abc", &mut log);
 
         // The controller should have faulted during this pass.
         assert!(result.faulted_this_pass, "controller should have faulted");
@@ -229,7 +222,13 @@ mod tests {
             "first entry should be KvControllerFaulted"
         );
         assert!(
-            matches!(log.entries()[1], AuditEntry::KvGatePass { fallback_lru: true, .. }),
+            matches!(
+                log.entries()[1],
+                AuditEntry::KvGatePass {
+                    fallback_lru: true,
+                    ..
+                }
+            ),
             "second entry should be KvGatePass with fallback_lru=true"
         );
     }
@@ -249,7 +248,13 @@ mod tests {
 
         assert_eq!(log.len(), 3, "second pass should add only 1 entry");
         assert!(
-            matches!(log.entries()[2], AuditEntry::KvGatePass { fallback_lru: true, .. }),
+            matches!(
+                log.entries()[2],
+                AuditEntry::KvGatePass {
+                    fallback_lru: true,
+                    ..
+                }
+            ),
             "third entry should be KvGatePass"
         );
     }
@@ -261,21 +266,20 @@ mod tests {
         let mut log = AuditLog::new();
         let blocks = make_blocks(10, &[0, 3]);
 
-        let result = gate_working_context(
-            &mut ctrl,
-            &blocks,
-            5,
-            0.3,
-            "agent-2",
-            "task-xyz",
-            &mut log,
-        );
+        let result =
+            gate_working_context(&mut ctrl, &blocks, 5, 0.3, "agent-2", "task-xyz", &mut log);
 
         assert!(!result.faulted_this_pass);
         assert!(!result.fallback_lru);
         assert_eq!(log.len(), 1, "active controller writes 1 entry");
         assert!(
-            matches!(log.entries()[0], AuditEntry::KvGatePass { fallback_lru: false, .. }),
+            matches!(
+                log.entries()[0],
+                AuditEntry::KvGatePass {
+                    fallback_lru: false,
+                    ..
+                }
+            ),
             "entry should be a non-fallback gate pass"
         );
     }

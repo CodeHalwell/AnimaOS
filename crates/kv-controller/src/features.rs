@@ -202,8 +202,7 @@ mod tests {
 
     #[test]
     fn user_constraint_flag_sets_feature_correctly() {
-        let with_constraint =
-            BlockFeatures::new(0, 1, BlockRole::User, true, false, false, 0.0);
+        let with_constraint = BlockFeatures::new(0, 1, BlockRole::User, true, false, false, 0.0);
         let without_constraint =
             BlockFeatures::new(0, 1, BlockRole::User, false, false, false, 0.0);
         assert!((with_constraint.to_vec()[1] - 1.0).abs() < 1e-6);

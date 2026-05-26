@@ -220,7 +220,13 @@ impl TraceCapture {
     }
 
     /// Records a block gate decision if capture is enabled.
-    pub fn record(&mut self, features: BlockFeatures, gate_score: f32, retained: bool, was_fallback: bool) {
+    pub fn record(
+        &mut self,
+        features: BlockFeatures,
+        gate_score: f32,
+        retained: bool,
+        was_fallback: bool,
+    ) {
         if !self.config.enabled {
             return;
         }
@@ -332,8 +338,8 @@ mod tests {
     fn invocation_trace_needle_recall_all_retained() {
         let config = TraceConfig::synthetic("test", 0, 100);
         let mut cap = TraceCapture::new(config, "inv-needle", "frontier");
-        cap.record(make_features(0, 3, true), 0.9, true, false);  // needle retained
-        cap.record(make_features(1, 3, true), 0.8, true, false);  // needle retained
+        cap.record(make_features(0, 3, true), 0.9, true, false); // needle retained
+        cap.record(make_features(1, 3, true), 0.8, true, false); // needle retained
         cap.record(make_features(2, 3, false), 0.3, false, false);
         let trace = cap.flush(1, true).unwrap();
         assert!((trace.needle_recall() - 1.0).abs() < 1e-6);
@@ -343,10 +349,10 @@ mod tests {
     fn invocation_trace_needle_recall_partial() {
         let config = TraceConfig::synthetic("test", 0, 100);
         let mut cap = TraceCapture::new(config, "inv-partial", "frontier");
-        cap.record(make_features(0, 4, true), 0.9, true, false);   // retained
-        cap.record(make_features(1, 4, true), 0.2, false, false);  // evicted
-        cap.record(make_features(2, 4, true), 0.8, true, false);   // retained
-        cap.record(make_features(3, 4, true), 0.1, false, false);  // evicted
+        cap.record(make_features(0, 4, true), 0.9, true, false); // retained
+        cap.record(make_features(1, 4, true), 0.2, false, false); // evicted
+        cap.record(make_features(2, 4, true), 0.8, true, false); // retained
+        cap.record(make_features(3, 4, true), 0.1, false, false); // evicted
         let trace = cap.flush(1, true).unwrap();
         assert!((trace.needle_recall() - 0.5).abs() < 1e-6);
     }

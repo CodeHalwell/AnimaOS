@@ -72,7 +72,6 @@ pub use eval::{
 };
 pub use features::{BlockFeatures, BlockRole};
 pub use trace::{
-    BlockTraceRecord, InvocationTrace, ProvenanceCounts, TraceCapture, TraceConfig,
-    TraceProvenance,
+    BlockTraceRecord, InvocationTrace, ProvenanceCounts, TraceCapture, TraceConfig, TraceProvenance,
 };
 pub use training::{compile_training_pairs, TrainingCorpus, TrainingPair};
