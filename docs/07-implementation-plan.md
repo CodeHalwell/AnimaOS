@@ -785,7 +785,7 @@ function; inputs are explicit and every decision is audited.
    to 0.670 by thermal\_load=0.9), operator-emergency (Frontier override) —
    and prints the most recent `GateDecision` with full input breakdown)
 
-### Epic E5.3 — Thalamic Router ⬜
+### Epic E5.3 — Thalamic Router ✅
 
 **Scope.** Route selection: which model, which tools, which memory
 scopes, which prompt scaffolding, and which termination conditions
@@ -797,23 +797,24 @@ is insufficient.
 
 **Stories.**
 - S5.3.1 Route schema: `RouteId`, `ModelSelector`, `ToolScope`,
-  `MemoryScope`, `PromptScaffold`, `TerminationPolicy`.
+  `MemoryScope`, `PromptScaffold`, `TerminationPolicy`. ✅
 - S5.3.2 Static route table keyed on event class and gate cost class.
-  Three baseline routes: `cheap-local`, `mid-tier`, `frontier`.
+  Three baseline routes: `cheap-local`, `mid-tier`, `frontier`. ✅
 - S5.3.3 Router → cortex handshake: route configuration is passed in
-  the cortex invocation RPC; the cortex cannot request tools or memory
-  outside the route scope.
+  the cortex invocation RPC via `InvokeRequest`; the cortex cannot
+  request tools or memory outside the route scope. ✅
 - S5.3.4 Identity memory is loaded as part of the route's standard
-  context for every invocation (default scope).
+  context for every invocation (default scope). ✅
 - S5.3.5 Hookpoint for learned routing: the route resolver is a trait
-  with the static table as its default implementation.
+  with the static table as its default implementation. ✅
 
 **Exit criteria.**
 1. Each baseline route is exercised in an integration test that
    asserts the cortex sees exactly the configured tool subset and
-   memory scope.
+   memory scope. ✅ (32 router tests; see `crates/vita/src/router.rs`)
 2. A route misconfiguration (unknown tool reference, missing memory
-   scope) is rejected at startup, not at invocation time.
+   scope) is rejected at startup, not at invocation time. ✅
+   (`StaticRouter::new` validates all three routes; 7 rejection tests)
 
 ### Epic E5.4 — Learned KV-Cache Controller (Semantic Gating over TurboQuant) ⬜
 

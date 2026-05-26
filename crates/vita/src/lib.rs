@@ -5,17 +5,23 @@
 pub mod audit;
 pub mod cortex_bridge;
 pub mod gate;
+pub mod router;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
-    CortexInvocationResult, FnDispatcher, InvokeRequest, MockCortexBridge, PythonCortexBridge,
-    ToolDispatcher, ToolSpec,
+    CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
+    PythonCortexBridge, ToolDispatcher, ToolSpec,
 };
 pub use gate::{
     record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
     HomeostaticSignals, SemanticClass, ThresholdGate,
+};
+pub use router::{
+    build_routed_request, default_routes, record_router_decision, validate_route, MemoryScope,
+    ModelSelector, PromptScaffold, Route, RouteError, RouteId, Router, StaticRouter,
+    TerminationPolicy, ToolScope,
 };
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 

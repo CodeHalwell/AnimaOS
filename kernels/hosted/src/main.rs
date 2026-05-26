@@ -174,6 +174,36 @@ fn print_audit(manager: &LifecycleManager) {
                 );
                 println!("       reasoning: {reasoning}");
             }
+            // E5.3 router decision entries
+            AuditEntry::RouterDecision {
+                event_id,
+                route_id,
+                model_selector,
+                tool_scope_name,
+                tools_available,
+                tools_permitted,
+                memory_scope_identity,
+                memory_scope_l2,
+                memory_scope_l3,
+                max_turns,
+                max_tool_calls,
+                ..
+            } => {
+                println!(
+                    "  🗺  router_decision event={event_id} route={route_id} \
+                     model={model_selector} scope={tool_scope_name}"
+                );
+                println!(
+                    "       tools: {tools_permitted}/{tools_available} permitted"
+                );
+                println!(
+                    "       memory: identity={memory_scope_identity} \
+                     l2={memory_scope_l2} l3={memory_scope_l3}"
+                );
+                println!(
+                    "       termination: max_turns={max_turns} max_tool_calls={max_tool_calls}"
+                );
+            }
         }
     }
 }

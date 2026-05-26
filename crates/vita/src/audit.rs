@@ -142,6 +142,42 @@ pub enum AuditEntry {
         /// `true` when a `GateOverride` changed the normal gate outcome.
         override_active: bool,
     },
+
+    // ── E5.3 Thalamic Router audit entries ────────────────────────────────────
+    /// A Thalamic Router decision was made for a gated event.
+    ///
+    /// Written immediately after a `GateDecision` with `invoke=true`, recording
+    /// which route configuration was selected and how tools were filtered.
+    /// Satisfies E5.3 exit criterion 1: every invocation has a traceable
+    /// route selection in the audit log.
+    RouterDecision {
+        /// Agent that owns this routing decision.
+        agent_id: String,
+        /// Per-event identifier for audit correlation (matches `GateDecision`).
+        event_id: String,
+        /// Identifier of the selected route (e.g. `"cheap-local"`).
+        route_id: String,
+        /// Model selector tier label (e.g. `"mid-tier"`).
+        model_selector: String,
+        /// Human-readable tool scope name.
+        tool_scope_name: String,
+        /// Number of tools offered to the router before scoping.
+        tools_available: usize,
+        /// Number of tools the cortex will see after route scoping.
+        tools_permitted: usize,
+        /// Whether identity memory is accessible on this route.
+        memory_scope_identity: bool,
+        /// Whether L1 working memory is accessible on this route.
+        memory_scope_l1: bool,
+        /// Whether L2 warm cache is accessible on this route.
+        memory_scope_l2: bool,
+        /// Whether L3 archive is accessible on this route.
+        memory_scope_l3: bool,
+        /// Maximum planning + acting turns for this invocation.
+        max_turns: u32,
+        /// Maximum total tool calls for this invocation.
+        max_tool_calls: u32,
+    },
 }
 
 /// Append-only audit log.
