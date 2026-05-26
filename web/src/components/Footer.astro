@@ -1,0 +1,132 @@
+---
+import { withBase } from '../lib/url';
+---
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="brand-line">
+          <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true">
+            <defs>
+              <radialGradient id="footer-g" cx="0.5" cy="0.5" r="0.6">
+                <stop offset="0%" stop-color="#7df9c8"/>
+                <stop offset="100%" stop-color="#5dd1ff"/>
+              </radialGradient>
+            </defs>
+            <circle cx="32" cy="32" r="14" fill="none" stroke="url(#footer-g)" stroke-width="2.5"/>
+            <circle cx="32" cy="32" r="5" fill="url(#footer-g)"/>
+          </svg>
+          <strong>AnimaOS</strong>
+        </div>
+        <p class="muted small">
+          A bare-metal, cloud-isolated framekernel OS that serves as the body
+          and autonomic nervous system for an autonomous LLM agent.
+        </p>
+      </div>
+
+      <div class="footer-col">
+        <h4>Design</h4>
+        <ul>
+          <li><a href={withBase('/architecture')}>Architecture</a></li>
+          <li><a href={withBase('/subsystems')}>Subsystems</a></li>
+          <li><a href={withBase('/lifecycle')}>Lifecycle</a></li>
+          <li><a href={withBase('/cognitive')}>Cognitive Layer</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col">
+        <h4>Programme</h4>
+        <ul>
+          <li><a href={withBase('/roadmap')}>Roadmap</a></li>
+          <li><a href={withBase('/verification')}>Verification</a></li>
+          <li><a href={withBase('/threat-model')}>Threat Model</a></li>
+          <li><a href={withBase('/glossary')}>Glossary</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col">
+        <h4>Project</h4>
+        <ul>
+          <li><a href="https://github.com/codehalwell/animaos" target="_blank" rel="noopener noreferrer">GitHub repository</a></li>
+          <li><a href="https://github.com/codehalwell/animaos/tree/main/docs" target="_blank" rel="noopener noreferrer">Design suite (docs/)</a></li>
+          <li><a href="https://github.com/codehalwell/animaos/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <span class="mono small dim">$ anima --status running</span>
+      <span class="small muted">© 2026 AnimaOS contributors · MIT licensed</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: 6rem;
+    padding: 4rem 0 2.5rem;
+    border-top: 1px solid var(--border-soft);
+    background: linear-gradient(180deg, transparent, rgba(12, 16, 20, 0.6));
+  }
+
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 3rem;
+  }
+
+  @media (max-width: 800px) {
+    .footer-grid {
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+    .footer-brand { grid-column: span 2; }
+  }
+
+  .brand-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .footer-col h4 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-3);
+    margin-bottom: 0.85rem;
+    font-weight: 600;
+  }
+
+  .footer-col ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .footer-col li { margin-bottom: 0.5rem; }
+
+  .footer-col a {
+    color: var(--fg-2);
+    font-size: 0.9rem;
+    text-decoration: none;
+  }
+
+  .footer-col a:hover { color: var(--accent); }
+
+  .footer-bottom {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border-soft);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .small { font-size: 0.85rem; }
+</style>

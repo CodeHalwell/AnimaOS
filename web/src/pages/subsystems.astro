@@ -1,0 +1,336 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import MemoryHierarchy from '../components/MemoryHierarchy';
+import StressGauge from '../components/StressGauge';
+import MemoryFlow from '../components/diagrams/MemoryFlow.astro';
+import DecayCurve from '../components/diagrams/DecayCurve';
+import PraxisRouting from '../components/diagrams/PraxisRouting.astro';
+import CircuitBreaker from '../components/diagrams/CircuitBreaker.astro';
+import StressMath from '../components/diagrams/StressMath.astro';
+import SensoryFlow from '../components/diagrams/SensoryFlow.astro';
+import Capability from '../components/diagrams/Capability.astro';
+import Mlfq from '../components/diagrams/Mlfq.astro';
+import TokenPipe from '../components/diagrams/TokenPipe.astro';
+---
+
+<Layout
+  title="Subsystems — AnimaOS"
+  description="Detailed specifications for memory, praxis, interoception, senses, and security subsystems."
+>
+  <PageHero
+    eyebrow="02 — Subsystems"
+    title="Memory, praxis, interoception, senses, security."
+    description="Each subsystem is specified by intent, mechanism, and code shape. The verification posture is enforced at the crate level via lib.rs attributes and checked in CI."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Memory · CLS hierarchy</span>
+        <h2>Three tiers, derived from cognitive neuroscience.</h2>
+        <p class="lede">
+          The memory subsystem implements a three-tier model derived from the
+          Complementary Learning Systems framework. The justification for three
+          tiers — rather than the conventional two-tier cache + storage — is that
+          the working context of an LLM has fundamentally different access
+          patterns from a recency cache.
+        </p>
+      </div>
+
+      <MemoryHierarchy client:visible />
+
+      <div style="margin-top: 2rem;">
+        <MemoryFlow />
+      </div>
+
+      <div style="margin-top: 2rem;">
+        <DecayCurve client:visible />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Scheduler · MLFQ</span>
+        <h2>Three priority tiers with iteration-aware batching.</h2>
+        <p class="lede">
+          Tasks are dispatched at the iteration level — token-by-token — rather
+          than as monolithic jobs. Per-task token slices are tracked; tasks decay
+          to lower tiers as their slice exhausts, and a periodic boost prevents
+          starvation.
+        </p>
+      </div>
+
+      <Mlfq />
+
+      <div style="margin-top: 2rem;">
+        <TokenPipe />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Praxis · efferent actuator</span>
+        <h2>Tools as files. Routing by relative score.</h2>
+        <p class="lede">
+          Praxis is the agent's motor cortex. External toolsets, hardware engines,
+          and MCP/A2A endpoints are exposed as device drivers under
+          <code>/dev/anima/praxis/tools/</code>. Where <code>senses</code> is
+          afferent, <code>praxis</code> is efferent.
+        </p>
+      </div>
+
+      <PraxisRouting />
+
+      <div style="margin-top: 2rem;">
+        <CircuitBreaker />
+      </div>
+
+      <div class="grid grid-2" style="margin-top: 2rem;">
+        <article class="card">
+          <h3>Length-robust relative routing</h3>
+          <p>
+            A naive tool router selects tools whose score against the current
+            query exceeds a fixed threshold. This breaks down two ways: marginal
+            tools accumulate and dilute context; specific queries lose good tools
+            below the threshold.
+          </p>
+          <pre><code>{`T_filtered = { t ∈ T |
+    score(t, q) ≥ τ_rel · max score(t', q) }
+
+// default τ_rel = 0.7`}</code></pre>
+          <p class="muted small">
+            The filter behaves consistently across registry sizes: a small registry
+            surfaces a small number of close matches; a large registry surfaces the
+            same close matches and prunes the long tail.
+          </p>
+        </article>
+
+        <article class="card">
+          <h3>Circuit breakers per tool</h3>
+          <p>
+            Every tool driver is wrapped in a state monitor that observes failure
+            rates and trips when the failure pattern indicates the tool is
+            unhealthy. The breaker isolates the failure from the system core.
+          </p>
+          <div class="cb-states">
+            <div class="cb-state ok"><strong>Closed</strong><span>requests pass through; failures counted</span></div>
+            <div class="cb-state warn"><strong>Open</strong><span>requests fail fast; cooldown timer running</span></div>
+            <div class="cb-state probe"><strong>HalfOpen</strong><span>single probe request; success returns to Closed</span></div>
+          </div>
+        </article>
+
+        <article class="card">
+          <h3>Wasmtime sandbox</h3>
+          <p>
+            Untrusted code generated by the agent — or downloaded as a tool
+            implementation — runs in a capability-secured wasmtime instance with
+            gas metering, memory bounds, and capability-typed imports. A
+            misbehaving tool cannot exhaust system resources.
+          </p>
+          <ul class="cb-list">
+            <li>Gas metering per invocation</li>
+            <li>Memory cap enforced by the runtime</li>
+            <li>Capability-typed imports — no implicit access</li>
+            <li>Shared runtime instance, lazy initialisation</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>MCP and A2A as remote drivers</h3>
+          <p>
+            Model Context Protocol servers appear as files under
+            <code>/dev/anima/praxis/tools/mcp/&lt;server&gt;/</code>. Peer agents
+            speaking the Agent-to-Agent protocol appear under
+            <code>/dev/anima/praxis/tools/a2a/&lt;peer&gt;/</code>.
+          </p>
+          <p class="muted small">
+            From the agent's perspective, these are tools like any other —
+            discoverable, scoreable, breakable. The transport is invisible above
+            the praxis driver layer.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Interoception · the felt sense</span>
+        <h2>One scalar drives the lifecycle.</h2>
+        <p class="lede">
+          The stress index combines two pressures into a single normalised scalar:
+          latency degradation (TTFT ratio versus baseline) and context saturation
+          (active L1 tokens versus capacity). The output is visible on the
+          telemetry stream at 1 Hz and crosses thresholds that drive state
+          transitions in <code>vita</code>.
+        </p>
+      </div>
+
+      <StressMath />
+
+      <div class="grid grid-2" style="margin-top: 2rem;">
+        <div class="card">
+          <h3>Composite stress formula</h3>
+          <pre><code>{`s = clamp(0, 1,
+    β · (TTFT / TTFT_baseline - 1) +
+    (1 - β) · (active_tokens / max_tokens)
+)
+
+// default β = 0.5 (equal weight)`}</code></pre>
+          <p>
+            The rolling TTFT window smooths transient spikes. The context ratio
+            is exact. The β parameter is tuneable per workload, but the default
+            balances latency and memory pressure equally.
+          </p>
+        </div>
+
+        <div>
+          <h3 style="margin-bottom:1rem;">Threshold map</h3>
+          <StressGauge client:visible />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Senses · afferent input</span>
+        <h2>Text, voice, RPC — every signal is sensory.</h2>
+      </div>
+
+      <SensoryFlow />
+
+      <div class="grid grid-3" style="margin-top: 2rem;">
+        <article class="card sense-card">
+          <span class="sense-icon">⌨</span>
+          <h3>Text</h3>
+          <p>
+            UTF-8 buffers from <code>/dev/anima/senses/human</code>. Parsed into
+            <code>SensoryPacket</code>s with source, timestamp, priority.
+          </p>
+        </article>
+        <article class="card sense-card">
+          <span class="sense-icon">🎙</span>
+          <h3>Voice (PCM)</h3>
+          <p>
+            Streaming 16-bit PCM through VAD into a local speech-to-text pipeline.
+            High priority by default — voice signals an attentive human.
+          </p>
+        </article>
+        <article class="card sense-card">
+          <span class="sense-icon">⇄</span>
+          <h3>Peers (A2A)</h3>
+          <p>
+            Optional peer-agent streams under <code>/dev/anima/senses/peers/</code>.
+            Each peer is a sensory node; the priority tag is driver-level.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Self · capability barrier</span>
+        <h2>Typestate at compile time. Roles at boot.</h2>
+      </div>
+
+      <Capability />
+
+      <div class="card" style="margin-top: 2rem;">
+        <p>
+          The capability system uses Rust's typestate pattern to make permission
+          violations un-compilable. A <code>Capability&lt;Unverified&gt;</code>
+          cannot be passed to a function expecting
+          <code>Capability&lt;Verified&gt;</code>; the type system enforces the
+          ordering at compile time.
+        </p>
+        <pre><code>{`// crates/self/src/cap.rs
+pub struct Capability<S> {
+    inner: CapInner,
+    _state: PhantomData<S>,
+}
+
+pub struct Unverified;
+pub struct Verified;
+
+impl Capability<Unverified> {
+    pub fn verify(self, role: &Role) -> Result<Capability<Verified>, CapErr> {
+        // …role-bound check; consumes self
+    }
+}
+
+// Only \`Capability<Verified>\` can authorise syscalls.
+pub fn syscall(cap: Capability<Verified>, op: SyscallEnum) -> Result<()> { /* … */ }`}</code></pre>
+        <p class="muted small">
+          Roles are fixed at build time. Elevation tokens are single-use values
+          that upgrade a restricted capability to an unrestricted one for exactly
+          one call.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head {
+    max-width: 720px;
+    margin-bottom: 3rem;
+  }
+  .section-head h2 { margin: 1rem 0; }
+  .lede {
+    color: var(--fg-2);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .cb-states {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+  .cb-state {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.9rem;
+    background: var(--bg-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+  .cb-state strong { font-family: var(--mono); font-size: 0.85rem; }
+  .cb-state span { color: var(--fg-2); font-size: 0.82rem; }
+  .cb-state.ok { border-left: 2px solid var(--accent); }
+  .cb-state.warn { border-left: 2px solid var(--warn); }
+  .cb-state.probe { border-left: 2px solid var(--accent-2); }
+
+  .cb-list {
+    padding-left: 1.2rem;
+    margin: 1rem 0 0;
+  }
+  .cb-list li {
+    color: var(--fg-1);
+    font-size: 0.88rem;
+    padding: 0.25rem 0;
+  }
+
+  .sense-card { text-align: center; }
+  .sense-icon {
+    font-size: 2rem;
+    display: block;
+    margin-bottom: 0.5rem;
+  }
+  .sense-card h3 { margin: 0.5rem 0; }
+  .sense-card p { font-size: 0.9rem; }
+</style>

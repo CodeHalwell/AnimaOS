@@ -1,0 +1,80 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-ver" class="diag-svg">
+    <title id="dt-ver">Verification pyramid: typestate at compile time, unit/integration tests at the middle, formal verification at the apex.</title>
+
+    <defs>
+      <linearGradient id="ver-grad" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stop-color="#7df9c8"/>
+        <stop offset="100%" stop-color="#5dd1ff"/>
+      </linearGradient>
+    </defs>
+
+    <!-- pyramid -->
+    <polygon points="440,30 700,330 180,330" fill="none" stroke="#1f2a35" stroke-width="1"/>
+
+    <!-- tier 3 apex -->
+    <polygon points="440,30 540,150 340,150" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.6"/>
+    <text x="440" y="78" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#7df9c8">tier 3 · formal</text>
+    <text x="440" y="96" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">kani · miri</text>
+    <text x="440" y="112" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">smallest scope</text>
+    <text x="440" y="128" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">highest cost</text>
+
+    <!-- tier 2 middle -->
+    <polygon points="540,150 620,240 260,240 340,150" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.6"/>
+    <text x="440" y="180" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">tier 2 · tests</text>
+    <text x="440" y="198" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">unit · integration · soak</text>
+    <text x="440" y="214" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">runs on every PR</text>
+    <text x="440" y="230" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">tier transitions · cycle soak</text>
+
+    <!-- tier 1 base -->
+    <polygon points="620,240 700,330 180,330 260,240" fill="#0d1218" stroke="#c084fc" stroke-opacity="0.6"/>
+    <text x="440" y="270" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#c084fc">tier 1 · compile-time</text>
+    <text x="440" y="288" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">#![forbid(unsafe_code)] · typestate · clippy · fmt</text>
+    <text x="440" y="304" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">cheapest · broadest coverage</text>
+    <text x="440" y="320" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">violations don't compile</text>
+
+    <!-- right column: what we prove -->
+    <g font-family="ui-monospace, monospace" font-size="10">
+      <text x="730" y="40" fill="#7df9c8" font-weight="600">we prove</text>
+      <text x="730" y="60" fill="#b8c2cc">· allocator never overlaps</text>
+      <text x="730" y="76" fill="#b8c2cc">· ring buffer is safe under</text>
+      <text x="730" y="92" fill="#b8c2cc">  contention</text>
+      <text x="730" y="108" fill="#b8c2cc">· rate-limiter monotonic</text>
+      <text x="730" y="124" fill="#b8c2cc">· scheduler fairness</text>
+    </g>
+
+    <g font-family="ui-monospace, monospace" font-size="10">
+      <text x="730" y="170" fill="#ffb454" font-weight="600">we don't prove (yet)</text>
+      <text x="730" y="190" fill="#b8c2cc">· end-to-end policy</text>
+      <text x="730" y="206" fill="#b8c2cc">  correctness</text>
+      <text x="730" y="222" fill="#b8c2cc">· sleep-cycle convergence</text>
+      <text x="730" y="238" fill="#b8c2cc">  under all loads</text>
+      <text x="730" y="254" fill="#b8c2cc">· LLM backend contract</text>
+      <text x="730" y="270" fill="#b8c2cc">  conformance</text>
+    </g>
+
+    <!-- left column: CI -->
+    <g font-family="ui-monospace, monospace" font-size="10">
+      <text x="40" y="40" fill="#5dd1ff" font-weight="600">CI gates</text>
+      <text x="40" y="60" fill="#b8c2cc">· cargo fmt --check</text>
+      <text x="40" y="76" fill="#b8c2cc">· cargo build --workspace</text>
+      <text x="40" y="92" fill="#b8c2cc">· cargo test --workspace</text>
+      <text x="40" y="108" fill="#b8c2cc">· clippy -D warnings</text>
+      <text x="40" y="124" fill="#b8c2cc">· unsafe quarantine</text>
+    </g>
+
+    <g font-family="ui-monospace, monospace" font-size="10">
+      <text x="40" y="170" fill="#c084fc" font-weight="600">nightly</text>
+      <text x="40" y="190" fill="#b8c2cc">· miri on corpus</text>
+      <text x="40" y="206" fill="#b8c2cc">· all kani proofs</text>
+      <text x="40" y="222" fill="#b8c2cc">· sampled soak</text>
+      <text x="40" y="238" fill="#b8c2cc">· benchmark sweep</text>
+    </g>
+  </svg>
+  {caption && <figcaption>Most coverage comes from the base of the pyramid (compile-time) because that's where the cost-to-value ratio is best. Formal verification is targeted at the boundaries where bugs cost the most.</figcaption>}
+</figure>

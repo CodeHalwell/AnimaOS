@@ -1,0 +1,149 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import RoadmapTimeline from '../components/RoadmapTimeline';
+import RoadmapGantt from '../components/diagrams/RoadmapGantt.astro';
+---
+
+<Layout
+  title="Roadmap — AnimaOS"
+  description="A 24-month phased plan from design specification to a production microVM image booting natively."
+>
+  <PageHero
+    eyebrow="05 — Roadmap"
+    title="24 months from spec to production microVM."
+    description="The plan is deliberately conservative on calendar time and aggressive on per-phase exit criteria. It is better to take longer than to declare a phase complete prematurely. Each phase has hard exit criteria — no rolling-over of incomplete work."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="overview-grid">
+        <div class="ov-card">
+          <span class="ov-num mono">01</span>
+          <h3>Waking hosted core</h3>
+          <p class="muted">Months 1–3</p>
+          <span class="badge badge-accent">partially complete</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-num mono">02</span>
+          <h3>Memory & tool bus</h3>
+          <p class="muted">Months 4–6</p>
+          <span class="badge badge-blue">in design</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-num mono">03</span>
+          <h3>Interoception & sleep</h3>
+          <p class="muted">Months 7–12</p>
+          <span class="badge">planned</span>
+        </div>
+        <div class="ov-card">
+          <span class="ov-num mono">04</span>
+          <h3>Bare-metal & verification</h3>
+          <p class="muted">Months 13–24</p>
+          <span class="badge">planned</span>
+        </div>
+      </div>
+
+      <RoadmapGantt />
+
+      <RoadmapTimeline client:visible />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="grid grid-2">
+        <div class="card">
+          <h3>Parallelisation</h3>
+          <p>The phases are sequenced but not strictly serial:</p>
+          <ul>
+            <li>Documentation can be revised continuously in parallel with all phases.</li>
+            <li>Verification infrastructure (M4.6) can begin in Phase 2 for stable crates.</li>
+            <li>Hosted-target polish can continue throughout Phase 4 if developers are available.</li>
+          </ul>
+          <p class="muted small">
+            <strong>Cannot</strong> be parallelised: Phase 3 depends on Phase 2's
+            memory hierarchy being complete; Phase 4's bare-metal port depends on
+            Phase 3's homeostatic loop being well-characterised in the hosted target.
+          </p>
+        </div>
+
+        <div class="card">
+          <h3>Team shape</h3>
+          <p>
+            The roadmap assumes a small team — three to five engineers — with at
+            least one having deep Rust systems experience and at least one with
+            prior LLM agent infrastructure experience.
+          </p>
+          <p>
+            A single engineer working alone could deliver this roadmap but would
+            likely need 36 months. The bottleneck is not code volume; it is
+            integration testing, verification setup, and the soak time required
+            to validate the homeostatic loop.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card done-card">
+        <span class="eyebrow">What counts as "done"</span>
+        <h3 style="margin-top:1rem;">Phase 4 ends; work continues.</h3>
+        <p>
+          The end of Phase 4 is not the end of work. It is the point at which
+          AnimaOS is a viable substrate for production agent deployment, with
+          verified subsystems and a tractable audit surface. Beyond that, work
+          shifts to hardening against adversarial inputs, optimising specific
+          workload patterns, and building higher-level agent frameworks on top
+          of the substrate.
+        </p>
+        <p class="muted">
+          These are out of scope for this roadmap and would be specified
+          separately.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .overview-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 3rem;
+  }
+  @media (max-width: 800px) {
+    .overview-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  .ov-card {
+    padding: 1.5rem;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .ov-num {
+    display: block;
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.8rem;
+    margin-bottom: 0.5rem;
+  }
+  .ov-card h3 {
+    font-size: 1.1rem;
+    margin: 0 0 0.5rem;
+  }
+  .ov-card p {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    margin: 0 0 0.75rem;
+  }
+
+  .done-card {
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(180deg, var(--bg-1), rgba(125, 249, 200, 0.04));
+  }
+</style>

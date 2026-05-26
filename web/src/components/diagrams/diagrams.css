@@ -1,0 +1,32 @@
+.diag {
+  margin: 2rem 0;
+  padding: 1.5rem;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.diag-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  max-width: 100%;
+}
+
+.diag figcaption,
+.diag > figcaption {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.85rem;
+  color: var(--fg-2);
+  line-height: 1.6;
+}
+
+.diag-compact {
+  padding: 1rem;
+}
+
+.diag-tight {
+  margin: 0;
+}

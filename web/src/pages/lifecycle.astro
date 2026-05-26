@@ -1,0 +1,224 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import LifecycleDiagram from '../components/LifecycleDiagram';
+import StressGauge from '../components/StressGauge';
+import PhasePill from '../components/PhasePill.astro';
+import SleepCycle from '../components/diagrams/SleepCycle.astro';
+import HomeostaticLoop from '../components/diagrams/HomeostaticLoop.astro';
+import StressMath from '../components/diagrams/StressMath.astro';
+---
+
+<Layout
+  title="Lifecycle — AnimaOS"
+  description="The homeostatic loop, the four sleep phases, transition triggers, and the dreaming subsystem."
+>
+  <PageHero
+    eyebrow="03 — Lifecycle"
+    title="The soul of Anima: a homeostatic loop."
+    description="A living system maintains its internal state within bounds by continuous feedback rather than by external command. Anima applies this principle to an LLM agent: rather than running flat-out until OOM-killed and restarting, the system observes its own internal pressures and adjusts."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Cycle</span>
+        <h2>Two macro-states. Four sleep sub-states.</h2>
+        <p class="lede">
+          Transitions are driven by the stress index, the task agenda, and
+          explicit policy signals from <code>/dev/anima/senses/human</code>. The
+          diagram below is interactive — click any phase to inspect its trigger
+          and description.
+        </p>
+      </div>
+
+      <LifecycleDiagram client:visible />
+
+      <div style="margin-top: 2rem;">
+        <SleepCycle />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Waking</span>
+        <h2>The somatic execution loop.</h2>
+        <p class="lede">
+          When the system initialises, the agent boots as the primary lifecycle
+          supervisor at PID 1. It reads its operational bounds from the human
+          sensory peripheral and enters its main execution loop. All complexity
+          is delegated to the subsystems — <code>vita</code> is the integrator.
+        </p>
+      </div>
+
+      <HomeostaticLoop />
+
+      <div class="card" style="margin-top: 2rem;">
+        <pre><code>{`// crates/vita/src/loop.rs
+pub async fn somatic_execution_loop(
+    lifecycle: &mut LifecycleManager,
+    monitor: &HomeostaticMonitor,
+) -> Result<(), LifecycleError> {
+    loop {
+        // 1. Read external human guidance changes from the sensory peripheral
+        let human_guidance = lifecycle.senses.read_active_bounds().await?;
+        lifecycle.update_policy_bounds(human_guidance);
+
+        // 2. Query interoceptive metrics to evaluate physical stress
+        let active_tokens = lifecycle.memory.get_l1_token_count();
+        let stress_index = monitor.compute_systemic_stress_index(
+            active_tokens, lifecycle.config.max_context,
+        );
+
+        // 3. Autonomous decision: should we transition to sleep?
+        if lifecycle.agenda.is_empty() && stress_index < 0.4 {
+            lifecycle.transition_to_sleep_state().await?;
+            continue;
+        }
+
+        // 4. Emergency consolidation under critical stress
+        if stress_index >= 0.9 {
+            lifecycle.emergency_consolidate().await?;
+            continue;
+        }
+
+        // 5. Select and dispatch the next task primitive
+        if let Some(task) = lifecycle.agenda.select_optimal_task(stress_index) {
+            lifecycle.scheduler.dispatch_task(task).await?;
+        } else {
+            // No high-priority tasks; yield to conserve resources
+            tokio::task::yield_now().await;
+        }
+    }
+}`}</code></pre>
+      </div>
+
+      <div class="grid grid-2" style="margin-top: 2rem;">
+        <div class="card">
+          <h3>Stress-aware task selection</h3>
+          <p>
+            <code>select_optimal_task</code> is not a pure priority queue — it
+            weighs candidate tasks against the current stress index and prefers
+            tasks whose memory footprint and expected latency fit the current
+            envelope.
+          </p>
+          <ul>
+            <li>At <code>stress = 0.3</code>: dispatches long-form analysis happily.</li>
+            <li>At <code>stress = 0.7</code>: prefers short turn-arounds; defers long tasks.</li>
+            <li>A long task already running is <strong>not</strong> interrupted. The selector only chooses what to start next.</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>Human guidance as bounds, not commands</h3>
+          <p>
+            Bounds read from <code>/dev/anima/senses/human</code> are not
+            commands. They are constraints the agent agrees to operate within.
+          </p>
+          <ul>
+            <li><code>max_context_target: 0.5</code> — keep L1 ≤ half capacity.</li>
+            <li><code>min_sleep_interval: 30m</code> — never go longer than this without a sleep cycle.</li>
+            <li><code>priority_class: code_generation</code> — bias task selection toward this class.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Sleep · the four phases</span>
+        <h2>Pruning. Replay. Dreaming. Compilation.</h2>
+        <p class="lede">
+          Sleep is not idle time. It is when the system does the work that would
+          be catastrophic to interleave with active reasoning — eviction,
+          validation, association discovery, training-data compilation.
+        </p>
+      </div>
+
+      <div class="phases">
+        <PhasePill n="1" name="Pruning" color="#7df9c8" desc="Emotional decay is applied to L1 and L2. Below-threshold entries are evicted or compressed. The semantic floor protects high-generation knowledge from erasure." />
+        <PhasePill n="2" name="Replay" color="#5dd1ff" desc="Sampled past questions are re-run against the pruned memory. If accuracy drops below threshold, the pruning is rolled back. Proof that the validation path works is an exit criterion for Phase 3." />
+        <PhasePill n="3" name="Dreaming" color="#c084fc" desc="Random graph walks across L3 produce candidate associative edges. Yield is variable by design; candidates are validated in the next pruning cycle, not at production time." />
+        <PhasePill n="4" name="Compilation" color="#ffb454" desc="Waking-state traces are compiled into training-data formats and persisted under training_corpus/ in L3. The sleep cycle closes; the agent transitions back to Waking." />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="grid grid-2">
+        <div class="card">
+          <span class="eyebrow">Emergency consolidation</span>
+          <h3 style="margin-top:1rem;">When stress ≥ 0.9.</h3>
+          <p>
+            Critical stress bypasses the full sleep cycle. Emergency consolidation
+            performs an immediate L1 → L2 demotion of the lowest-activation
+            entries, releases attention-field capacity, and returns the loop to
+            normal operation without a full Waking → Sleeping transition.
+          </p>
+          <p class="muted small">
+            This is a deliberate trade-off: the agent stays responsive to
+            high-priority inputs at the cost of skipping replay and dreaming
+            until the next scheduled sleep window.
+          </p>
+        </div>
+        <StressGauge client:visible />
+      </div>
+
+      <div style="margin-top: 2rem;">
+        <StressMath />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card highlight-card">
+        <span class="badge badge-purple mono">design note</span>
+        <h3 style="margin: 0.75rem 0;">Why dreaming, and why it is variable by design.</h3>
+        <p>
+          Random walks across L3 produce mostly nothing. That is fine. The
+          dreaming yield is the long tail of associative edges that the agent
+          would never have explicitly searched for; most are useless, and the
+          next pruning cycle filters them out. The cost of a failed candidate is
+          a few bytes in L3. The cost of a successful candidate is an insight
+          that ordinary retrieval would have missed.
+        </p>
+        <p class="muted">
+          This is the same trade-off biological dream sleep appears to make. The
+          mechanism is different; the policy is similar.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head {
+    max-width: 720px;
+    margin-bottom: 3rem;
+  }
+  .section-head h2 { margin: 1rem 0; }
+  .lede {
+    color: var(--fg-2);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .phases {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+  }
+  @media (max-width: 900px) { .phases { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 500px) { .phases { grid-template-columns: 1fr; } }
+
+  .highlight-card {
+    border-left: 3px solid var(--accent-3);
+    background: linear-gradient(180deg, var(--bg-1), rgba(192, 132, 252, 0.04));
+  }
+</style>

@@ -1,0 +1,72 @@
+---
+type Node = { path: string; desc?: string; indent?: number };
+
+const tree: Node[] = [
+  { path: '/dev/anima/', desc: "root namespace — the agent's model of its own body" },
+  { path: '/dev/anima/senses/', indent: 1 },
+  { path: 'human', desc: 'mounted human input stream (text, voice, RPC)', indent: 2 },
+  { path: 'peers/', desc: 'optional peer-agent streams (A2A protocol)', indent: 2 },
+  { path: 'system/', desc: 'system events: clock, health, alarms', indent: 2 },
+  { path: '/dev/anima/praxis/', indent: 1 },
+  { path: 'tools/', desc: 'tool drivers exposed as files (one per registered tool)', indent: 2 },
+  { path: 'network/', desc: 'outbound network capabilities (rustls + smoltcp)', indent: 2 },
+  { path: 'compute/', desc: 'wasmtime sandbox handles with gas metering', indent: 2 },
+  { path: '/dev/anima/memory/', indent: 1 },
+  { path: 'l1', desc: 'working context handle (PagedAttention)', indent: 2 },
+  { path: 'l2', desc: 'warm cache handle (scc::HashMap + ARC)', indent: 2 },
+  { path: 'l3', desc: 'archival store handle (embedded LanceDB)', indent: 2 },
+  { path: '/dev/anima/vital', desc: 'lifecycle control: read state, request transition' },
+];
+
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const rendered = tree.map((node) => {
+  const pad = '  '.repeat(node.indent ?? 0);
+  const prefix = node.indent ? '├── ' : '';
+  const isDir = node.path.endsWith('/') || node.path.startsWith('/dev');
+  const cls = isDir ? 'path-dir' : 'path-leaf';
+  const comment = node.desc ? `  <span class="comment"># ${esc(node.desc)}</span>` : '';
+  return `${pad}${prefix}<span class="${cls}">${esc(node.path)}</span>${comment}`;
+}).join('\n');
+---
+
+<div class="devtree">
+  <div class="devtree-head">
+    <span class="badge mono badge-accent">namespace</span>
+    <h3 style="margin: 0;">The /dev/anima/ tree</h3>
+    <span class="muted small">The agent does not see <code>/proc</code> or <code>/sys</code>. Its model of its own body is this tree.</span>
+  </div>
+  <pre class="devtree-pre" set:html={rendered}></pre>
+</div>
+
+<style is:global>
+  .devtree {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .devtree-head {
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .devtree-pre {
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background: var(--bg-1);
+    font-size: 0.85rem;
+    padding: 1.5rem;
+    overflow-x: auto;
+    line-height: 1.85;
+  }
+  .devtree-pre .path-dir { color: var(--accent); font-weight: 600; }
+  .devtree-pre .path-leaf { color: var(--accent-2); }
+  .devtree-pre .comment { color: var(--fg-3); font-style: normal; }
+</style>

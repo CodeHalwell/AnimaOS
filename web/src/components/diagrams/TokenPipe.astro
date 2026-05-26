@@ -1,0 +1,84 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-pipe" class="diag-svg">
+    <title id="dt-pipe">BoundedTokenPipe: producers emit token batches; the consumer issues credits to bound the in-flight window; backpressure stalls producers naturally.</title>
+
+    <defs>
+      <marker id="pp-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#5dd1ff" />
+      </marker>
+      <marker id="pp-credit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#7df9c8" />
+      </marker>
+    </defs>
+
+    <!-- producers -->
+    <g>
+      <rect x="40" y="60" width="160" height="40" rx="6" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+      <text x="120" y="78" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">producer · senses</text>
+      <text x="120" y="93" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">text · voice · peer</text>
+
+      <rect x="40" y="120" width="160" height="40" rx="6" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+      <text x="120" y="138" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">producer · scheduler</text>
+      <text x="120" y="153" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">scheduled tokens</text>
+
+      <rect x="40" y="180" width="160" height="40" rx="6" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+      <text x="120" y="198" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="700" fill="#5dd1ff">producer · praxis</text>
+      <text x="120" y="213" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">tool returns</text>
+    </g>
+
+    <!-- pipe -->
+    <g>
+      <rect x="260" y="80" width="380" height="120" rx="14" fill="#0d1218" stroke="#7df9c8" stroke-width="2"/>
+      <text x="450" y="100" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#7df9c8">BoundedTokenPipe</text>
+      <text x="450" y="115" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">crossbeam ring buffer · capacity N · credit-based</text>
+
+      <!-- token cells -->
+      <g>
+        <rect x="280" y="135" width="40" height="40" rx="4" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+        <text x="300" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#e6edf3">t₀</text>
+        <rect x="324" y="135" width="40" height="40" rx="4" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+        <text x="344" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#e6edf3">t₁</text>
+        <rect x="368" y="135" width="40" height="40" rx="4" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+        <text x="388" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#e6edf3">t₂</text>
+        <rect x="412" y="135" width="40" height="40" rx="4" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+        <text x="432" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#e6edf3">t₃</text>
+        <rect x="456" y="135" width="40" height="40" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+        <text x="476" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#5a6675">·</text>
+        <rect x="500" y="135" width="40" height="40" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+        <text x="520" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#5a6675">·</text>
+        <rect x="544" y="135" width="40" height="40" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+        <text x="564" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#5a6675">·</text>
+        <rect x="588" y="135" width="40" height="40" rx="4" fill="#0c1014" stroke="#1f2a35"/>
+        <text x="608" y="160" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#5a6675">·</text>
+      </g>
+      <text x="450" y="190" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">4 / 8 occupied · 4 credits available</text>
+    </g>
+
+    <!-- consumer -->
+    <g>
+      <rect x="680" y="120" width="160" height="60" rx="8" fill="#0d1218" stroke="#c084fc" stroke-opacity="0.55"/>
+      <text x="760" y="148" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#c084fc">consumer · LlmBackend</text>
+      <text x="760" y="166" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">streaming model call</text>
+    </g>
+
+    <!-- producer → pipe -->
+    <line x1="200" y1="80" x2="260" y2="120" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#pp-arr)"/>
+    <line x1="200" y1="140" x2="260" y2="140" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#pp-arr)"/>
+    <line x1="200" y1="200" x2="260" y2="160" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#pp-arr)"/>
+
+    <!-- pipe → consumer -->
+    <line x1="640" y1="150" x2="680" y2="150" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#pp-arr)"/>
+
+    <!-- credit return -->
+    <path d="M 760 180 Q 760 240 450 240 Q 200 240 120 220" fill="none" stroke="#7df9c8" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#pp-credit)"/>
+    <text x="450" y="258" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#7df9c8">credit return · producers stall when 0</text>
+
+    <text x="40" y="40" font-family="ui-monospace, monospace" font-size="11" fill="#5dd1ff" font-weight="600">scheduler::BoundedTokenPipe</text>
+  </svg>
+  {caption && <figcaption>Credit-based backpressure: when the consumer is slow, credits accumulate at zero and producers stall. No message loss. The same pattern carries inter-crate events through the event bus.</figcaption>}
+</figure>

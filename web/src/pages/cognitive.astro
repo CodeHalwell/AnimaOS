@@ -1,0 +1,190 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import Sensor from '../components/Sensor.astro';
+import CognitiveStack from '../components/diagrams/CognitiveStack.astro';
+---
+
+<Layout
+  title="Cognitive Architecture — AnimaOS"
+  description="The cognitive layer that sits above the somatic substrate: hierarchical control, embodied state modulation, selective forgetting."
+>
+  <PageHero
+    eyebrow="08 — Cognitive Architecture"
+    title="A brain inside the body the OS provides."
+    description="AnimaOS is an agent-first operating system. The OS itself is the body: sensorium, motor system, and homeostatic signals. The cognitive layer sitting above this body is structured as a hierarchy of control — fast cheap policies handle most events; slow expensive deliberation is invoked when fast policies cannot resolve the situation, and escalation itself is a learned policy."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Thesis</span>
+        <h2>Spend compute deliberately, the way an organism spends metabolic energy.</h2>
+        <p class="lede">
+          The cognitive layer's intelligence is not constant. Body state — thermal
+          load, memory pressure, battery, GPU utilisation, latency, API cost —
+          continuously modulates the thresholds at which expensive reasoning is
+          invoked. The technical core is a learned memory controller derived from
+          stateful KV-cache gating, which decides what the system remembers,
+          compresses, and forgets across long-horizon operation.
+        </p>
+      </div>
+
+      <CognitiveStack />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Six design principles</span>
+        <h2>Each stated as a constraint, not an aspiration.</h2>
+      </div>
+
+      <div class="grid grid-2">
+        <div class="card cog">
+          <span class="cog-num mono">01</span>
+          <h3>Hierarchical control with graceful degradation.</h3>
+          <p>
+            The system must remain functional when the most expensive cognitive
+            components are unavailable. Network down, rate-limited, on battery,
+            thermally throttled — the system continues to operate, just more
+            reflexively. The deliberative layer is a luxury, not a requirement.
+          </p>
+        </div>
+
+        <div class="card cog">
+          <span class="cog-num mono">02</span>
+          <h3>Embodiment is not metaphor.</h3>
+          <p>
+            Body state is not logged for display purposes; it is a control input.
+            Thermal load directly modifies the cost threshold for invoking the
+            cortex. Battery state shifts the routing policy between local and API
+            models. Memory pressure triggers consolidation. If a body-state
+            signal does not modulate at least one policy, it does not belong in
+            the architecture.
+          </p>
+        </div>
+
+        <div class="card cog">
+          <span class="cog-num mono">03</span>
+          <h3>Selective forgetting is a feature.</h3>
+          <p>
+            Perfect recall is not a goal. The system must learn to forget —
+            boilerplate, failed attempts, transient state — while retaining
+            what is structurally important. This applies at every level: KV-cache
+            eviction within an episode, episode summarisation across hours,
+            identity-level memory across the lifetime of the installation.
+          </p>
+        </div>
+
+        <div class="card cog">
+          <span class="cog-num mono">04</span>
+          <h3>Proposals, not conversations.</h3>
+          <p>
+            Subsystems within the cognitive layer do not chat with each other.
+            They submit structured proposals to a central arbiter, which selects,
+            suppresses, or combines them. This is enforced architecturally to
+            prevent the runaway message-passing patterns that plague conventional
+            multi-agent frameworks.
+          </p>
+        </div>
+
+        <div class="card cog">
+          <span class="cog-num mono">05</span>
+          <h3>Falsifiable, not visionary.</h3>
+          <p>
+            Every claim in the architecture must be testable. "The system feels
+            its body" is replaced with "policy P measurably changes when
+            telemetry T crosses threshold X." If a feature cannot be falsified,
+            it does not ship; it goes in the speculative addendum.
+          </p>
+        </div>
+
+        <div class="card cog">
+          <span class="cog-num mono">06</span>
+          <h3>The substrate is silicon, not wetware.</h3>
+          <p>
+            Where the biological inspiration suggests a structure that maps
+            cleanly onto silicon, it is used. Where it does not, it is discarded.
+            There is no obligation to have a hippocampus-equivalent, an
+            amygdala-equivalent, or any other named anatomical structure.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">The body daemon</span>
+        <h2><code>animad</code> — small, fast, reliable, trustworthy.</h2>
+        <p class="lede">
+          The body layer is everything the cognitive system can sense and
+          everything it can affect. It is implemented as a privileged daemon
+          written in Rust, communicating with the cognitive layer over a
+          structured local IPC channel. The choice of Rust is deliberate: this
+          layer must survive the cognitive layer crashing.
+        </p>
+      </div>
+
+      <div class="grid grid-3">
+        <Sensor name="Thermal" detail="Per-zone temperatures from /sys/class/thermal on Linux, ioreg on macOS. 1 Hz baseline, higher under stress." />
+        <Sensor name="Compute" detail="CPU per-core, GPU utilisation, VRAM occupancy, load average, scheduler pressure (PSI)." />
+        <Sensor name="Memory" detail="Resident memory, page cache behaviour, swap pressure, OOM proximity." />
+        <Sensor name="Power" detail="Battery level, charging state, power draw if available, AC connection." />
+        <Sensor name="Network" detail="Connection state, bandwidth, latency to anchor hosts, rate-limit headroom against known APIs." />
+        <Sensor name="Filesystem" detail="Watched directories produce structured change events via inotify / fsevents / equivalent." />
+        <Sensor name="User-presence" detail="Keyboard/mouse idle time, active window, foreground app, screen state. Gated by explicit consent at install." />
+        <Sensor name="Financial" detail="Tracked spending against API providers, daily/monthly budgets, projected burn rate. An agent that cannot feel cost will not bound it." />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card kv-card">
+        <span class="badge badge-blue mono">kv-controller</span>
+        <h2 style="margin-top:1rem;">The learned KV-cache controller.</h2>
+        <p>
+          Without selective forgetting at the attention layer, an agent-first OS
+          suffers the same context degradation that plagues every current
+          long-running agent. The <code>kv-controller</code> crate is a stateful
+          gating policy, derived from prior work, that decides what the system
+          remembers, compresses, and forgets across long-horizon operation.
+        </p>
+        <p>
+          With it, the system can run for hours or days, retain what matters
+          about the user and the task, and discard what does not.
+        </p>
+        <p class="muted small">
+          Full delivery breakdown lives in <code>docs/07-implementation-plan.md</code> under <strong>Stage 5 — Cognitive Layer</strong>, which is the canonical reconciliation of this document with the milestone plan.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head {
+    max-width: 720px;
+    margin-bottom: 3rem;
+  }
+  .section-head h2 { margin: 1rem 0; }
+  .lede {
+    color: var(--fg-2);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .cog { display: flex; flex-direction: column; gap: 0.75rem; }
+  .cog-num { color: var(--accent); font-weight: 700; font-size: 0.85rem; }
+  .cog h3 { font-size: 1.15rem; margin: 0.25rem 0; }
+  .cog p { margin: 0; }
+
+  .kv-card {
+    border-left: 3px solid var(--accent-2);
+    background: linear-gradient(180deg, var(--bg-1), rgba(93, 209, 255, 0.04));
+  }
+</style>

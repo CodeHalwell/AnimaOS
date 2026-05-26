@@ -1,0 +1,353 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Hero from '../components/Hero';
+import CrateGrid from '../components/CrateGrid';
+import LifecycleDiagram from '../components/LifecycleDiagram';
+import StressGauge from '../components/StressGauge';
+import StackCard from '../components/StackCard.astro';
+import SystemPlanes from '../components/diagrams/SystemPlanes.astro';
+import HomeostaticLoop from '../components/diagrams/HomeostaticLoop.astro';
+import { withBase } from '../lib/url';
+---
+
+<Layout>
+  <div class="container grid-bg">
+    <Hero client:load />
+  </div>
+
+  <section class="section" id="overview">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">System at a glance</span>
+        <h2>One organism in three planes.</h2>
+        <p class="lede">
+          The agent runs at PID 1 inside a microVM. <code>corpus</code> is the
+          only crate permitted to touch hardware directly. Every other crate
+          forbids unsafe code. The human enters the system as one sensory input
+          among others — never as the controller.
+        </p>
+      </div>
+      <SystemPlanes />
+    </div>
+  </section>
+
+  <section class="section" id="design-principles">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Design principles</span>
+        <h2>Five constraints that shape every decision.</h2>
+        <p class="lede">
+          Anima is built on a small number of architectural commitments. Each one is
+          stated as a constraint on the design, not an aspiration — they are checked
+          at the crate level and enforced in CI.
+        </p>
+      </div>
+
+      <div class="grid grid-2">
+        <article class="principle card">
+          <span class="badge badge-accent mono">01</span>
+          <h3>The agent owns its own body.</h3>
+          <p>
+            The agent runs at PID 1. It allocates its own memory tiers, schedules
+            its own downtime, decides when to consolidate, and sequences its own
+            execution loops — within human-defined policy bounds.
+          </p>
+        </article>
+
+        <article class="principle card">
+          <span class="badge badge-accent mono">02</span>
+          <h3>Safety by quarantine.</h3>
+          <p>
+            Unsafe Rust is permitted only inside <code>corpus</code>, the privileged
+            Trusted Computing Base. Every other crate declares
+            <code>#![forbid(unsafe_code)]</code>. A PR that introduces
+            <code>unsafe</code> outside <code>corpus</code> fails to compile.
+          </p>
+        </article>
+
+        <article class="principle card">
+          <span class="badge badge-accent mono">03</span>
+          <h3>Lifecycle is structural, not optional.</h3>
+          <p>
+            Sleep, dreaming, and memory consolidation are first-class architectural
+            elements — not performance optimisations to be skipped under load. An
+            Anima system that never sleeps is a malfunctioning Anima system.
+          </p>
+        </article>
+
+        <article class="principle card">
+          <span class="badge badge-accent mono">04</span>
+          <h3>The metaphor is load-bearing.</h3>
+          <p>
+            Anatomical terms are used because they describe the actual structure of
+            the system: afferent input, efferent action, interoception, homeostasis.
+            Engineers should be able to map a Rust function to a physiological role
+            and back.
+          </p>
+        </article>
+
+        <article class="principle card span-2">
+          <span class="badge badge-accent mono">05</span>
+          <h3>Bare-metal compliance.</h3>
+          <p>
+            No host OS dependencies in the production target. <code>smoltcp</code>
+            for networking, <code>rustls</code> for transport security,
+            <code>wasmtime</code> for sandboxing untrusted code, all compiled into
+            a unikernel image suitable for Firecracker or Cloud Hypervisor.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" style="background: linear-gradient(180deg, transparent, rgba(125, 249, 200, 0.02));">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Workspace</span>
+        <h2>Ten crates. One organism.</h2>
+        <p class="lede">
+          The workspace splits along functional rather than physiological lines.
+          Each crate corresponds to one concern, and the boundary decisions are
+          governed by three principles: a single privileged crate, separation of
+          lifecycle from scheduling, and separation of input from policy.
+        </p>
+      </div>
+
+      <CrateGrid client:visible />
+
+      <div class="ws-foot">
+        <a class="btn" href={withBase('/architecture')}>
+          Full architecture spec →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Lifecycle</span>
+        <h2>A homeostatic loop, not a request handler.</h2>
+        <p class="lede">
+          A living system maintains its internal state within bounds by continuous
+          feedback rather than by external command. Anima applies this to an LLM
+          agent: rather than running flat-out until OOM-killed and restarting, the
+          system observes its own pressures and adjusts.
+        </p>
+      </div>
+
+      <LifecycleDiagram client:visible />
+
+      <div style="margin-top: 2rem;">
+        <HomeostaticLoop />
+      </div>
+
+      <div class="grid grid-2" style="margin-top: 3rem;">
+        <div class="card">
+          <h3>Interoception drives state</h3>
+          <p>
+            The stress index <code>s ∈ [0, 1]</code> combines latency degradation
+            and context saturation. Transitions are driven by it together with the
+            task agenda and explicit policy signals from
+            <code>/dev/anima/senses/human</code>.
+          </p>
+          <StressGauge client:visible />
+        </div>
+
+        <div class="card">
+          <h3>The waking loop in one read</h3>
+          <pre><code>{`// crates/vita/src/loop.rs
+pub async fn somatic_execution_loop(
+    lifecycle: &mut LifecycleManager,
+    monitor: &HomeostaticMonitor,
+) -> Result<(), LifecycleError> {
+    loop {
+        let guidance = lifecycle.senses.read_active_bounds().await?;
+        lifecycle.update_policy_bounds(guidance);
+
+        let active = lifecycle.memory.get_l1_token_count();
+        let stress = monitor.compute_systemic_stress_index(
+            active, lifecycle.config.max_context,
+        );
+
+        if lifecycle.agenda.is_empty() && stress < 0.4 {
+            lifecycle.transition_to_sleep_state().await?;
+            continue;
+        }
+
+        if stress >= 0.9 {
+            lifecycle.emergency_consolidate().await?;
+            continue;
+        }
+
+        if let Some(task) = lifecycle.agenda
+            .select_optimal_task(stress)
+        {
+            lifecycle.scheduler.dispatch_task(task).await?;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}`}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" style="background: linear-gradient(180deg, transparent, rgba(93, 209, 255, 0.02));">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Stack</span>
+        <h2>Performant, verifiable, and free of host-OS dependencies.</h2>
+      </div>
+
+      <div class="grid grid-3 stack-grid">
+        <StackCard
+          title="Async runtime"
+          items={[
+            { name: 'embassy', desc: 'no_std bare-metal async for corpus' },
+            { name: 'tokio + tokio-util', desc: 'hosted dev layer and user-space daemons' },
+          ]}
+        />
+        <StackCard
+          title="Concurrent memory"
+          items={[
+            { name: 'scc', desc: 'lock-free concurrent hashmaps (L2 warm cache, praxis registry)' },
+            { name: 'crossbeam', desc: 'unmanaged ring buffers (event bus, sensory streams)' },
+          ]}
+        />
+        <StackCard
+          title="Serialisation"
+          items={[
+            { name: 'rkyv', desc: 'zero-copy across process boundaries and snapshot hydration' },
+            { name: 'postcard', desc: 'lightweight no_std messaging payloads' },
+          ]}
+        />
+        <StackCard
+          title="Vector storage"
+          items={[
+            { name: 'LanceDB', desc: 'embedded; deep vector indices and L3 archive' },
+            { name: 'instant-distance', desc: 'in-memory HNSW for the warm path' },
+            { name: 'TurboQuant TQ4', desc: '8× compression, rotation-based online quantisation' },
+          ]}
+        />
+        <StackCard
+          title="Network & security"
+          items={[
+            { name: 'smoltcp', desc: 'standalone event-driven TCP/IP — no host networking' },
+            { name: 'rustls', desc: 'type-safe TLS, ring crypto provider for no_std' },
+          ]}
+        />
+        <StackCard
+          title="Sandbox & verification"
+          items={[
+            { name: 'wasmtime', desc: 'capability-secured, gas-metered WebAssembly runtime' },
+            { name: 'kani', desc: 'bounded model checking of rate limiters and ring buffers' },
+            { name: 'miri', desc: 'runtime validation of unsafe boundaries in corpus' },
+          ]}
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="cta card">
+        <div class="cta-text">
+          <span class="eyebrow">Build</span>
+          <h2>Get the workspace running locally.</h2>
+          <p>
+            The hosted kernel target runs as an ordinary Linux process and is
+            sufficient for end-to-end exercises of all current subsystems. The
+            microVM target is the production deployment.
+          </p>
+        </div>
+        <div class="cta-code">
+          <pre><code>{`# clone the workspace
+git clone https://github.com/codehalwell/animaos
+cd animaos
+
+# build the whole workspace
+cargo build --workspace
+
+# run the test suite
+cargo test --workspace
+
+# launch the hosted kernel
+cargo run -p hosted --bin anima-hosted`}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head {
+    max-width: 720px;
+    margin-bottom: 3rem;
+  }
+
+  .section-head h2 { margin-top: 1rem; margin-bottom: 1rem; }
+
+  .lede {
+    color: var(--fg-2);
+    font-size: 1.0625rem;
+    line-height: 1.7;
+  }
+
+  .principle {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .principle h3 {
+    margin-top: 0.5rem;
+    font-size: 1.25rem;
+  }
+
+  .principle p { margin: 0; }
+
+  .principle.span-2 {
+    grid-column: span 2;
+    background: linear-gradient(180deg, var(--bg-1), rgba(125, 249, 200, 0.04));
+  }
+  @media (max-width: 900px) { .principle.span-2 { grid-column: 1; } }
+
+  .ws-foot {
+    display: flex;
+    justify-content: center;
+    margin-top: 3rem;
+  }
+
+  .stack-grid { gap: 1rem; }
+
+  .cta {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr;
+    gap: 3rem;
+    align-items: center;
+    padding: 3rem;
+    background: linear-gradient(135deg, var(--bg-1), var(--bg-2));
+    border: 1px solid var(--border);
+  }
+  @media (max-width: 900px) { .cta { grid-template-columns: 1fr; padding: 2rem; } }
+
+  .cta h2 { margin: 1rem 0; }
+  .cta-code pre { margin: 0; }
+</style>
+
+<script>
+  // small smooth-scroll for anchors
+  document.querySelectorAll('a[href^="#"]').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      const href = a.getAttribute('href');
+      if (!href || href === '#') return;
+      const target = document.querySelector(href);
+      if (target) {
+        e.preventDefault();
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  });
+</script>

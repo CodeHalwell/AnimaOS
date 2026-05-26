@@ -1,0 +1,97 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-praxis" class="diag-svg">
+    <title id="dt-praxis">Praxis efferent dispatch: query → length-robust relative routing → circuit breaker → typestate capability → wasmtime sandbox or MCP/A2A bus.</title>
+
+    <defs>
+      <marker id="px-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 0 L 10 5 L 0 10 Z" fill="#5dd1ff" />
+      </marker>
+    </defs>
+
+    <!-- Step 1: query -->
+    <g>
+      <rect x="40" y="60" width="160" height="60" rx="8" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="120" y="85" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#7df9c8">query</text>
+      <text x="120" y="103" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">from vita / scheduler</text>
+    </g>
+
+    <!-- Step 2: relative router -->
+    <g>
+      <rect x="240" y="40" width="220" height="100" rx="8" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+      <text x="350" y="68" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#5dd1ff">length_robust_filter</text>
+      <text x="350" y="86" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#b8c2cc">score(t,q) ≥ τ_rel · max</text>
+      <text x="350" y="104" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">τ_rel = 0.7 default</text>
+      <text x="350" y="122" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">no absolute threshold</text>
+    </g>
+
+    <!-- candidates -->
+    <g font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">
+      <rect x="500" y="20" width="120" height="22" rx="3" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="510" y="35">tool_a · 0.93 ✓</text>
+      <rect x="500" y="50" width="120" height="22" rx="3" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="510" y="65">tool_b · 0.81 ✓</text>
+      <rect x="500" y="80" width="120" height="22" rx="3" fill="#11161c" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="510" y="95">tool_c · 0.71 ✓</text>
+      <rect x="500" y="110" width="120" height="22" rx="3" fill="#11161c" stroke="#1f2a35"/>
+      <text x="510" y="125" fill="#5a6675">tool_d · 0.62 ✗</text>
+      <rect x="500" y="140" width="120" height="22" rx="3" fill="#11161c" stroke="#1f2a35"/>
+      <text x="510" y="155" fill="#5a6675">tool_e · 0.41 ✗</text>
+    </g>
+
+    <!-- Step 3: capability check -->
+    <g>
+      <rect x="660" y="40" width="180" height="100" rx="8" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="750" y="68" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#7df9c8">capability check</text>
+      <text x="750" y="86" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#b8c2cc">Capability&lt;Verified&gt;</text>
+      <text x="750" y="104" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">typestate barrier</text>
+      <text x="750" y="122" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">crates/self</text>
+    </g>
+
+    <!-- Step 4: circuit breaker -->
+    <g>
+      <rect x="240" y="220" width="220" height="80" rx="8" fill="#0d1218" stroke="#ffb454" stroke-opacity="0.5"/>
+      <text x="350" y="246" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#ffb454">circuit breaker</text>
+      <text x="350" y="264" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">Closed → Open → HalfOpen</text>
+      <text x="350" y="282" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">per-tool state monitor</text>
+    </g>
+
+    <!-- Step 5: dispatch branches -->
+    <g>
+      <rect x="40" y="320" width="180" height="80" rx="8" fill="#0d1218" stroke="#c084fc" stroke-opacity="0.5"/>
+      <text x="130" y="346" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#c084fc">wasmtime sandbox</text>
+      <text x="130" y="364" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">gas + memory bounded</text>
+      <text x="130" y="382" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">untrusted code</text>
+
+      <rect x="240" y="320" width="180" height="80" rx="8" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+      <text x="330" y="346" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#5dd1ff">MCP bus</text>
+      <text x="330" y="364" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">remote tool driver</text>
+      <text x="330" y="382" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">tools/mcp/&lt;server&gt;/</text>
+
+      <rect x="440" y="320" width="180" height="80" rx="8" fill="#0d1218" stroke="#7df9c8" stroke-opacity="0.5"/>
+      <text x="530" y="346" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#7df9c8">A2A peer</text>
+      <text x="530" y="364" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">agent-to-agent</text>
+      <text x="530" y="382" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">tools/a2a/&lt;peer&gt;/</text>
+
+      <rect x="640" y="320" width="200" height="80" rx="8" fill="#0d1218" stroke="#ffb454" stroke-opacity="0.5"/>
+      <text x="740" y="346" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#ffb454">native tool</text>
+      <text x="740" y="364" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#8590a0">in-process handler</text>
+      <text x="740" y="382" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#5a6675">tools/builtins/</text>
+    </g>
+
+    <!-- arrows -->
+    <line x1="200" y1="90" x2="240" y2="90" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#px-arr)"/>
+    <line x1="460" y1="90" x2="500" y2="90" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#px-arr)"/>
+    <line x1="620" y1="90" x2="660" y2="90" stroke="#5dd1ff" stroke-width="1.5" marker-end="url(#px-arr)"/>
+    <line x1="750" y1="140" x2="350" y2="220" stroke="#5dd1ff" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#px-arr)"/>
+    <line x1="280" y1="300" x2="130" y2="320" stroke="#5dd1ff" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#px-arr)"/>
+    <line x1="330" y1="300" x2="330" y2="320" stroke="#5dd1ff" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#px-arr)"/>
+    <line x1="380" y1="300" x2="530" y2="320" stroke="#5dd1ff" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#px-arr)"/>
+    <line x1="420" y1="300" x2="740" y2="320" stroke="#5dd1ff" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#px-arr)"/>
+  </svg>
+  {caption && <figcaption>A query passes through relative routing, then a typestate capability check, then a per-tool circuit breaker, before dispatching to the appropriate driver — sandboxed WASI, an MCP server, a peer agent, or a native handler.</figcaption>}
+</figure>

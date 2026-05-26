@@ -1,0 +1,57 @@
+---
+interface Props { caption?: boolean }
+const { caption = true } = Astro.props;
+---
+
+<figure class="diag">
+  <svg viewBox="0 0 880 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dt-trust" class="diag-svg">
+    <title id="dt-trust">Trust boundaries with adversary capabilities outside and defence layers crossing each boundary.</title>
+
+    <defs>
+      <radialGradient id="trust-core" cx="0.5" cy="0.5"><stop offset="0%" stop-color="#7df9c8" stop-opacity="0.18"/><stop offset="100%" stop-color="#7df9c8" stop-opacity="0"/></radialGradient>
+    </defs>
+
+    <!-- Concentric ring backgrounds -->
+    <ellipse cx="440" cy="240" rx="380" ry="200" fill="#0d1218" stroke="#ff6b6b" stroke-opacity="0.4" stroke-dasharray="4 4"/>
+    <ellipse cx="440" cy="240" rx="280" ry="160" fill="#0d1218" stroke="#ffb454" stroke-opacity="0.4"/>
+    <ellipse cx="440" cy="240" rx="170" ry="110" fill="#0d1218" stroke="#5dd1ff" stroke-opacity="0.5"/>
+    <ellipse cx="440" cy="240" rx="80" ry="60" fill="url(#trust-core)" stroke="#7df9c8" stroke-width="2"/>
+
+    <!-- Core: corpus -->
+    <text x="440" y="234" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="700" fill="#7df9c8">corpus</text>
+    <text x="440" y="252" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#8590a0">TCB</text>
+
+    <!-- Ring 1: somatic crates -->
+    <text x="440" y="170" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="600" fill="#5dd1ff">somatic layer</text>
+    <text x="350" y="200" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">vita</text>
+    <text x="530" y="200" text-anchor="start" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">scheduler</text>
+    <text x="345" y="290" text-anchor="end" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">memory</text>
+    <text x="530" y="290" text-anchor="start" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">praxis</text>
+    <text x="440" y="320" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#b8c2cc">interoception · senses · self · defence</text>
+
+    <!-- Ring 2: tools / sandbox -->
+    <text x="440" y="110" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" font-weight="600" fill="#ffb454">tool surface</text>
+    <text x="220" y="240" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ffb454">wasmtime</text>
+    <text x="660" y="240" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ffb454">MCP / A2A</text>
+    <text x="440" y="380" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ffb454">native tool drivers</text>
+
+    <!-- Ring 3: outer world -->
+    <text x="440" y="60" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" font-weight="700" fill="#ff6b6b">UNTRUSTED · world</text>
+    <text x="100" y="240" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ff6b6b">prompt injection</text>
+    <text x="780" y="240" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ff6b6b">hostile peer</text>
+    <text x="440" y="440" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#ff6b6b">resource exhaustion</text>
+
+    <!-- Boundary labels (right-side callouts) -->
+    <g font-family="ui-monospace, monospace" font-size="10">
+      <text x="40" y="40" fill="#7df9c8" font-weight="600">B1 · anima-self typestate</text>
+      <text x="40" y="56" fill="#5a6675">TCB ↔ somatic — every privileged call</text>
+
+      <text x="40" y="92" fill="#ffb454" font-weight="600">B2 · praxis + wasmtime</text>
+      <text x="40" y="108" fill="#5a6675">somatic ↔ tools — routing, breakers, sandbox</text>
+
+      <text x="40" y="460" fill="#ff6b6b" font-weight="600">B3 · defence + senses</text>
+      <text x="40" y="476" fill="#5a6675">tools ↔ world — input filter, output gate</text>
+    </g>
+  </svg>
+  {caption && <figcaption>Three concentric boundaries. Each one has a guard: typestate capability tokens at the TCB edge, praxis + wasmtime at the tool surface, and the defence + senses filter at the outer skin.</figcaption>}
+</figure>

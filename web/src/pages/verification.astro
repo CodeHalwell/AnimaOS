@@ -1,0 +1,165 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+import VerificationLayers from '../components/diagrams/VerificationLayers.astro';
+import Capability from '../components/diagrams/Capability.astro';
+---
+
+<Layout
+  title="Verification — AnimaOS"
+  description="Testing strategy, formal verification posture, and continuous integration."
+>
+  <PageHero
+    eyebrow="04 — Verification"
+    title="Trust the substrate. Verify everything else."
+    description="AnimaOS treats verification as a property of the build, not a quarterly initiative. The unsafe quarantine is enforced at compile time. Coverage targets are enforced in CI. Formal verification is targeted at the boundaries where bugs cost the most."
+  />
+
+  <section class="section">
+    <div class="container">
+      <VerificationLayers />
+
+      <div class="grid grid-3" style="margin-top: 2rem;">
+        <article class="card v-card">
+          <span class="v-tier mono">tier 1</span>
+          <h3>Compile-time</h3>
+          <ul>
+            <li><code>#![forbid(unsafe_code)]</code> outside <code>corpus</code></li>
+            <li>Typestate capability tokens — permission violations are un-compilable</li>
+            <li><code>no_std</code> isolation lint above the kernel layer</li>
+            <li>Workspace-wide <code>cargo fmt --check</code></li>
+          </ul>
+        </article>
+
+        <article class="card v-card">
+          <span class="v-tier mono">tier 2</span>
+          <h3>Test suite</h3>
+          <ul>
+            <li>Unit tests per crate, MLFQ + ring-buffer coverage targets</li>
+            <li>Integration tests for tier transitions in both directions</li>
+            <li>End-to-end traces in the audit log for each completed task</li>
+            <li>Soak tests for the sleep cycle (100+ consecutive cycles)</li>
+          </ul>
+        </article>
+
+        <article class="card v-card">
+          <span class="v-tier mono">tier 3</span>
+          <h3>Formal verification</h3>
+          <ul>
+            <li><code>kani</code> proofs: scheduler invariants, ring buffer, rate limiters</li>
+            <li><code>miri</code>: runtime validation of unsafe boundaries in <code>corpus</code></li>
+            <li>Nightly CI runs both; failures block merge</li>
+            <li>Scope is explicit — expansions require approval</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">CI gates</span>
+        <h2>Every PR runs through the same machine.</h2>
+        <p class="lede">
+          The CI pipeline is the single source of truth for "does this build,
+          test, and lint clean." All gates are blocking — no warnings, no soft
+          failures.
+        </p>
+      </div>
+
+      <div class="card">
+        <pre><code>{`# .github/workflows/ci.yml (excerpt)
+
+jobs:
+  fmt:        cargo fmt --all -- --check
+  build+test: cargo build --workspace --all-targets
+              cargo test  --workspace --all-targets
+  clippy:     cargo clippy --workspace --all-targets -- -D warnings
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"     # warnings → errors everywhere`}</code></pre>
+      </div>
+
+      <div class="grid grid-2" style="margin-top: 2rem;">
+        <div class="card">
+          <h3>What blocks merge</h3>
+          <ul>
+            <li>Any <code>cargo fmt</code> diff.</li>
+            <li>Any <code>cargo build</code> or <code>cargo test</code> failure across the workspace.</li>
+            <li>Any <code>clippy</code> warning (warnings are errors).</li>
+            <li>Introduction of <code>unsafe</code> outside <code>corpus</code>.</li>
+            <li>A regression in any benchmark with an established baseline (Phase 4+).</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>What is run nightly</h3>
+          <ul>
+            <li><code>miri</code> against the <code>corpus</code> test suite.</li>
+            <li>All <code>kani</code> proofs (scheduler, ring buffer, rate limiters).</li>
+            <li>The 30-day soak test, sampled at long-running intervals.</li>
+            <li>Benchmark sweep with regression alerts.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Compile-time enforcement</span>
+        <h2>Typestate capabilities at the call boundary.</h2>
+        <p class="lede">
+          The single largest verification lever in AnimaOS is not a proof — it is the type system. Capability tokens make permission violations un-compilable.
+        </p>
+      </div>
+      <Capability />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="card warn-card">
+        <h3>Verification scope is explicit</h3>
+        <p>
+          It is easy to want to prove more than is necessary. The verification
+          document lists what we prove; expansions require explicit scope
+          approval. The goal is a tractable audit surface that gets bigger only
+          when the value of the proof exceeds the maintenance cost.
+        </p>
+        <p class="muted">
+          We prove: rate-limiter monotonicity, ring-buffer safety under
+          contention, scheduler fairness invariants, allocator never returns
+          overlapping frames. We do not (yet) prove: end-to-end policy
+          correctness, sleep-cycle convergence under all loads, or LLM backend
+          contract conformance.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .section-head { max-width: 720px; margin-bottom: 3rem; }
+  .section-head h2 { margin: 1rem 0; }
+  .lede { color: var(--fg-2); font-size: 1.0625rem; line-height: 1.7; }
+
+  .v-card { display: flex; flex-direction: column; gap: 0.5rem; }
+  .v-tier {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .v-card h3 { margin: 0 0 0.5rem; }
+  .v-card ul { padding-left: 1.25rem; }
+  .v-card li { color: var(--fg-1); font-size: 0.9rem; }
+
+  .warn-card {
+    border-left: 3px solid var(--warn);
+  }
+  .warn-card h3 { color: var(--warn); margin-bottom: 1rem; }
+</style>
