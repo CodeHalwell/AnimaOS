@@ -713,7 +713,7 @@ path for invocation triggers).
    `cortex_invoked_audit_entry_carries_latency_ms` — field
    `latency_to_first_action_ms > 0`)
 
-### Epic E5.2 — Striatal Gate ⬜
+### Epic E5.2 — Striatal Gate ✅
 
 **Scope.** The arbitration point that decides whether a candidate
 event invokes the cortex, and at what cost class (cheap-local / mid-
@@ -727,27 +727,63 @@ function; inputs are explicit and every decision is audited.
   semantic class, user-facing flag), homeostatic signals
   (`thermal_load`, `compute_pressure`, `memory_pressure`,
   `power_budget`, `financial_budget`, `attention_demand`), recent
-  cortex history, and current budgets.
+  cortex history, and current budgets. ✅ (`vita::gate::EventFeatures`,
+  `vita::gate::HomeostaticSignals` — all six signals as documented,
+  clamped to `[0.0, 1.0]`, with `neutral()` baseline constructor)
 - S5.2.2 Hand-tuned threshold function with documented coefficients
-  and a configuration surface for runtime tuning.
+  and a configuration surface for runtime tuning. ✅
+  (`ThresholdGate` + `GateConfig::default()` — urgency\_weight=0.65,
+  novelty\_weight=0.35, user\_facing\_bonus=0.15,
+  operator\_command\_bonus=0.20, base\_threshold=0.40,
+  thermal\_penalty=0.30, memory\_penalty=0.20,
+  financial\_penalty=0.15, attention\_boost=0.20,
+  cheap\_local\_ceiling=0.60, frontier\_floor=0.85; all coefficients
+  documented in the struct and module docs)
 - S5.2.3 Per-decision audit entry: inputs, threshold values, decision,
   cost class, reasoning string. Auditable from the same log used by
-  the existing scheduler.
+  the existing scheduler. ✅ (`AuditEntry::GateDecision` — carries all
+  six homeostatic signals, event features, value\_score,
+  threshold\_applied, cost\_class, reasoning, override\_active;
+  `record_gate_decision()` helper writes the entry;
+  `print_audit()` in `kernels/hosted` renders it with the `🔀` prefix)
 - S5.2.4 Override mechanism: explicit user-issued or operator-issued
-  invocations bypass the gate, with the bypass recorded.
+  invocations bypass the gate, with the bypass recorded. ✅
+  (`GateOverride::UserForced { reason }` and
+  `GateOverride::OperatorForced { reason }` — both force `invoke=true`,
+  operator forces `Frontier` cost class, `override_active=true` is
+  set in both the `GateDecision` struct and the audit entry)
 - S5.2.5 Hookpoint for a learned gate: the threshold function is
   exposed behind a trait so a learned model can replace it without
-  changing callers.
+  changing callers. ✅ (`pub trait Gate: Send + Sync` — single
+  `decide()` method; `ThresholdGate` is the default impl; any type
+  implementing `Gate` can be passed to dispatch code without changing
+  call sites)
 
 **Exit criteria.**
 1. Every cortex invocation is preceded by a gate decision entry in the
    audit log; no invocation bypasses the gate without an explicit
-   override entry.
+   override entry. ✅ (`every_invocation_decision_is_preceded_by_gate_audit_entry`
+   — 10 evaluations produce exactly 10 `GateDecision` entries;
+   `override_decision_audit_entry_carries_override_active_true` — forced
+   decisions carry `override_active=true`)
 2. Threshold sensitivity to each homeostatic signal is covered by a
    table-driven unit test, including the case where signals at their
-   neutral values produce baseline behaviour.
+   neutral values produce baseline behaviour. ✅
+   (`homeostatic_signal_sensitivity_table` — 4-row table covering
+   thermal\_load, memory\_pressure, financial\_budget=0, attention\_demand;
+   each row asserts correct shift direction and exact magnitude;
+   `neutral_signals_produce_baseline_threshold` — threshold equals
+   `base_threshold` exactly at neutral;
+   `thermal_stress_raises_threshold`,
+   `financial_pressure_raises_threshold`,
+   `memory_pressure_raises_threshold`,
+   `high_attention_demand_lowers_threshold` — individual signal tests)
 3. A `anima why` CLI command reads the most recent gate decision and
-   prints its inputs and reasoning.
+   prints its inputs and reasoning. ✅ (`cargo run --bin anima-hosted -- why`
+   runs four representative scenarios — background-cleanup (blocked),
+   user-question (MidTier), high-priority-under-thermal (threshold raised
+   to 0.670 by thermal\_load=0.9), operator-emergency (Frontier override) —
+   and prints the most recent `GateDecision` with full input breakdown)
 
 ### Epic E5.3 — Thalamic Router ⬜
 

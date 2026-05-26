@@ -11,7 +11,10 @@
 //! tracing of each sleep cycle (exit criterion 1 of E3.4).
 
 /// A single observable lifecycle event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
+/// therefore the enum derives `PartialEq` only (not `Eq`).
+#[derive(Debug, Clone, PartialEq)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -87,6 +90,57 @@ pub enum AuditEntry {
         task_id: String,
         /// Error message from the cortex (or from vita's process monitor).
         error: String,
+    },
+
+    // ── E5.2 Striatal Gate audit entries ──────────────────────────────────────
+    /// A Striatal Gate evaluation was performed for a candidate event.
+    ///
+    /// Written immediately before every cortex invocation (or rejection).
+    /// Satisfies E5.2 exit criterion 1: "every cortex invocation is preceded
+    /// by a gate decision entry in the audit log; no invocation bypasses the
+    /// gate without an explicit override entry."
+    GateDecision {
+        /// Agent that owns this gate evaluation.
+        agent_id: String,
+        /// Per-event identifier used for audit correlation.
+        event_id: String,
+        /// `true` → cortex invoked; `false` → event blocked.
+        invoke: bool,
+        /// Routing tier selected (`"CheapLocal"` / `"MidTier"` / `"Frontier"`),
+        /// or `None` when the event was blocked.
+        cost_class: Option<String>,
+        // ── Event features (S5.2.1) ──────────────────────────────────────────
+        /// Event urgency score (`[0.0, 1.0]`).
+        urgency: f32,
+        /// Event novelty score (`[0.0, 1.0]`).
+        novelty: f32,
+        /// `true` when the event is user-facing.
+        user_facing: bool,
+        /// String representation of the semantic class.
+        semantic_class: String,
+        // ── Computed values ───────────────────────────────────────────────────
+        /// Value score computed from the event features.
+        value_score: f32,
+        /// Adaptive threshold the score was tested against.
+        threshold_applied: f32,
+        // ── Homeostatic signals (S5.2.1) ──────────────────────────────────────
+        /// CPU/GPU thermal occupancy at the time of evaluation.
+        thermal_load: f32,
+        /// Compute-pipeline saturation at the time of evaluation.
+        compute_pressure: f32,
+        /// Working-memory fill fraction at the time of evaluation.
+        memory_pressure: f32,
+        /// Available power budget fraction at the time of evaluation.
+        power_budget: f32,
+        /// Remaining financial API budget fraction at the time of evaluation.
+        financial_budget: f32,
+        /// User attention level at the time of evaluation.
+        attention_demand: f32,
+        // ── Decision metadata ─────────────────────────────────────────────────
+        /// Human-readable reasoning string surfaced by `anima why`.
+        reasoning: String,
+        /// `true` when a `GateOverride` changed the normal gate outcome.
+        override_active: bool,
     },
 }
 

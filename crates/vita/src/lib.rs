@@ -4,6 +4,7 @@
 
 pub mod audit;
 pub mod cortex_bridge;
+pub mod gate;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
@@ -11,6 +12,10 @@ pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeRequest, MockCortexBridge, PythonCortexBridge,
     ToolDispatcher, ToolSpec,
+};
+pub use gate::{
+    record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
+    HomeostaticSignals, SemanticClass, ThresholdGate,
 };
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
