@@ -110,6 +110,25 @@ fn print_audit(manager: &LifecycleManager) {
                 let mark = if *success { "✓" } else { "✗" };
                 println!("  {mark}   sleep_phase_completed phase={phase} success={success}");
             }
+            // E5.1 cortex entries
+            AuditEntry::CortexInvoked {
+                task_id,
+                latency_to_first_action_ms,
+                ..
+            } => println!(
+                "  ⚙  cortex_invoked task={task_id} latency_ms={latency_to_first_action_ms}"
+            ),
+            AuditEntry::CortexCompleted {
+                task_id,
+                tool_calls,
+                summary_len,
+                ..
+            } => println!(
+                "  ✓  cortex_completed task={task_id} tool_calls={tool_calls} summary_len={summary_len}"
+            ),
+            AuditEntry::CortexFault { task_id, error, .. } => {
+                println!("  ✗  cortex_fault task={task_id} error={error}")
+            }
         }
     }
 }

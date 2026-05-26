@@ -180,6 +180,8 @@ dependencies = [
  "memory",
  "scheduler",
  "senses",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

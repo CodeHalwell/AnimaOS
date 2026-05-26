@@ -3,9 +3,15 @@
 //! Self-preservation plane: autonomous lifecycle director.
 
 pub mod audit;
+pub mod cortex_bridge;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
+pub use cortex_bridge::{
+    archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
+    CortexInvocationResult, FnDispatcher, InvokeRequest, MockCortexBridge, PythonCortexBridge,
+    ToolDispatcher, ToolSpec,
+};
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
 use std::sync::{Arc, Mutex};
