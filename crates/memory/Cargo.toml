@@ -9,3 +9,10 @@ scc = "3.7.1"
 scheduler = { version = "0.1.0", path = "../scheduler" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "memory"
+harness = false

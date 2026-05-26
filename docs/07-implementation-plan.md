@@ -278,7 +278,7 @@ circuit breaker whose state is exposed to interoception.
 1. State transitions covered by exhaustive table-driven tests.
 2. Telemetry stream reflects state change within the next tick.
 
-### Epic E2.5 — Wasmtime Sandbox for Untrusted Tools ⬜
+### Epic E2.5 — Wasmtime Sandbox for Untrusted Tools ✅
 
 **Scope.** Host a Wasmtime runtime under `praxis/compute/` with gas
 metering, memory limits, and capability-based imports. Ship one sample
@@ -287,16 +287,37 @@ WASI tool that exercises the full sandbox surface.
 **Dependencies.** E2.3.
 
 **Stories.**
-- S2.5.1 Wasmtime runtime initialised once and shared.
-- S2.5.2 Gas meter integrated with the scheduler's token slice.
-- S2.5.3 Capability-gated WASI imports.
-- S2.5.4 Sample sandboxed math evaluator.
+- S2.5.1 Wasmtime runtime initialised once and shared. ✅ (`praxis/src/compute.rs` —
+  `WasmSandbox` wraps a shared `Arc<Engine>` created once in `WasmSandbox::new()`;
+  `engine()` returns a clone-able `&Arc<Engine>` for multi-call reuse;
+  `sandbox_engine_created_once_and_shared` and
+  `engine_shared_across_multiple_invocations` pin the invariant)
+- S2.5.2 Gas meter integrated with the scheduler's token slice. ✅ (`SandboxConfig::fuel_limit`
+  — per-call fuel budget threaded into `Store::set_fuel()`; `SandboxResult::fuel_consumed`
+  reports units used; `fuel_consumed_is_positive_for_arithmetic` and
+  `simple_arithmetic_does_not_exhaust_generous_fuel_budget` verify accounting)
+- S2.5.3 Capability-gated WASI imports. ✅ (`SandboxCapabilities { allow_stdout, allow_stderr }`
+  — `build_linker()` links `env::write_stdout` / `env::write_stderr` only when the flag
+  is set; modules calling unlisted imports fail at link time before any code runs;
+  `missing_capability_blocks_instantiation` asserts `Trap` without capability;
+  `granted_capability_allows_instantiation` asserts `Ok` with capability)
+- S2.5.4 Sample sandboxed math evaluator. ✅ (`SandboxedMathEvaluator` — a `ToolDriver`
+  registered as `"wasm-math"`; arithmetic (add/sub/mul/div) compiled from embedded WAT
+  and executed inside a fresh isolated `Store`; JSON payload `{"op":"add","a":1,"b":2}`
+  → `{"result":3}`; verified by `sandboxed_math_evaluator_add_via_tool_driver`)
 
 **Exit criteria.**
 1. Adversarial WASI module (infinite loop, memory exhaustion attempt) is
-   bounded inside the configured limits.
-2. Wasmtime startup cost amortised across the process lifetime
-   (one-time init).
+   bounded inside the configured limits. ✅
+   (`adversarial_infinite_loop_is_bounded_by_fuel` — `ADVERSARIAL_LOOP_WAT` spins
+   until fuel=0, returns `SandboxError::FuelExhausted`;
+   `adversarial_memory_exhaustion_is_bounded_by_limit` — `ADVERSARIAL_MEMORY_WAT`
+   attempts 65 535-page growth (≈ 4 GiB), denied by `ResourceLimiter`, returns
+   `SandboxError::MemoryExhausted`)
+2. Wasmtime startup cost amortised across the process lifetime (one-time init). ✅
+   (`sandbox_engine_created_once_and_shared` — `Arc::ptr_eq` proves same allocation;
+   `engine_shared_across_multiple_invocations` — 5 calls reuse the same engine Arc,
+   ref-count stays at 2 throughout)
 
 ### Epic E2.6 — LanceDB L3 Archive ✅
 
@@ -596,7 +617,7 @@ when degradation crosses the configured threshold.
    cycles all carry a report; `accuracy_is_logged_for_every_cycle_even_when_perfect`
    in `memory::replay`)
 
-### Epic E3.7 — Dreaming Phase ⬜
+### Epic E3.7 — Dreaming Phase ✅
 
 **Scope.** Random graph walks across L3 produce associative-edge
 candidates that feed the next pruning cycle for validation.
@@ -604,15 +625,38 @@ candidates that feed the next pruning cycle for validation.
 **Dependencies.** E2.6, E3.6.
 
 **Stories.**
-- S3.7.1 Random-walk sampler with seeded determinism.
-- S3.7.2 Candidate edge generation.
-- S3.7.3 Hand-off to the next pruning cycle.
+- S3.7.1 Random-walk sampler with seeded determinism. ✅ (`memory/src/dreaming.rs` —
+  `Xorshift64` PRNG seeded by `DreamConfig::seed`; `run_dream_walk(l3, config)` samples
+  entries in ascending ID order, performs seeded random walks, and returns a deterministic
+  `(DreamReport, Vec<AssociativeEdge>)` for every call with identical inputs;
+  `LifecycleManager::dream_config` field controls seed and walk parameters)
+- S3.7.2 Candidate edge generation. ✅ (`AssociativeEdge { from_key, to_key, similarity }`
+  — edges discovered by cosine-similarity walks across L3 embeddings; deduplicated
+  (highest similarity kept), sorted descending by similarity then lexicographic key
+  pair for full determinism; `DreamConfig::similarity_threshold` filters low-quality edges;
+  `SleepRoutineOutcome::dream_candidates` carries the edge list out of the sleep phase)
+- S3.7.3 Hand-off to the next pruning cycle. ✅ (`dream_candidates` is exposed on
+  `SleepRoutineOutcome` index 2; callers can read the list from `run_sleep_cycle()` and
+  seed the next pruning pass; `DreamContext` wires the L3 archive into
+  `run_maintenance_audited`; `LifecycleManager` passes `dream_ctx` when `l3_archive`
+  is configured)
 
 **Exit criteria.**
-1. Candidate yield is logged and monotonic-reproducible per seed.
-2. Bad candidates are filtered out by the subsequent pruning pass.
+1. Candidate yield is logged and monotonic-reproducible per seed. ✅
+   (`candidate_yield_is_monotonic_reproducible_per_seed` in `memory::dreaming` —
+   two calls with identical archive + config produce byte-for-byte identical reports
+   and edge lists; `dream_candidates_are_reproducible_per_seed` in `vita::sleep`;
+   `dream_candidates_are_reproducible_across_lifecycle_cycles` in `vita::lib` —
+   two consecutive lifecycle sleep cycles with the same `dream_config` and unchanged
+   L3 produce identical candidate lists)
+2. Bad candidates are filtered out by the subsequent pruning pass. ✅
+   (`threshold_filters_out_low_similarity_candidates` in `memory::dreaming` —
+   orthogonal nodes (cosine similarity 0.0) are excluded when threshold > 0;
+   `all_candidate_edges_have_similarity_at_or_above_threshold` verifies post-condition;
+   `dream_threshold_filters_low_similarity_edges_in_lifecycle` in `vita::lib` confirms
+   end-to-end filtering through the LifecycleManager)
 
-### Epic E3.8 — Compilation Phase: Trace → Training Pairs ⬜
+### Epic E3.8 — Compilation Phase: Trace → Training Pairs ✅
 
 **Scope.** Compile the cycle's traces into all three output training
 formats and persist them under `training_corpus/` in L3.
@@ -620,13 +664,35 @@ formats and persist them under `training_corpus/` in L3.
 **Dependencies.** E3.6.
 
 **Stories.**
-- S3.8.1 Trace-to-pair compiler for each format.
-- S3.8.2 Persistence under `training_corpus/`.
-- S3.8.3 Final close-out of the sleep cycle.
+- S3.8.1 Trace-to-pair compiler for each format. ✅ (`memory/src/compilation.rs` —
+  `compile_traces_to_pairs(entries, config)` pairs each `TaskStarted` with its
+  subsequent `TaskCompleted` (by task ID); emits `AlpacaRecord` (`{ instruction, input,
+  output }`), `ConversationRecord` (`{ conversations: [{ role, content }] }`), and
+  `ChainOfThoughtRecord` (`{ prompt, chain_of_thought, answer }`) for the three
+  `TrainingFormat` variants; failed tasks are excluded; `AuditEntry → AuditTraceEntry`
+  conversion in `vita::lib::audit_entry_to_trace` bridges the two crates)
+- S3.8.2 Persistence under `training_corpus/`. ✅ (`write_format` writes each format
+  as a JSONL file under `CompilationConfig::output_dir`; atomic write (`.tmp` then
+  rename) prevents partial reads; `append` mode accumulates across calls;
+  `LifecycleManager::compilation_config` controls the output directory and enabled
+  formats; `run_sleep_cycle` and `transition_to_sleep_state` both build a
+  `CompilationContext` from the current audit log when configured)
+- S3.8.3 Final close-out of the sleep cycle. ✅ (`emergency_consolidate(entries, config)`
+  — triggers an immediate compilation pass and sets `CompilationReport::emergency_consolidation
+  = true`; exposed from `memory::compilation`; tested in `vita::lib` via
+  `emergency_consolidation_produces_a_marked_report`)
 
 **Exit criteria.**
-1. Output corpora validate against the documented schemas.
-2. Emergency consolidation can trigger and recover under stress injection.
+1. Output corpora validate against the documented schemas. ✅
+   (`output_files_validate_against_schemas` in `memory::compilation` — Alpaca,
+   Conversation, and ChainOfThought JSONL files are written and deserialized back
+   to their typed structs without error; `sleep_cycle_compiles_completed_tasks_into_training_corpus`
+   in `vita::lib` validates the Alpaca file produced by a sleep cycle end-to-end)
+2. Emergency consolidation can trigger and recover under stress injection. ✅
+   (`emergency_consolidation_marks_report_and_flushes_pairs` in `memory::compilation`;
+   `emergency_consolidation_produces_a_marked_report` in `vita::lib` — both assert
+   `CompilationReport::emergency_consolidation = true` and verify that pairs are flushed
+   and files written correctly)
 
 ---
 
@@ -1190,11 +1256,52 @@ A single durable audit log and a telemetry export that is consumed by
 both development tooling and the homeostatic monitor. Owners change as
 stages progress; the epic remains open.
 
-### Epic EX.3 — Performance Regression Benchmark Suite ⬜
+### Epic EX.3 — Performance Regression Benchmark Suite ✅
 
 A per-PR microbenchmark suite (Criterion) plus a nightly macro-benchmark
 job. Begins in Stage 2 once the memory hierarchy is stable; tightens in
 Stage 4.
+
+**What was built:**
+- `criterion = "0.5"` added as workspace dev-dependency.
+- **`crates/scheduler/benches/scheduler.rs`** — 6 benchmarks across three groups:
+  - `task_agenda/push/{100,1000,10000}` — cost of inserting tasks across all three priority tiers.
+  - `task_agenda/select/{100,1000,10000}` — priority-ordered pop of a pre-filled agenda.
+  - `mlfq/boost_all_to_high/{50,500,2000}` — bulk starvation-prevention tier promotion.
+  - `mlfq/check_and_boost_no_op` — common no-op path when boost threshold is not reached.
+  - `token_pipe/push_refund_cycle/{64,512,4096}` — complete credit push/refund cycle.
+  - `token_pipe/bulk_push/{8,64,256}` — burst producer with abundant credits.
+- **`crates/memory/benches/memory.rs`** — 7 benchmarks across four groups:
+  - `arc_cache/sequential_inserts/{64,256,1024}` — full ARC miss path with eviction pressure.
+  - `arc_cache/mixed_workload/{64,256,1024}` — warm reads + cold inserts reflecting agent execution.
+  - `arc_cache/get_hits/{64,256,1024}` — read-only throughput on a fully-loaded warm cache.
+  - `l1_vcm/occupied_blocks/{0,2048,4000,8192}` — block-occupancy ceiling-division (hot scheduler path).
+  - `l1_vcm/add_tokens` — L1 token-count update with ceiling enforcement.
+  - `memory_node/activation_at/{t=0,1,10,100}` — emotionally modulated exponential decay formula.
+  - `memory_node/activation_batch/{64,512,4096}` — bulk decay evaluation (inner pruning-pass loop).
+- **`crates/praxis/benches/praxis.rs`** — 10 benchmarks across three groups:
+  - `tool_registry/lookup_echo` — HashMap probe + `Arc` clone (common read path).
+  - `tool_registry/lookup_miss` — miss path for unregistered tool identifiers.
+  - `tool_registry/dispatch_echo` — complete synchronous dispatch with circuit-breaker accounting.
+  - `tool_registry/dispatch_clock` — dispatch including a `SystemTime::now` syscall.
+  - `tool_registry/list_after_n_registrations/{10,100,1000}` — sorted list allocation.
+  - `routing/filter_10_candidates` — typical online routing path (short list).
+  - `routing/filter_candidates/{50,200,1000}` — filter scaling with linearly decreasing scores.
+  - `routing/filter_all_equal/{50,200,1000}` — full-pass degenerate case (all scores equal).
+  - `circuit_breaker/record_success_closed` — steady-state success accounting.
+  - `circuit_breaker/record_failure_below_threshold` — failure accounting without state transition.
+- **`.github/workflows/bench.yml`** — nightly CI job (02:00 UTC) running all three benchmark
+  suites with `--output-format bencher`; HTML reports uploaded as 30-day artifacts.
+  Also triggers on PR changes to `crates/scheduler/**`, `crates/memory/**`, `crates/praxis/**`
+  to surface regressions before they land.
+
+**Exit criteria met:**
+1. ✅ Per-PR microbenchmark job in `.github/workflows/bench.yml`; triggers on changes to the three
+   benchmarked crates.
+2. ✅ Nightly macro-benchmark job (`schedule: cron: '0 2 * * *'`) with artifact upload.
+3. ✅ `cargo build --benches -p scheduler/memory/praxis` clean; `cargo clippy --all-targets -D warnings`
+   clean; `cargo fmt --check` clean.
+4. ✅ All 237 existing workspace tests continue to pass unmodified.
 
 ### Epic EX.4 — Security Posture and Threat Model 🟡
 

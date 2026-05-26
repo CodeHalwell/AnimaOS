@@ -18,10 +18,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
-use memory::{L1PruningStore, VirtualContextManager};
+use memory::{
+    AuditTraceEntry, CompilationConfig, DreamConfig, L1PruningStore, VirtualContextManager,
+};
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
-use sleep::{PruningContext, ReplayContext};
+use sleep::{CompilationContext, DreamContext, PruningContext, ReplayContext};
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,14 @@ pub struct LifecycleManager {
     ///
     /// Applied every sleep cycle when an L3 archive is configured.
     pub replay_config: memory::ReplayConfig,
+    /// Dream-exploration configuration for the `DreamExploration` sleep phase (E3.7).
+    ///
+    /// Applied every sleep cycle when an L3 archive is configured.
+    pub dream_config: DreamConfig,
+    /// Policy-compilation configuration for the `PolicyCompilation` sleep phase (E3.8).
+    ///
+    /// `None` disables file output (compilation runs in-memory only, no JSONL files written).
+    pub compilation_config: Option<CompilationConfig>,
     /// Task scheduler.
     pub scheduler: IterationAwareMlfq,
     /// Agenda of pending tasks.
@@ -117,6 +127,14 @@ impl std::fmt::Debug for LifecycleManager {
                 "replay_config_threshold",
                 &self.replay_config.accuracy_threshold,
             )
+            .field("dream_config_seed", &self.dream_config.seed)
+            .field(
+                "compilation_config",
+                &self
+                    .compilation_config
+                    .as_ref()
+                    .map(|c| c.output_dir.display().to_string()),
+            )
             .field("backend", &self.backend.id())
             .field("audit_len", &self.audit.len())
             .field("iterations", &self.iterations)
@@ -145,6 +163,8 @@ impl LifecycleManager {
             l3_archive: None,
             next_archive_id: 0,
             replay_config: memory::ReplayConfig::default(),
+            dream_config: DreamConfig::default(),
+            compilation_config: None,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
             state: LifecycleState::Awake,
@@ -195,6 +215,12 @@ impl LifecycleManager {
     /// [`L1PruningStore::run_pruning_pass_with`] using `self.pruning_elapsed`
     /// as the elapsed time (E3.5).
     ///
+    /// The `DreamExploration` phase runs real random-walk exploration when an
+    /// L3 archive is configured (E3.7).
+    ///
+    /// The `PolicyCompilation` phase compiles audit traces into training datasets
+    /// when a `compilation_config` is set (E3.8).
+    ///
     /// Calling this method when already in the sleep state is a no-op to
     /// prevent duplicate transitions from the somatic loop.
     pub async fn transition_to_sleep_state(&mut self) -> Result<(), LifecycleError> {
@@ -203,25 +229,53 @@ impl LifecycleManager {
             self.audit.push(AuditEntry::SleepEntered {
                 agent_id: self.agent_id.clone(),
             });
-            // Run all four maintenance phases with per-phase audit entries.
-            // Pass the L1 pruning store so the MemoryPruning phase performs
-            // real emotional-decay pruning (E3.5).
             let agent_id = self.agent_id.clone();
             let elapsed = self.pruning_elapsed;
 
-            // Replay context: immutable borrow of l3_archive (different field from l1_memory).
+            // Replay context (E3.6): immutable borrow of l3_archive.
             let replay_ctx = self.l3_archive.as_ref().map(|l3| sleep::ReplayContext {
                 l3,
                 config: self.replay_config.clone(),
             });
 
+            // Dream context (E3.7): immutable borrow of l3_archive.
+            let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
+                l3,
+                config: self.dream_config.clone(),
+            });
+
+            // Compilation context (E3.8): convert audit entries to trace entries.
+            // We collect them into an owned Vec so that the CompilationContext borrow
+            // lives long enough for the duration of run_maintenance_audited.
+            let trace_entries: Vec<AuditTraceEntry> = self
+                .audit
+                .entries()
+                .iter()
+                .map(audit_entry_to_trace)
+                .collect();
+            let compilation_ctx = self
+                .compilation_config
+                .as_ref()
+                .map(|cfg| CompilationContext {
+                    entries: &trace_entries,
+                    config: cfg.clone(),
+                });
+
+            // Pruning context (E3.5): mutable borrow of l1_memory — compatible
+            // because all other borrows above target different fields (l3_archive).
             let ctx = PruningContext {
                 l1: &mut self.l1_memory,
                 elapsed,
                 floor: None,
             };
-            let report =
-                sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx), replay_ctx);
+            let report = sleep::run_maintenance_audited(
+                &agent_id,
+                &mut self.audit,
+                Some(ctx),
+                replay_ctx,
+                dream_ctx,
+                compilation_ctx,
+            );
 
             // E2.6: Demote evicted L1 nodes to L3 archive if present.
             if let Some(l3) = self.l3_archive.as_mut() {
@@ -266,25 +320,55 @@ impl LifecycleManager {
     ///
     /// The `MemoryPruning` phase runs real L1 emotional-decay pruning (E3.5).
     /// Evicted L1 nodes are demoted to the L3 archive when one is configured (E2.6).
+    /// The `DreamExploration` phase runs real random-walk exploration when an
+    /// L3 archive is configured (E3.7).
+    /// The `PolicyCompilation` phase compiles audit traces into training pairs
+    /// when a `compilation_config` is set (E3.8).
     pub fn run_sleep_cycle(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
         let elapsed = self.pruning_elapsed;
 
-        // Build replay context (immutable borrow of l3_archive) before pruning
-        // context (mutable borrow of l1_memory) — different fields, so both
-        // borrows can coexist (E3.6).
+        // Build replay context (E3.6) and dream context (E3.7): immutable borrows
+        // of l3_archive — compatible with mutable borrow of l1_memory below since
+        // they target different fields.
         let replay_ctx = self.l3_archive.as_ref().map(|l3| ReplayContext {
             l3,
             config: self.replay_config.clone(),
         });
+
+        let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
+            l3,
+            config: self.dream_config.clone(),
+        });
+
+        // Compilation context (E3.8).
+        let trace_entries: Vec<AuditTraceEntry> = self
+            .audit
+            .entries()
+            .iter()
+            .map(audit_entry_to_trace)
+            .collect();
+        let compilation_ctx = self
+            .compilation_config
+            .as_ref()
+            .map(|cfg| CompilationContext {
+                entries: &trace_entries,
+                config: cfg.clone(),
+            });
 
         let ctx = PruningContext {
             l1: &mut self.l1_memory,
             elapsed,
             floor: None,
         };
-        let report =
-            sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx), replay_ctx);
+        let report = sleep::run_maintenance_audited(
+            &agent_id,
+            &mut self.audit,
+            Some(ctx),
+            replay_ctx,
+            dream_ctx,
+            compilation_ctx,
+        );
 
         // E2.6: Demote evicted L1 nodes to L3 archive if present.
         if let Some(l3) = self.l3_archive.as_mut() {
@@ -313,6 +397,43 @@ impl LifecycleManager {
         self.max_iterations
             .map(|limit| self.iterations >= limit)
             .unwrap_or(false)
+    }
+}
+
+// ── AuditEntry → AuditTraceEntry conversion ────────────────────────────────────
+
+/// Converts a vita [`AuditEntry`] into an [`AuditTraceEntry`] for the
+/// policy-compilation phase.
+///
+/// Only `TaskStarted`, `TaskCompleted`, and `TaskFailed` carry task-level
+/// information; all other variants map to [`AuditTraceEntry::Other`].
+fn audit_entry_to_trace(entry: &AuditEntry) -> AuditTraceEntry {
+    match entry {
+        AuditEntry::TaskStarted {
+            task_id,
+            tier,
+            prompt,
+            ..
+        } => AuditTraceEntry::TaskStarted {
+            task_id: *task_id,
+            tier: *tier,
+            prompt: prompt.clone(),
+        },
+        AuditEntry::TaskCompleted {
+            task_id,
+            tokens_emitted,
+            response,
+            ..
+        } => AuditTraceEntry::TaskCompleted {
+            task_id: *task_id,
+            tokens_emitted: *tokens_emitted,
+            response: response.clone(),
+        },
+        AuditEntry::TaskFailed { task_id, error, .. } => AuditTraceEntry::TaskFailed {
+            task_id: *task_id,
+            error: error.clone(),
+        },
+        _ => AuditTraceEntry::Other,
     }
 }
 
@@ -1147,5 +1268,271 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── E3.7 — Dream exploration wired into LifecycleManager ─────────────────
+
+    /// E3.7 exit criterion 1: dream report is logged every cycle when L3 is configured.
+    #[test]
+    fn sleep_cycle_logs_dream_report_when_l3_is_configured() {
+        let path = std::env::temp_dir().join("animaos_test_e37_dream_log.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("dream-log-agent", None);
+        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+
+        // Cycle 1: L3 is empty → no walks, but report is still emitted.
+        let report1 = m.run_sleep_cycle();
+        let dr1 = report1.outcomes[2]
+            .dream
+            .as_ref()
+            .expect("dream report must be present when l3 is configured");
+        assert_eq!(dr1.walks_run, 0, "empty L3 → no walks run");
+        assert_eq!(dr1.candidates_found, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without an L3 archive, the DreamExploration phase falls back to the stub.
+    #[test]
+    fn sleep_cycle_dream_uses_stub_when_no_l3_configured() {
+        let mut m = manager("no-l3-dream-agent", None);
+        let report = m.run_sleep_cycle();
+
+        let dream_outcome = &report.outcomes[2];
+        assert_eq!(dream_outcome.routine, SleepRoutine::DreamExploration);
+        assert!(
+            dream_outcome.dream.is_none(),
+            "dream report must be None when no L3 is configured"
+        );
+        assert!(dream_outcome.dream_candidates.is_empty());
+    }
+
+    /// E3.7 exit criterion 1: same seed → same candidates across two cycles
+    /// with identical L3 contents.
+    #[test]
+    fn dream_candidates_are_reproducible_across_lifecycle_cycles() {
+        let path = std::env::temp_dir().join("animaos_test_e37_dream_repro.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("dream-repro-agent", None);
+
+        // Pre-populate L3 with distinct nodes (so walks can find neighbours).
+        {
+            let mut l3 = memory::L3Archive::open(&path, 4, 100).unwrap();
+            for i in 1u64..=5 {
+                let node = memory::MemoryNode::new(0.9, 0.1 * i as f32);
+                let item = memory::archive_memory_node(i, &format!("d{i}"), &node);
+                let prov = memory::Provenance::now(memory::SourceTier::L1, &format!("d{i}"));
+                l3.demote(item, prov).unwrap();
+            }
+            m.l3_archive = Some(l3);
+        }
+
+        // Fix the seed and use a low threshold to maximise candidate yield.
+        m.dream_config = memory::DreamConfig {
+            seed: 99,
+            similarity_threshold: 0.0,
+            ..Default::default()
+        };
+
+        // Run cycle 1 and collect candidates.
+        let r1 = m.run_sleep_cycle();
+        let candidates1 = r1.outcomes[2].dream_candidates.clone();
+
+        // Restore dream_config (run_sleep_cycle does not modify it).
+        m.dream_config = memory::DreamConfig {
+            seed: 99,
+            similarity_threshold: 0.0,
+            ..Default::default()
+        };
+
+        // Run cycle 2 with the same config — candidates must be identical.
+        let r2 = m.run_sleep_cycle();
+        let candidates2 = r2.outcomes[2].dream_candidates.clone();
+
+        assert_eq!(
+            candidates1, candidates2,
+            "dream candidates must be reproducible for the same seed and archive"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// E3.7 exit criterion 2: threshold filtering excludes low-similarity edges
+    /// at the lifecycle level.
+    #[test]
+    fn dream_threshold_filters_low_similarity_edges_in_lifecycle() {
+        let path = std::env::temp_dir().join("animaos_test_e37_dream_thresh.json");
+        let _ = std::fs::remove_file(&path);
+
+        let mut m = manager("dream-thresh-agent", None);
+
+        // Insert two orthogonal nodes (cosine similarity = 0).
+        {
+            use memory::archival::ArchivedItem;
+            let mut l3 = memory::L3Archive::open(&path, 4, 100).unwrap();
+            let item1 = ArchivedItem {
+                id: 1,
+                embedding: vec![1.0, 0.0, 0.0, 0.0],
+                payload: vec![],
+            };
+            let item2 = ArchivedItem {
+                id: 2,
+                embedding: vec![0.0, 1.0, 0.0, 0.0],
+                payload: vec![],
+            };
+            l3.demote(
+                item1,
+                memory::Provenance::now(memory::SourceTier::L1, "orth-a"),
+            )
+            .unwrap();
+            l3.demote(
+                item2,
+                memory::Provenance::now(memory::SourceTier::L1, "orth-b"),
+            )
+            .unwrap();
+            m.l3_archive = Some(l3);
+        }
+
+        // High threshold → orthogonal nodes (similarity 0) are filtered.
+        m.dream_config = memory::DreamConfig {
+            similarity_threshold: 0.9,
+            num_walks: 4,
+            walk_length: 4,
+            ..Default::default()
+        };
+
+        let report = m.run_sleep_cycle();
+        let dream_outcome = &report.outcomes[2];
+        let dr = dream_outcome.dream.as_ref().unwrap();
+        assert_eq!(
+            dr.candidates_found, 0,
+            "orthogonal nodes must be filtered by a high threshold"
+        );
+        assert!(dream_outcome.dream_candidates.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── E3.8 — Policy compilation wired into LifecycleManager ────────────────
+
+    /// E3.8: compilation report is present when compilation_config is set.
+    #[test]
+    fn sleep_cycle_logs_compilation_report_when_config_is_set() {
+        let dir = std::env::temp_dir().join("animaos_test_e38_compile_log");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut m = manager("compile-log-agent", None);
+        m.compilation_config = Some(memory::CompilationConfig {
+            output_dir: dir.clone(),
+            formats: vec![memory::TrainingFormat::Alpaca],
+            append: false,
+        });
+
+        let report = m.run_sleep_cycle();
+        let comp_outcome = &report.outcomes[3];
+        assert_eq!(comp_outcome.routine, SleepRoutine::PolicyCompilation);
+        // Compilation ran, even if no pairs were found (no prior tasks in audit).
+        assert!(
+            comp_outcome.compilation.is_some(),
+            "compilation report must be present when compilation_config is set"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a compilation_config, the PolicyCompilation phase is a no-op stub.
+    #[test]
+    fn sleep_cycle_compilation_uses_stub_when_no_config() {
+        let mut m = manager("no-compile-agent", None);
+        let report = m.run_sleep_cycle();
+
+        let comp_outcome = &report.outcomes[3];
+        assert_eq!(comp_outcome.routine, SleepRoutine::PolicyCompilation);
+        assert!(comp_outcome.compilation.is_none());
+    }
+
+    /// E3.8 exit criterion 1: completed tasks appear in the compiled corpus.
+    #[test]
+    fn sleep_cycle_compiles_completed_tasks_into_training_corpus() {
+        let dir = std::env::temp_dir().join("animaos_test_e38_corpus");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut m = manager("corpus-agent", None);
+
+        // Inject a task-completed pair directly into the audit log.
+        m.audit.push(AuditEntry::TaskStarted {
+            agent_id: "corpus-agent".into(),
+            task_id: 1,
+            tier: 0,
+            prompt: "What is 1+1?".into(),
+        });
+        m.audit.push(AuditEntry::TaskCompleted {
+            agent_id: "corpus-agent".into(),
+            task_id: 1,
+            tokens_emitted: 1,
+            response: "2".into(),
+        });
+
+        m.compilation_config = Some(memory::CompilationConfig {
+            output_dir: dir.clone(),
+            formats: vec![memory::TrainingFormat::Alpaca],
+            append: false,
+        });
+
+        let report = m.run_sleep_cycle();
+        let cr = report.outcomes[3]
+            .compilation
+            .as_ref()
+            .expect("compilation report must be present");
+
+        assert_eq!(cr.pairs_compiled, 1, "one task pair must be compiled");
+        assert_eq!(cr.files_written, 1, "one JSONL file must be written");
+
+        // Validate the Alpaca file on disk.
+        let alpaca_path = dir.join("alpaca.jsonl");
+        assert!(alpaca_path.exists(), "alpaca.jsonl must be created");
+        let content = std::fs::read_to_string(&alpaca_path).unwrap();
+        let record: memory::AlpacaRecord = serde_json::from_str(content.trim()).unwrap();
+        assert_eq!(record.instruction, "What is 1+1?");
+        assert_eq!(record.output, "2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E3.8 exit criterion 2: emergency consolidation flag is accessible via
+    /// the public API.
+    #[test]
+    fn emergency_consolidation_produces_a_marked_report() {
+        let dir = std::env::temp_dir().join("animaos_test_e38_emergency");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let entries = vec![
+            memory::AuditTraceEntry::TaskStarted {
+                task_id: 99,
+                tier: 0,
+                prompt: "urgent".into(),
+            },
+            memory::AuditTraceEntry::TaskCompleted {
+                task_id: 99,
+                tokens_emitted: 1,
+                response: "done".into(),
+            },
+        ];
+
+        let cfg = memory::CompilationConfig {
+            output_dir: dir.clone(),
+            formats: vec![memory::TrainingFormat::Alpaca],
+            append: false,
+        };
+
+        let (report, pairs, errors) = memory::emergency_consolidate(&entries, &cfg);
+        assert!(errors.is_empty());
+        assert!(report.emergency_consolidation, "emergency flag must be set");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(report.files_written, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
