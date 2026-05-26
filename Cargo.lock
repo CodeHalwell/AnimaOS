@@ -657,6 +657,7 @@ dependencies = [
  "memory",
  "scheduler",
  "senses",
+ "serde_json",
  "vita",
 ]
 
@@ -757,6 +758,14 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kv-controller"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1388,6 +1397,7 @@ name = "vita"
 version = "0.1.0"
 dependencies = [
  "interoception",
+ "kv-controller",
  "memory",
  "scheduler",
  "senses",

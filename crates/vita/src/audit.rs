@@ -11,7 +11,10 @@
 //! tracing of each sleep cycle (exit criterion 1 of E3.4).
 
 /// A single observable lifecycle event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
+/// therefore the enum derives `PartialEq` only (not `Eq`).
+#[derive(Debug, Clone, PartialEq)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -118,6 +121,196 @@ pub enum AuditEntry {
         veto_count: usize,
         /// The configured window duration in seconds.
         window_secs: u64,
+    },
+
+    // ── E5.2 Striatal Gate audit entries ──────────────────────────────────────
+    /// A Striatal Gate evaluation was performed for a candidate event.
+    ///
+    /// Written immediately before every cortex invocation (or rejection).
+    /// Satisfies E5.2 exit criterion 1: "every cortex invocation is preceded
+    /// by a gate decision entry in the audit log; no invocation bypasses the
+    /// gate without an explicit override entry."
+    GateDecision {
+        /// Agent that owns this gate evaluation.
+        agent_id: String,
+        /// Per-event identifier used for audit correlation.
+        event_id: String,
+        /// `true` → cortex invoked; `false` → event blocked.
+        invoke: bool,
+        /// Routing tier selected (`"CheapLocal"` / `"MidTier"` / `"Frontier"`),
+        /// or `None` when the event was blocked.
+        cost_class: Option<String>,
+        // ── Event features (S5.2.1) ──────────────────────────────────────────
+        /// Event urgency score (`[0.0, 1.0]`).
+        urgency: f32,
+        /// Event novelty score (`[0.0, 1.0]`).
+        novelty: f32,
+        /// `true` when the event is user-facing.
+        user_facing: bool,
+        /// String representation of the semantic class.
+        semantic_class: String,
+        // ── Computed values ───────────────────────────────────────────────────
+        /// Value score computed from the event features.
+        value_score: f32,
+        /// Adaptive threshold the score was tested against.
+        threshold_applied: f32,
+        // ── Homeostatic signals (S5.2.1) ──────────────────────────────────────
+        /// CPU/GPU thermal occupancy at the time of evaluation.
+        thermal_load: f32,
+        /// Compute-pipeline saturation at the time of evaluation.
+        compute_pressure: f32,
+        /// Working-memory fill fraction at the time of evaluation.
+        memory_pressure: f32,
+        /// Available power budget fraction at the time of evaluation.
+        power_budget: f32,
+        /// Remaining financial API budget fraction at the time of evaluation.
+        financial_budget: f32,
+        /// User attention level at the time of evaluation.
+        attention_demand: f32,
+        // ── Decision metadata ─────────────────────────────────────────────────
+        /// Human-readable reasoning string surfaced by `anima why`.
+        reasoning: String,
+        /// `true` when a `GateOverride` changed the normal gate outcome.
+        override_active: bool,
+    },
+
+    // ── E5.5 Identity Memory audit entries ───────────────────────────────────
+    /// A free-form identity fact was created or updated via `anima identity set`.
+    ///
+    /// Satisfies E5.5 exit criterion 1: "edits round-trip through the audit log."
+    IdentityUpdated {
+        /// Agent that owns the identity store.
+        agent_id: String,
+        /// Fact key that was modified.
+        key: String,
+        /// Previous value, or `None` if the key was newly created.
+        old_value: Option<String>,
+        /// New value after the update.
+        new_value: String,
+    },
+
+    // ── E5.3 Thalamic Router audit entries ────────────────────────────────────
+    /// A Thalamic Router decision was made for a gated event.
+    ///
+    /// Written immediately after a `GateDecision` with `invoke=true`, recording
+    /// which route configuration was selected and how tools were filtered.
+    /// Satisfies E5.3 exit criterion 1: every invocation has a traceable
+    /// route selection in the audit log.
+    RouterDecision {
+        /// Agent that owns this routing decision.
+        agent_id: String,
+        /// Per-event identifier for audit correlation (matches `GateDecision`).
+        event_id: String,
+        /// Identifier of the selected route (e.g. `"cheap-local"`).
+        route_id: String,
+        /// Model selector tier label (e.g. `"mid-tier"`).
+        model_selector: String,
+        /// Human-readable tool scope name.
+        tool_scope_name: String,
+        /// Number of tools offered to the router before scoping.
+        tools_available: usize,
+        /// Number of tools the cortex will see after route scoping.
+        tools_permitted: usize,
+        /// Whether identity memory is accessible on this route.
+        memory_scope_identity: bool,
+        /// Whether L1 working memory is accessible on this route.
+        memory_scope_l1: bool,
+        /// Whether L2 warm cache is accessible on this route.
+        memory_scope_l2: bool,
+        /// Whether L3 archive is accessible on this route.
+        memory_scope_l3: bool,
+        /// Maximum planning + acting turns for this invocation.
+        max_turns: u32,
+        /// Maximum total tool calls for this invocation.
+        max_tool_calls: u32,
+    },
+
+    // ── E5.7 Interoceptive Modulation audit entries ────────────────────────
+    /// A homeostatic signal snapshot published at 1 Hz (S5.7.1).
+    ///
+    /// Satisfies E5.7 exit criterion 1: every sensor tick is permanently
+    /// recorded so the stress harness can replay and assert the log.
+    InteroceptiveSnapshot {
+        /// Agent identifier (for multi-agent correlation).
+        agent_id: String,
+        /// Wall-clock timestamp in nanoseconds since the Unix epoch.
+        tick_ns: u64,
+        /// CPU/GPU thermal occupancy (`0.0` = cool, `1.0` = throttled).
+        thermal_load: f32,
+        /// Compute-pipeline saturation (`0.0` = idle, `1.0` = saturated).
+        compute_pressure: f32,
+        /// Working-memory fill fraction (`0.0` = empty, `1.0` = full).
+        memory_pressure: f32,
+        /// Available power budget (`1.0` = AC / full, `0.0` = flat battery).
+        power_budget: f32,
+        /// Remaining financial budget fraction (`1.0` = fresh, `0.0` = exhausted).
+        financial_budget: f32,
+        /// User presence/attention level (`1.0` = full, `0.0` = absent).
+        attention_demand: f32,
+        /// Weighted aggregate stress level derived from the above (see
+        /// [`interoception::InteroceptiveSignals::aggregate_stress`]).
+        aggregate_stress: f32,
+    },
+
+    /// The Thalamic Router downgraded a route due to homeostatic pressure
+    /// (E5.7, S5.7.5).
+    ///
+    /// Written only when modulation actually changes the route; immediately
+    /// follows the `RouterDecision` for the effective (downgraded) route.
+    RouterModulated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-event identifier for audit correlation.
+        event_id: String,
+        /// The route the gate's cost class would have selected.
+        requested_route_id: String,
+        /// The route actually used after modulation.
+        effective_route_id: String,
+        /// Human-readable explanation of why the route was changed.
+        reason: String,
+    },
+
+    // ── E5.4 KV-Cache Controller audit entries ────────────────────────────────
+
+    /// The KV-cache gating controller (E5.4) performed a block selection pass.
+    ///
+    /// Written each time [`crate::kv_gate::gate_working_context`] is called
+    /// with a controller-enabled route.  Satisfies E5.4 exit criterion 2:
+    /// "controller fault reverts to LRU within next gating decision and is
+    /// recorded in the audit log."
+    KvGatePass {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier (matches the cortex task ID).
+        task_id: String,
+        /// Total blocks evaluated in this pass.
+        total_blocks: usize,
+        /// Blocks retained after the gate decision.
+        retained_blocks: usize,
+        /// Block budget that was configured for this pass.
+        budget: usize,
+        /// `true` if the pass used LRU fallback (controller was faulted).
+        fallback_lru: bool,
+        /// Number of needle blocks (user constraints) retained.
+        needles_retained: usize,
+        /// Total needle blocks present.
+        total_needles: usize,
+    },
+
+    /// The KV-cache gating controller encountered a fault and switched to LRU.
+    ///
+    /// Written on the **first** call where the controller transitions from
+    /// `Active` to `Faulted`.  Subsequent faulted passes produce
+    /// `KvGatePass { fallback_lru: true }` entries only.
+    ///
+    /// Satisfies E5.4 exit criterion 2.
+    KvControllerFaulted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Number of faults the controller has accumulated.
+        fault_count: u32,
     },
 }
 

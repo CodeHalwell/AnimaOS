@@ -19,6 +19,23 @@
 //!
 //! Two concurrent agents execute through a shared backend; their audit logs
 //! are printed to stdout on completion.
+//!
+//! # `anima why` subcommand (E5.2)
+//!
+//! Running `cargo run --bin anima-hosted -- why` exercises the Striatal Gate on
+//! a sample of representative events and prints the most recent `GateDecision`
+//! audit entry in human-readable form, satisfying E5.2 exit criterion 3.
+//!
+//! # `anima identity` subcommand (E5.5)
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- identity show [<key>]
+//! cargo run --bin anima-hosted -- identity set <key> <value>
+//! ```
+//!
+//! Inspects and edits the agent's identity memory stored in
+//! `~/.anima/anima/identity.json`.  Every `set` is recorded in an in-process
+//! audit log that is printed on exit, satisfying E5.5 exit criterion 1.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -30,7 +47,12 @@ use llm_backends::factory::BackendFactory;
 use memory::VirtualContextManager;
 use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
-use vita::{somatic_execution_loop, AuditEntry, LifecycleConfig, LifecycleManager};
+use vita::gate::Gate;
+use vita::{
+    record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
+    GateOverride, HomeostaticSignals, IdentityMemory, LifecycleConfig, LifecycleManager,
+    SemanticClass, ThresholdGate,
+};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -153,11 +175,499 @@ fn print_audit(manager: &LifecycleManager) {
                      vetoes={veto_count} window={window_secs}s"
                 );
             }
+            // E5.2 gate decision entries
+            AuditEntry::GateDecision {
+                event_id,
+                invoke,
+                cost_class,
+                urgency,
+                novelty,
+                value_score,
+                threshold_applied,
+                thermal_load,
+                financial_budget,
+                attention_demand,
+                reasoning,
+                override_active,
+                ..
+            } => {
+                let verdict = if *invoke {
+                    format!("INVOKE [{}]", cost_class.as_deref().unwrap_or("?"))
+                } else {
+                    "BLOCK".to_string()
+                };
+                let override_tag = if *override_active { " [OVERRIDE]" } else { "" };
+                println!(
+                    "  🔀 gate_decision event={event_id} verdict={verdict}{override_tag}"
+                );
+                println!(
+                    "       urgency={urgency:.3} novelty={novelty:.3} \
+                     value={value_score:.3} threshold={threshold_applied:.3}"
+                );
+                println!(
+                    "       thermal={thermal_load:.3} financial_budget={financial_budget:.3} \
+                     attention={attention_demand:.3}"
+                );
+                println!("       reasoning: {reasoning}");
+            }
+            // E5.3 router decision entries
+            AuditEntry::RouterDecision {
+                event_id,
+                route_id,
+                model_selector,
+                tool_scope_name,
+                tools_available,
+                tools_permitted,
+                memory_scope_identity,
+                memory_scope_l2,
+                memory_scope_l3,
+                max_turns,
+                max_tool_calls,
+                ..
+            } => {
+                println!(
+                    "  🗺  router_decision event={event_id} route={route_id} \
+                     model={model_selector} scope={tool_scope_name}"
+                );
+                println!(
+                    "       tools: {tools_permitted}/{tools_available} permitted"
+                );
+                println!(
+                    "       memory: identity={memory_scope_identity} \
+                     l2={memory_scope_l2} l3={memory_scope_l3}"
+                );
+                println!(
+                    "       termination: max_turns={max_turns} max_tool_calls={max_tool_calls}"
+                );
+            }
+            // E5.5 identity memory audit entries
+            AuditEntry::IdentityUpdated { agent_id, key, old_value, new_value } => {
+                let old_tag = match old_value {
+                    Some(v) => format!(" (was {v:?})"),
+                    None => " (new key)".to_owned(),
+                };
+                println!(
+                    "  📝 identity_updated agent={agent_id} key={key:?} → {new_value:?}{old_tag}"
+                );
+            }
+            // E5.7 interoceptive modulation audit entries
+            AuditEntry::InteroceptiveSnapshot {
+                agent_id,
+                tick_ns,
+                thermal_load,
+                compute_pressure,
+                memory_pressure,
+                power_budget,
+                financial_budget,
+                attention_demand,
+                aggregate_stress,
+            } => {
+                println!(
+                    "  📊 interoceptive_snapshot agent={agent_id} tick_ns={tick_ns}"
+                );
+                println!(
+                    "       thermal={thermal_load:.3} compute={compute_pressure:.3} \
+                     memory={memory_pressure:.3}"
+                );
+                println!(
+                    "       power={power_budget:.3} financial={financial_budget:.3} \
+                     attention={attention_demand:.3}"
+                );
+                println!("       aggregate_stress={aggregate_stress:.3}");
+            }
+            AuditEntry::RouterModulated {
+                event_id,
+                requested_route_id,
+                effective_route_id,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  ⬇  router_modulated event={event_id} \
+                     requested={requested_route_id} → effective={effective_route_id}"
+                );
+                println!("       reason: {reason}");
+            }
+            // E5.4 KV-cache controller entries
+            AuditEntry::KvGatePass {
+                task_id,
+                total_blocks,
+                retained_blocks,
+                budget,
+                fallback_lru,
+                needles_retained,
+                total_needles,
+                ..
+            } => {
+                let mode = if *fallback_lru { "LRU-fallback" } else { "controller" };
+                println!(
+                    "  🔒 kv_gate_pass task={task_id} mode={mode} \
+                     retained={retained_blocks}/{total_blocks} budget={budget} \
+                     needles={needles_retained}/{total_needles}"
+                );
+            }
+            AuditEntry::KvControllerFaulted {
+                task_id,
+                fault_count,
+                ..
+            } => {
+                println!(
+                    "  ⚠  kv_controller_faulted task={task_id} fault_count={fault_count} \
+                     (switching to LRU fallback)"
+                );
+            }
         }
     }
 }
 
+// ── `anima identity` subcommand (E5.5 exit criterion 1) ──────────────────────
+
+/// Implements the `anima identity show [<key>]` and
+/// `anima identity set <key> <value>` subcommands.
+///
+/// Satisfies E5.5 exit criterion 1: "a user can run `anima identity show` and
+/// `anima identity set <key> <value>` to inspect and edit identity memory;
+/// edits round-trip through the audit log."
+fn cmd_identity(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+
+    let path = IdentityMemory::default_path(AGENT_ID);
+    let mut store = IdentityMemory::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open identity store ({e}); using in-memory fallback");
+        IdentityMemory::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            if let Some(key) = args.get(1) {
+                // Show a single fact.
+                match store.get_fact(key) {
+                    Some(value) => println!("{key} = {value}"),
+                    None => println!("{key}: (not set)"),
+                }
+            } else {
+                // Show the full identity document.
+                let json = store.to_json();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                );
+            }
+        }
+        Some("set") => {
+            match (args.get(1), args.get(2)) {
+                (Some(key), Some(value)) => {
+                    match store.set_fact(key, value, &mut log, AGENT_ID) {
+                        Ok(()) => {
+                            println!("identity: set {key:?} = {value:?}");
+                            // Print the audit trail so the caller can verify the
+                            // round-trip (E5.5 exit criterion 1).
+                            for entry in log.entries() {
+                                if let AuditEntry::IdentityUpdated {
+                                    key,
+                                    new_value,
+                                    old_value,
+                                    ..
+                                } = entry
+                                {
+                                    let old_tag = match old_value {
+                                        Some(v) => format!(" (was {v:?})"),
+                                        None => " (new key)".to_owned(),
+                                    };
+                                    println!("audit: identity_updated key={key:?} → {new_value:?}{old_tag}");
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("identity: error: {e}"),
+                    }
+                }
+                _ => {
+                    eprintln!("usage: anima-hosted identity set <key> <value>");
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted identity show [<key>]");
+            eprintln!("       anima-hosted identity set <key> <value>");
+        }
+    }
+}
+
+// ── `anima why` subcommand (E5.2 exit criterion 3 + E5.7 exit criterion 2) ───
+
+/// Exercises the Striatal Gate on representative events, records the decisions
+/// to an in-process audit log, and prints the most recent `GateDecision` entry.
+///
+/// In E5.7 the function is extended to also sample the interoceptive sensor
+/// bundle and display the live signal snapshot alongside gate decisions,
+/// satisfying E5.7 exit criterion 2: "The `anima why` CLI command includes the
+/// homeostatic signal values at the time of the decision."
+fn cmd_why() {
+    use interoception::{HomeostaticMonitor, InteroceptiveSensorBundle};
+    use vita::AuditLog;
+
+    println!("anima why — Striatal Gate + Interoceptive Modulation (E5.2 / E5.7)\n");
+
+    // ── Live interoceptive snapshot (E5.7, exit criterion 2) ─────────────────
+    let sensor_bundle = InteroceptiveSensorBundle::with_defaults();
+    let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
+    monitor.record_ttft(1.0); // baseline (no stress)
+
+    // Use epoch 0 as the timestamp sentinel for this demo (no real spend).
+    let live_signals = sensor_bundle.sample(&monitor, 0, 4096, 0);
+    let live_homeostatic = HomeostaticSignals::from_interoceptive(&live_signals);
+
+    println!("━━━ Live interoceptive snapshot (from sensors)");
+    println!(
+        "  thermal_load    : {:.3}  (TTFT-ratio proxy)",
+        live_signals.thermal_load
+    );
+    println!(
+        "  compute_pressure: {:.3}  (TTFT-ratio proxy)",
+        live_signals.compute_pressure
+    );
+    println!(
+        "  memory_pressure : {:.3}  (L1 context fill)",
+        live_signals.memory_pressure
+    );
+    println!(
+        "  power_budget    : {:.3}  (disabled sensor → AC sentinel)",
+        live_signals.power_budget
+    );
+    println!(
+        "  financial_budget: {:.3}  (no spend recorded → full budget)",
+        live_signals.financial_budget
+    );
+    println!(
+        "  attention_demand: {:.3}  (disabled sensor → user-present sentinel)",
+        live_signals.attention_demand
+    );
+    println!("  aggregate_stress: {:.3}", live_signals.aggregate_stress());
+    println!();
+
+    let gate = ThresholdGate::with_defaults();
+    let mut log = AuditLog::new();
+    let agent_id = "anima";
+
+    // Sample scenarios covering the full range of gate outcomes.
+    let scenarios: &[(&str, EventFeatures, HomeostaticSignals, GateOverride)] = &[
+        (
+            "background-cleanup",
+            EventFeatures {
+                urgency: 0.1,
+                novelty: 0.05,
+                semantic_class: SemanticClass::BackgroundTask,
+                user_facing: false,
+            },
+            HomeostaticSignals::neutral(),
+            GateOverride::None,
+        ),
+        (
+            "user-question",
+            EventFeatures {
+                urgency: 0.7,
+                novelty: 0.4,
+                semantic_class: SemanticClass::UserQuery,
+                user_facing: true,
+            },
+            HomeostaticSignals::neutral(),
+            GateOverride::None,
+        ),
+        (
+            "high-priority-under-thermal",
+            EventFeatures {
+                urgency: 0.8,
+                novelty: 0.3,
+                semantic_class: SemanticClass::UserQuery,
+                user_facing: true,
+            },
+            HomeostaticSignals {
+                thermal_load: 0.9,
+                ..HomeostaticSignals::neutral()
+            },
+            GateOverride::None,
+        ),
+        (
+            "operator-emergency",
+            EventFeatures {
+                urgency: 0.4,
+                novelty: 0.2,
+                semantic_class: SemanticClass::OperatorCommand,
+                user_facing: false,
+            },
+            HomeostaticSignals::neutral(),
+            GateOverride::OperatorForced {
+                reason: "emergency shutdown initiated".to_string(),
+            },
+        ),
+    ];
+
+    for (event_id, event, signals, override_hint) in scenarios {
+        let decision = gate.decide(event_id, event, signals, override_hint);
+        record_gate_decision(&mut log, agent_id, &decision, event, signals);
+    }
+
+    println!("Evaluated {} scenarios. Full audit trail:\n", log.len());
+    for entry in log.entries() {
+        if let AuditEntry::GateDecision {
+            event_id,
+            invoke,
+            cost_class,
+            urgency,
+            novelty,
+            user_facing,
+            semantic_class,
+            value_score,
+            threshold_applied,
+            thermal_load,
+            compute_pressure,
+            memory_pressure,
+            power_budget,
+            financial_budget,
+            attention_demand,
+            reasoning,
+            override_active,
+            ..
+        } = entry
+        {
+            let verdict = if *invoke {
+                format!("✅ INVOKE [{}]", cost_class.as_deref().unwrap_or("?"))
+            } else {
+                "🚫 BLOCK".to_string()
+            };
+            let override_tag = if *override_active {
+                "  ⚠ OVERRIDE ACTIVE"
+            } else {
+                ""
+            };
+            println!("━━━ event: {event_id}{override_tag}");
+            println!("  verdict         : {verdict}");
+            println!("  reasoning       : {reasoning}");
+            println!("  ─ event features ─────────────────────────────");
+            println!("  urgency         : {urgency:.3}");
+            println!("  novelty         : {novelty:.3}");
+            println!("  user_facing     : {user_facing}");
+            println!("  semantic_class  : {semantic_class}");
+            println!("  value_score     : {value_score:.4}");
+            println!("  threshold       : {threshold_applied:.4}");
+            println!("  ─ homeostatic signals ────────────────────────");
+            println!("  thermal_load    : {thermal_load:.3}");
+            println!("  compute_pressure: {compute_pressure:.3}");
+            println!("  memory_pressure : {memory_pressure:.3}");
+            println!("  power_budget    : {power_budget:.3}");
+            println!("  financial_budget: {financial_budget:.3}");
+            println!("  attention_demand: {attention_demand:.3}");
+            println!();
+        }
+    }
+
+    // Print the most recent GateDecision (satisfies E5.2 exit criterion 3).
+    if let Some(AuditEntry::GateDecision {
+        event_id,
+        reasoning,
+        invoke,
+        cost_class,
+        ..
+    }) = log
+        .entries()
+        .iter()
+        .rev()
+        .find(|e| matches!(e, AuditEntry::GateDecision { .. }))
+    {
+        let verdict = if *invoke {
+            format!("INVOKE [{}]", cost_class.as_deref().unwrap_or("?"))
+        } else {
+            "BLOCK".to_string()
+        };
+        println!("Most recent gate decision: event={event_id} verdict={verdict}");
+        println!("Reasoning: {reasoning}");
+    }
+
+    // ── E5.7 Router modulation demo ───────────────────────────────────────────
+    println!("\n━━━ E5.7 Router modulation with live interoceptive signals");
+    use vita::{record_modulated_router_decision, CostClass, SemanticClass as SC, StaticRouter};
+
+    let router =
+        StaticRouter::with_defaults().expect("default router should construct without error");
+
+    // Show how the router would modulate under various stress levels.
+    let modulation_scenarios: &[(&str, f32, f32, f32, CostClass)] = &[
+        ("neutral (full budgets)", 1.0, 1.0, 0.0, CostClass::Frontier),
+        ("mild thermal stress", 1.0, 1.0, 0.85, CostClass::Frontier),
+        (
+            "moderate financial (30%)",
+            0.30,
+            1.0,
+            0.0,
+            CostClass::Frontier,
+        ),
+        (
+            "severe financial (10%)",
+            0.10,
+            1.0,
+            0.0,
+            CostClass::Frontier,
+        ),
+        ("severe power (10%)", 1.0, 0.10, 0.0, CostClass::Frontier),
+        (
+            "live sensor signals",
+            live_homeostatic.financial_budget,
+            live_homeostatic.power_budget,
+            live_homeostatic.thermal_load,
+            CostClass::Frontier,
+        ),
+    ];
+
+    let mut mod_audit = AuditLog::new();
+    for (label, financial, power, thermal, cost_class) in modulation_scenarios {
+        let sigs = HomeostaticSignals {
+            thermal_load: *thermal,
+            compute_pressure: *thermal,
+            memory_pressure: 0.0,
+            power_budget: *power,
+            financial_budget: *financial,
+            attention_demand: 0.5,
+        };
+        let decision = router.resolve_with_modulation(SC::UserQuery, *cost_class, &sigs);
+        record_modulated_router_decision(&mut mod_audit, "anima", label, &decision, 3, 0);
+        let mod_tag = if decision.was_modulated {
+            format!(
+                " → {} [MODULATED: {}]",
+                decision.effective_route.id,
+                decision.modulation_reason.as_deref().unwrap_or("?")
+            )
+        } else {
+            format!(" → {} [no modulation]", decision.effective_route.id)
+        };
+        println!(
+            "  {label}: requested={}{mod_tag}",
+            decision.requested_route.id
+        );
+    }
+    println!();
+    println!(
+        "RouterModulated audit entries: {}",
+        mod_audit
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::RouterModulated { .. }))
+            .count()
+    );
+}
+
 fn main() {
+    // ── Subcommand dispatch ───────────────────────────────────────────────────
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("why") {
+        cmd_why();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("identity") {
+        cmd_identity(&args[1..]);
+        return;
+    }
+
     // ── Backend selection (E1.3) ─────────────────────────────────────────────
     let provider = std::env::var("ANIMA_BACKEND").unwrap_or_else(|_| "mock".to_string());
     let backend = BackendFactory::from_env_or_mock(&provider);

@@ -4,13 +4,36 @@
 
 pub mod audit;
 pub mod cortex_bridge;
+pub mod episodic;
+pub mod gate;
+pub mod identity;
+pub mod kv_gate;
+pub mod router;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
-    CortexInvocationResult, FnDispatcher, InvokeRequest, MockCortexBridge, PythonCortexBridge,
-    ToolDispatcher, ToolSpec,
+    CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
+    PythonCortexBridge, ToolDispatcher, ToolSpec,
+};
+pub use episodic::{
+    embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
+    unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
+};
+pub use gate::{
+    record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
+    HomeostaticSignals, SemanticClass, ThresholdGate,
+};
+pub use identity::{
+    AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
+    RecurringTask, SystemPolicies, UserPreferences,
+};
+pub use kv_gate::{gate_working_context, ContextBlock, GatePassResult};
+pub use router::{
+    build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
+    validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
+    RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
 };
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
