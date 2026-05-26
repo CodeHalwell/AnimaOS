@@ -37,6 +37,10 @@ allow = [
   "Zlib",
   "Unlicense",
   "OpenSSL",
+  # MPL-2.0 is file-scoped copyleft (not project-viral). Allowed for transitive
+  # use; required by wasmtime's wasm-compose feature, which pulls in im-rc /
+  # bitmaps / sized-chunks (all MPL-2.0+).
+  "MPL-2.0",
 ]
 # Lower confidence threshold — detection below this level produces a warning
 # so that ambiguous licence files don't silently pass.
