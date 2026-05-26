@@ -141,7 +141,11 @@ impl Prng {
 
     /// Returns +1 or -1 with equal probability.
     fn rademacher(&mut self) -> i8 {
-        if self.next_u64() & 1 == 0 { 1 } else { -1 }
+        if self.next_u64() & 1 == 0 {
+            1
+        } else {
+            -1
+        }
     }
 }
 
@@ -205,7 +209,11 @@ impl PolarQuantRotation {
         let pad_dim = orig_dim.next_power_of_two().max(1);
         let mut prng = Prng::new(seed);
         let signs: Vec<i8> = (0..pad_dim).map(|_| prng.rademacher()).collect();
-        Self { orig_dim, pad_dim, signs }
+        Self {
+            orig_dim,
+            pad_dim,
+            signs,
+        }
     }
 
     /// Applies the PolarQuant rotation: sign-flip then FWHT.
@@ -583,7 +591,11 @@ impl PSquareQuantile {
     /// Returns the current quantile estimate, or `None` if fewer than 5
     /// observations have been seen.
     pub fn quantile(&self) -> Option<f64> {
-        if self.n < 5 { None } else { Some(self.markers[2]) }
+        if self.n < 5 {
+            None
+        } else {
+            Some(self.markers[2])
+        }
     }
 
     /// Total number of observations.
@@ -1080,9 +1092,11 @@ mod tests {
 
     #[test]
     fn fwht_length_one_is_identity() {
-        let mut v = vec![3.14_f32];
+        // 7.5 is not an approximation of any named constant.
+        let val = 7.5_f32;
+        let mut v = vec![val];
         fast_hadamard_transform(&mut v);
-        assert!((v[0] - 3.14).abs() < 1e-5);
+        assert!((v[0] - val).abs() < 1e-5);
     }
 
     // ── PolarQuantRotation ────────────────────────────────────────────────────
@@ -1128,7 +1142,9 @@ mod tests {
         // Numerical quadrature: sum φ(x)·Δx for x ∈ [−6, 6] with Δx=0.001.
         let n = 12_000_usize;
         let dx = 12.0_f64 / n as f64;
-        let integral: f64 = (0..n).map(|i| gaussian_pdf(-6.0 + i as f64 * dx) * dx).sum();
+        let integral: f64 = (0..n)
+            .map(|i| gaussian_pdf(-6.0 + i as f64 * dx) * dx)
+            .sum();
         assert!((integral - 1.0).abs() < 1e-4, "integral = {integral}");
     }
 
@@ -1158,7 +1174,12 @@ mod tests {
 
     #[test]
     fn codebook_thresholds_are_sorted() {
-        for depth in [BitDepth::One, BitDepth::OnePointFive, BitDepth::Two, BitDepth::Four] {
+        for depth in [
+            BitDepth::One,
+            BitDepth::OnePointFive,
+            BitDepth::Two,
+            BitDepth::Four,
+        ] {
             let cb = LloydMaxCodebook::for_bit_depth(depth);
             let sorted = cb.thresholds.windows(2).all(|w| w[0] <= w[1]);
             assert!(sorted, "thresholds not sorted for {depth:?}");
@@ -1192,9 +1213,17 @@ mod tests {
 
     #[test]
     fn bias_correction_is_greater_than_one() {
-        for depth in [BitDepth::One, BitDepth::OnePointFive, BitDepth::Two, BitDepth::Four] {
+        for depth in [
+            BitDepth::One,
+            BitDepth::OnePointFive,
+            BitDepth::Two,
+            BitDepth::Four,
+        ] {
             let cb = LloydMaxCodebook::for_bit_depth(depth);
-            assert!(cb.bias_correction > 1.0, "bias_correction <= 1 for {depth:?}");
+            assert!(
+                cb.bias_correction > 1.0,
+                "bias_correction <= 1 for {depth:?}"
+            );
         }
     }
 
@@ -1245,7 +1274,10 @@ mod tests {
             pq.observe(z);
         }
         let median = pq.quantile().unwrap();
-        assert!(median.abs() < 0.15, "P-Square median {median} too far from 0");
+        assert!(
+            median.abs() < 0.15,
+            "P-Square median {median} too far from 0"
+        );
     }
 
     #[test]
@@ -1327,7 +1359,10 @@ mod tests {
         let v: Vec<f32> = (1..=dim as u32).map(|i| i as f32).collect();
         let qv = tq.encode(&v);
         let score = tq.score_cosine(&qv, &qv);
-        assert!(score > 0.95, "self cosine {score} should be near 1.0 for 4-bit");
+        assert!(
+            score > 0.95,
+            "self cosine {score} should be near 1.0 for 4-bit"
+        );
     }
 
     #[test]
@@ -1471,15 +1506,13 @@ mod tests {
                 (tq.score_cosine(&q_query, &qv), i)
             })
             .collect();
-        quant_scores
-            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        quant_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let quant_top_k: std::collections::HashSet<usize> =
             quant_scores.iter().take(k).map(|&(_, i)| i).collect();
 
         // 1. The query itself must be the top quantised result (self-cosine ≈ 1).
         assert_eq!(
-            quant_scores[0].1,
-            0,
+            quant_scores[0].1, 0,
             "query (corpus[0]) must be top quantised result"
         );
 
@@ -1603,7 +1636,10 @@ mod tests {
             .collect();
         tq.calibrate(&corpus);
 
-        assert_ne!(tq.coord_scales, scales_before, "calibration must update scales");
+        assert_ne!(
+            tq.coord_scales, scales_before,
+            "calibration must update scales"
+        );
     }
 
     // ── L3 integration (S2.7.8) ──────────────────────────────────────────────
@@ -1616,16 +1652,25 @@ mod tests {
 
         let mut archive = crate::archival::L3Archive::open(&path, dim, 100).unwrap();
         let prov = |id: u64| {
-            crate::archival::Provenance::now(
-                crate::archival::SourceTier::L1,
-                &format!("k{id}"),
-            )
+            crate::archival::Provenance::now(crate::archival::SourceTier::L1, &format!("k{id}"))
         };
 
         // Insert 10 items with known embeddings.
         for id in 0..10_u64 {
-            let emb: Vec<f32> = (0..dim).map(|j| if j == (id % dim as u64) as usize { 1.0 } else { 0.0 }).collect();
-            let item = crate::archival::ArchivedItem { id, embedding: emb, payload: vec![] };
+            let emb: Vec<f32> = (0..dim)
+                .map(|j| {
+                    if j == (id % dim as u64) as usize {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let item = crate::archival::ArchivedItem {
+                id,
+                embedding: emb,
+                payload: vec![],
+            };
             archive.demote(item, prov(id)).unwrap();
         }
 
@@ -1655,10 +1700,20 @@ mod tests {
         let mut store = crate::archival::ArchivalStore::new(dim, 20);
         for id in 0..5_u64 {
             let emb: Vec<f32> = (0..dim)
-                .map(|j| if j == (id % dim as u64) as usize { 1.0 } else { 0.0 })
+                .map(|j| {
+                    if j == (id % dim as u64) as usize {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             store
-                .store(crate::archival::ArchivedItem { id, embedding: emb, payload: vec![] })
+                .store(crate::archival::ArchivedItem {
+                    id,
+                    embedding: emb,
+                    payload: vec![],
+                })
                 .unwrap();
         }
 
