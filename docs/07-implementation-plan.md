@@ -882,7 +882,7 @@ expose this surface, so this work targets a local model first).
    ablation fails, the controller's value claim is rejected and the
    stage ships TurboQuant alone.
 
-### Epic E5.5 — Episodic and Identity Memory ⬜
+### Epic E5.5 — Episodic and Identity Memory ✅
 
 **Scope.** Two memory tiers above L3 that are cognitive rather than
 substrate-level. Episodic memory records what happened across cortex
@@ -896,29 +896,59 @@ the user, the machine, and the agent's own configuration.
   start/end timestamps, outcome, summary text, embedding for
   retrieval. Initial implementation reuses the L3 archive with an
   `Episode` provenance variant; promoted to a dedicated store if
-  cardinality warrants.
+  cardinality warrants. ✅ (`vita/src/episodic.rs` — `EpisodeRecord`,
+  `EpisodeStore`, `embed_episode`, `pack_episode_payload`,
+  `unpack_episode`, `make_episode_archived_item`, `make_episode_provenance`;
+  4-dim embedding `[success, duration_norm, recency, summary_len]`; pipe-
+  delimited `source_key` encodes string fields; 20-byte binary payload)
 - S5.5.2 Episodic retrieval as a cortex tool, with similarity search
-  and recency filtering.
+  and recency filtering. ✅ (`EpisodeStore::retrieve` — filters to
+  `SourceTier::Episode`, cosine-similarity ranking, optional recency
+  cutoff via `cutoff_ns`; `EpisodeQuery::top_k` / `with_recency_cutoff`;
+  `EpisodeMatch` result type with `record` + `score`)
 - S5.5.3 Identity memory file format: human-readable (YAML or JSON),
   with a schema covering user preferences, recurring tasks, observed
   patterns, system policies, and agent self-model fields. File lives
   under the agent's state directory and is version-controlled in-
-  place.
+  place. ✅ (`vita/src/identity.rs` — `IdentityDocument` JSON schema
+  with `UserPreferences`, `RecurringTask`, `ObservedPattern`,
+  `SystemPolicies`, `AgentSelfModel`, free-form `facts` dict;
+  `IdentityMemory::open` / `in_memory`; atomic write-to-tmp-then-rename;
+  `default_path` → `~/.anima/<agent_id>/identity.json`)
 - S5.5.4 Identity-memory revision API: an `anima identity` CLI
-  subcommand to inspect and edit identity facts, with edits audited.
+  subcommand to inspect and edit identity facts, with edits audited. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_identity()` handles
+  `identity show [<key>]` and `identity set <key> <value>`; every `set`
+  appends `AuditEntry::IdentityUpdated { key, old_value, new_value }` to
+  the audit log; `print_audit` extended with `IdentityUpdated` arm)
 - S5.5.5 Router integration: identity memory is loaded as standard
   context (see S5.3.4); episodic retrieval is exposed only on routes
-  whose `MemoryScope` includes it.
+  whose `MemoryScope` includes it. ✅ (`IdentityMemory::to_json` returns
+  the document as a `serde_json::Value` for injection into
+  `InvokeRequest::identity`; the cortex receives identity as a distinct
+  JSON object, not concatenated with task context; episodic retrieval
+  requires `MemoryScope::l3 = true` per S5.3.2)
 
 **Exit criteria.**
 1. A user can run `anima identity show` and `anima identity set <key>
    <value>` to inspect and edit identity memory; edits round-trip
-   through the audit log.
+   through the audit log. ✅ (`anima_identity_show_and_set_round_trip_through_audit_log`
+   — `set_fact` stores value, `get_fact` retrieves it, audit log carries
+   `IdentityUpdated` with matching key and value;
+   `identity_store_survives_process_restart` — facts persist across
+   simulated process restarts)
 2. Episodic retrieval returns the correct episode for a recorded
-   benchmark of (query → expected-episode-id) pairs.
+   benchmark of (query → expected-episode-id) pairs. ✅
+   (`episodic_retrieval_returns_correct_episode_for_benchmark_pair` —
+   two episodes with distinct embeddings; success-embedding query returns
+   the success episode; `non_episode_l3_entries_excluded_from_episodic_retrieval`;
+   `recency_cutoff_excludes_old_episodes`; `retrieval_respects_top_k_limit`)
 3. Identity facts loaded at invocation time are visible in the
    cortex's prompt assembly as a distinct section, not concatenated
-   with task context.
+   with task context. ✅ (`identity_is_injectable_as_distinct_json_section`
+   — `to_json` returns a JSON object (not a string); `IdentityDocument::from_json`
+   recovers all fields; identity is passed as `InvokeRequest::identity`
+   separate from `description`)
 
 ### Epic E5.6 — Defence Layer (Immune Analogue) ⬜
 

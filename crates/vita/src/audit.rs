@@ -143,6 +143,21 @@ pub enum AuditEntry {
         override_active: bool,
     },
 
+    // ── E5.5 Identity Memory audit entries ───────────────────────────────────
+    /// A free-form identity fact was created or updated via `anima identity set`.
+    ///
+    /// Satisfies E5.5 exit criterion 1: "edits round-trip through the audit log."
+    IdentityUpdated {
+        /// Agent that owns the identity store.
+        agent_id: String,
+        /// Fact key that was modified.
+        key: String,
+        /// Previous value, or `None` if the key was newly created.
+        old_value: Option<String>,
+        /// New value after the update.
+        new_value: String,
+    },
+
     // ── E5.3 Thalamic Router audit entries ────────────────────────────────────
     /// A Thalamic Router decision was made for a gated event.
     ///

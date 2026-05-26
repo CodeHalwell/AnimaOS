@@ -4,7 +4,9 @@
 
 pub mod audit;
 pub mod cortex_bridge;
+pub mod episodic;
 pub mod gate;
+pub mod identity;
 pub mod router;
 pub mod sleep;
 
@@ -14,9 +16,18 @@ pub use cortex_bridge::{
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
     PythonCortexBridge, ToolDispatcher, ToolSpec,
 };
+pub use episodic::{
+    embed_episode, make_episode_archived_item, make_episode_provenance,
+    pack_episode_payload, unpack_episode,
+    EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
+};
 pub use gate::{
     record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
     HomeostaticSignals, SemanticClass, ThresholdGate,
+};
+pub use identity::{
+    AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory,
+    ObservedPattern, RecurringTask, SystemPolicies, UserPreferences,
 };
 pub use router::{
     build_routed_request, default_routes, record_router_decision, validate_route, MemoryScope,

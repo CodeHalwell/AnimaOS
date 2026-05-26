@@ -25,6 +25,17 @@
 //! Running `cargo run --bin anima-hosted -- why` exercises the Striatal Gate on
 //! a sample of representative events and prints the most recent `GateDecision`
 //! audit entry in human-readable form, satisfying E5.2 exit criterion 3.
+//!
+//! # `anima identity` subcommand (E5.5)
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- identity show [<key>]
+//! cargo run --bin anima-hosted -- identity set <key> <value>
+//! ```
+//!
+//! Inspects and edits the agent's identity memory stored in
+//! `~/.anima/anima/identity.json`.  Every `set` is recorded in an in-process
+//! audit log that is printed on exit, satisfying E5.5 exit criterion 1.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,8 +49,9 @@ use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
 use vita::gate::Gate;
 use vita::{
-    record_gate_decision, somatic_execution_loop, AuditEntry, EventFeatures, GateOverride,
-    HomeostaticSignals, LifecycleConfig, LifecycleManager, SemanticClass, ThresholdGate,
+    record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
+    GateOverride, HomeostaticSignals, IdentityMemory, LifecycleConfig, LifecycleManager,
+    SemanticClass, ThresholdGate,
 };
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -204,6 +216,83 @@ fn print_audit(manager: &LifecycleManager) {
                     "       termination: max_turns={max_turns} max_tool_calls={max_tool_calls}"
                 );
             }
+            // E5.5 identity memory audit entries
+            AuditEntry::IdentityUpdated { agent_id, key, old_value, new_value } => {
+                let old_tag = match old_value {
+                    Some(v) => format!(" (was {v:?})"),
+                    None => " (new key)".to_owned(),
+                };
+                println!(
+                    "  📝 identity_updated agent={agent_id} key={key:?} → {new_value:?}{old_tag}"
+                );
+            }
+        }
+    }
+}
+
+// ── `anima identity` subcommand (E5.5 exit criterion 1) ──────────────────────
+
+/// Implements the `anima identity show [<key>]` and
+/// `anima identity set <key> <value>` subcommands.
+///
+/// Satisfies E5.5 exit criterion 1: "a user can run `anima identity show` and
+/// `anima identity set <key> <value>` to inspect and edit identity memory;
+/// edits round-trip through the audit log."
+fn cmd_identity(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+
+    let path = IdentityMemory::default_path(AGENT_ID);
+    let mut store = IdentityMemory::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open identity store ({e}); using in-memory fallback");
+        IdentityMemory::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            if let Some(key) = args.get(1) {
+                // Show a single fact.
+                match store.get_fact(key) {
+                    Some(value) => println!("{key} = {value}"),
+                    None => println!("{key}: (not set)"),
+                }
+            } else {
+                // Show the full identity document.
+                let json = store.to_json();
+                println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+            }
+        }
+        Some("set") => {
+            match (args.get(1), args.get(2)) {
+                (Some(key), Some(value)) => {
+                    match store.set_fact(key, value, &mut log, AGENT_ID) {
+                        Ok(()) => {
+                            println!("identity: set {key:?} = {value:?}");
+                            // Print the audit trail so the caller can verify the
+                            // round-trip (E5.5 exit criterion 1).
+                            for entry in log.entries() {
+                                if let AuditEntry::IdentityUpdated {
+                                    key, new_value, old_value, ..
+                                } = entry {
+                                    let old_tag = match old_value {
+                                        Some(v) => format!(" (was {v:?})"),
+                                        None => " (new key)".to_owned(),
+                                    };
+                                    println!("audit: identity_updated key={key:?} → {new_value:?}{old_tag}");
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("identity: error: {e}"),
+                    }
+                }
+                _ => {
+                    eprintln!("usage: anima-hosted identity set <key> <value>");
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted identity show [<key>]");
+            eprintln!("       anima-hosted identity set <key> <value>");
         }
     }
 }
@@ -363,6 +452,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("why") {
         cmd_why();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("identity") {
+        cmd_identity(&args[1..]);
         return;
     }
 

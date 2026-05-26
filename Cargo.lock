@@ -19,6 +19,7 @@ dependencies = [
  "memory",
  "scheduler",
  "senses",
+ "serde_json",
  "vita",
 ]
 
