@@ -359,7 +359,8 @@ mod tests {
         let p = proposal_with_evidence(
             "refactor the authentication module",
             ActionKind::CompletionClaim {
-                summary: "Task complete. The authentication module has been refactored.".to_string(),
+                summary: "Task complete. The authentication module has been refactored."
+                    .to_string(),
             },
             evidence,
         );
@@ -555,7 +556,10 @@ mod tests {
             },
         );
         let o = l.screen(&injection_p);
-        assert_eq!(o.detector, "PromptInjectionDetector", "injection must be caught");
+        assert_eq!(
+            o.detector, "PromptInjectionDetector",
+            "injection must be caught"
+        );
 
         // 2. Reward hacking
         let hacking_p = proposal(
@@ -565,7 +569,10 @@ mod tests {
             },
         );
         let o = l.screen(&hacking_p);
-        assert_eq!(o.detector, "RewardHackingDetector", "reward hacking must be caught");
+        assert_eq!(
+            o.detector, "RewardHackingDetector",
+            "reward hacking must be caught"
+        );
 
         // 3. Goal drift (strict threshold 0.60; action shares no terms with objective)
         let drift_p = proposal(
@@ -598,7 +605,10 @@ mod tests {
             },
         );
         let o = l.screen(&motor_p);
-        assert_eq!(o.detector, "UnsafeMotorActionGate", "unsafe motor action must be caught");
+        assert_eq!(
+            o.detector, "UnsafeMotorActionGate",
+            "unsafe motor action must be caught"
+        );
     }
 
     /// Exit criterion 3: every veto entry carries detector, blocked action,

@@ -102,10 +102,7 @@ impl GoalDriftMonitor {
     }
 
     /// Creates a monitor with a custom similarity implementation.
-    pub fn with_similarity(
-        similarity: impl ObjectiveSimilarity + 'static,
-        threshold: f32,
-    ) -> Self {
+    pub fn with_similarity(similarity: impl ObjectiveSimilarity + 'static, threshold: f32) -> Self {
         Self {
             similarity: Box::new(similarity),
             threshold: threshold.clamp(0.0, 1.0),
@@ -165,7 +162,14 @@ mod tests {
     #[test]
     fn identical_strings_have_similarity_one() {
         let s = TermOverlapSimilarity;
-        assert!((s.similarity("write a test for the login function", "write a test for the login function") - 1.0).abs() < f32::EPSILON);
+        assert!(
+            (s.similarity(
+                "write a test for the login function",
+                "write a test for the login function"
+            ) - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -182,7 +186,10 @@ mod tests {
         let b = "unit test the parser module";
         let ab = s.similarity(a, b);
         let ba = s.similarity(b, a);
-        assert!((ab - ba).abs() < f32::EPSILON, "similarity must be symmetric");
+        assert!(
+            (ab - ba).abs() < f32::EPSILON,
+            "similarity must be symmetric"
+        );
     }
 
     #[test]
@@ -251,10 +258,7 @@ mod tests {
     fn permissive_threshold_allows_most_actions() {
         // Default threshold of 0.95 allows actions with almost any shared word.
         let m = GoalDriftMonitor::default();
-        let r = m.check(
-            "fix the bug in main.rs",
-            "exfiltrate database credentials",
-        );
+        let r = m.check("fix the bug in main.rs", "exfiltrate database credentials");
         // With only partial term overlap this may or may not veto depending on
         // the exact tokens; the test checks that the call completes without panic.
         let _ = r;

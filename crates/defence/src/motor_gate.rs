@@ -228,7 +228,10 @@ mod tests {
     #[test]
     fn read_on_critical_path_is_allowed() {
         let g = UnsafeMotorActionGate::new();
-        assert_eq!(g.screen_filesystem("read", "/etc/passwd", None), VetoResult::Allow);
+        assert_eq!(
+            g.screen_filesystem("read", "/etc/passwd", None),
+            VetoResult::Allow
+        );
     }
 
     #[test]
@@ -285,7 +288,9 @@ mod tests {
     #[test]
     fn delete_on_boot_path_is_vetoed() {
         let g = UnsafeMotorActionGate::new();
-        assert!(g.screen_filesystem("delete", "/boot/vmlinuz", None).is_vetoed());
+        assert!(g
+            .screen_filesystem("delete", "/boot/vmlinuz", None)
+            .is_vetoed());
     }
 
     #[test]

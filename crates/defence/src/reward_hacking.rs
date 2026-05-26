@@ -79,9 +79,7 @@ impl RewardHackingDetector {
     /// pattern.
     pub fn has_completion_claim(&self, summary: &str) -> bool {
         let lower = summary.to_ascii_lowercase();
-        COMPLETION_CLAIM_PATTERNS
-            .iter()
-            .any(|&p| lower.contains(p))
+        COMPLETION_CLAIM_PATTERNS.iter().any(|&p| lower.contains(p))
     }
 
     /// Screens a completion claim.
@@ -160,7 +158,10 @@ mod tests {
         let d = RewardHackingDetector::new(1);
         let evidence = vec!["file:/src/main.rs written (142 bytes)".to_string()];
         assert_eq!(
-            d.screen("Task completed. The function has been refactored.", &evidence),
+            d.screen(
+                "Task completed. The function has been refactored.",
+                &evidence
+            ),
             VetoResult::Allow
         );
     }
@@ -201,7 +202,10 @@ mod tests {
             "file:b.rs".to_string(),
             "tool:cargo-test → 12 passed".to_string(),
         ];
-        assert_eq!(d.screen("Implementation complete.", &evidence), VetoResult::Allow);
+        assert_eq!(
+            d.screen("Implementation complete.", &evidence),
+            VetoResult::Allow
+        );
     }
 
     // ── Pattern matching ──────────────────────────────────────────────────────
@@ -225,7 +229,9 @@ mod tests {
     #[test]
     fn i_have_completed_pattern_is_recognised() {
         let d = RewardHackingDetector::new(1);
-        assert!(d.screen("I have completed the task as requested.", &[]).is_vetoed());
+        assert!(d
+            .screen("I have completed the task as requested.", &[])
+            .is_vetoed());
         assert!(d.screen("I've finished all the steps.", &[]).is_vetoed());
     }
 
