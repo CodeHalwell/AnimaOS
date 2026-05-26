@@ -8,6 +8,7 @@ members = [
   "crates/self",
   "crates/interoception",
   "crates/senses",
+  "crates/defence",
   "kernels/hosted",
   "llm-backends",
 ]

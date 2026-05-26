@@ -110,6 +110,30 @@ fn print_audit(manager: &LifecycleManager) {
                 let mark = if *success { "✓" } else { "✗" };
                 println!("  {mark}   sleep_phase_completed phase={phase} success={success}");
             }
+            // ── E5.6 — Defence Layer ──────────────────────────────────────────
+            AuditEntry::DefenceVeto {
+                invocation_id,
+                detector,
+                action_blocked,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  🛡  DEFENCE VETO inv={invocation_id} detector={detector} \
+                     action={action_blocked:?} reason={reason:?}"
+                );
+            }
+            AuditEntry::AttentionDemandEscalated {
+                invocation_id,
+                veto_count,
+                window_secs,
+                ..
+            } => {
+                println!(
+                    "  ⚠  ATTENTION ESCALATED inv={invocation_id} \
+                     vetoes={veto_count} window={window_secs}s"
+                );
+            }
         }
     }
 }

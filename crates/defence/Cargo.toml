@@ -1,0 +1,15 @@
+[package]
+name = "defence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "defence"
+path = "src/lib.rs"
+
+[dependencies]
+anima-self = { path = "../self" }
+
+[dev-dependencies]
+anima-self = { path = "../self" }

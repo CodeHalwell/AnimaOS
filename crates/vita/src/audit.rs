@@ -58,6 +58,37 @@ pub enum AuditEntry {
         /// `true` when the phase completed without rollback or error.
         success: bool,
     },
+    // ── E5.6 — Defence Layer ──────────────────────────────────────────────────
+    /// The defence layer vetoed a cortex proposal (S5.6.5).
+    ///
+    /// Logged at a higher severity than routine audit entries.  Callers
+    /// integrating the `defence` crate emit this entry when
+    /// [`defence::ScreeningOutcome::is_vetoed`] returns `true`.
+    DefenceVeto {
+        /// Agent identifier.
+        agent_id: String,
+        /// Cortex invocation that produced the vetoed proposal.
+        invocation_id: String,
+        /// Name of the detector that produced the veto (e.g.
+        /// `"PromptInjectionDetector"`).
+        detector: String,
+        /// Human-readable description of the blocked action.
+        action_blocked: String,
+        /// Human-readable veto reason.
+        reason: String,
+    },
+    /// Repeated vetoes within the configured window triggered an
+    /// attention-demand escalation for the user (S5.6.5).
+    AttentionDemandEscalated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Cortex invocation that pushed the veto count over the threshold.
+        invocation_id: String,
+        /// Number of vetoes counted in the window at the time of escalation.
+        veto_count: usize,
+        /// The configured window duration in seconds.
+        window_secs: u64,
+    },
 }
 
 /// Append-only audit log.
