@@ -29,8 +29,8 @@
 //! > "QEMU boots the trampoline image and reaches the panic handler under a
 //! >  deliberate panic."
 //!
-//! The CI job in `.github/workflows/ci.yml` (`uefi-boot`) asserts this by
-//! greping the serial capture file for `ANIMA_PANIC`.
+//! The CI job in `.github/workflows/ci.yml` (`microvm-boot`) asserts this by
+//! grepping the serial capture file for `ANIMA_PANIC`.
 #![no_std]
 #![no_main]
 

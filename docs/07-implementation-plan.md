@@ -1218,15 +1218,16 @@ UEFI boot trampoline that reaches a panic-handler-only state in QEMU.
 **Stories.**
 - S4.1.1 `no_std`-clean `corpus`. ✅ (`#![no_std]` added to `crates/corpus/src/lib.rs`;
   all three source files use only `core` types — `core::sync::atomic`,
-  `core::mem`, no `std` imports anywhere; 14 existing tests continue to
-  pass because the test binary links `std` via the test harness)
+  `core::mem`, no `std` imports anywhere; the 5 pre-existing corpus tests
+  continue to pass because the test binary links `std` via the test harness)
 - S4.1.2 Custom allocator integration. ✅ (`crates/corpus/src/heap_allocator.rs` —
   `BumpAllocator` implements `core::alloc::GlobalAlloc`; lock-free
   `AtomicUsize` cursor; alignment via power-of-two bit-mask;
   `dealloc` is an intentional no-op (bump allocator);
   registered as `#[global_allocator]` in `kernels/microvm/src/main.rs`;
-  8 unit tests covering alignment, exhaustion, no-op dealloc,
-  non-overlapping sequential allocations, and the `align_up` helper)
+  10 unit tests covering alignment, exhaustion, overflow-safety, no-op
+  dealloc, non-overlapping sequential allocations, and the `align_up`
+  helper; total corpus test count rises from 5 to 15)
 - S4.1.3 UEFI boot trampoline. ✅ (`kernels/microvm/` — standalone Cargo
   package (not workspace member), nightly toolchain via `rust-toolchain.toml`,
   `x86_64-unknown-uefi` target via `.cargo/config.toml` with `build-std`;
