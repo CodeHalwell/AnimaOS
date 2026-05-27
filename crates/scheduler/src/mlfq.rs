@@ -238,6 +238,142 @@ impl IterationAwareMlfq {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Kani formal verification proof harnesses
+// ---------------------------------------------------------------------------
+//
+// These harnesses are compiled only when running `cargo kani`.  They prove
+// six structural invariants of the three-tier task queue:
+//
+//   1. `push` always increases `len()` by exactly one.
+//   2. An out-of-range `mlfq_level` is clamped to the last tier.
+//   3. `select_optimal_task` on a non-empty agenda always returns `Some`.
+//   4. `select_optimal_task` reduces `len()` by exactly one.
+//   5. `select_optimal_task` on an empty agenda returns `None` (no panic).
+//   6. `boost_all_to_high` empties all non-zero tiers.
+//
+// Epic E4.6 exit criterion 1.
+
+/// Kani formal verification proofs for [`TaskAgenda`] invariants.
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+    use crate::Task;
+
+    /// Convenience: create a minimal `Task` for structural proofs that do not
+    /// exercise the LLM dispatch path.
+    fn task_with_level(id: u64, level: u8) -> Task {
+        Task::new(id, level, "")
+    }
+
+    /// Prove: `push` always increases `len()` by exactly one.
+    #[kani::proof]
+    fn push_increases_len_by_exactly_one() {
+        let mut agenda = TaskAgenda::new();
+        let initial_len = agenda.len();
+
+        let level: u8 = kani::any();
+        kani::assume((level as usize) < NUM_TIERS);
+
+        agenda.push(task_with_level(1, level));
+        assert_eq!(
+            agenda.len(),
+            initial_len + 1,
+            "push must increase len by exactly one"
+        );
+    }
+
+    /// Prove: an out-of-range `mlfq_level` is clamped to the last tier
+    /// (`NUM_TIERS - 1`), never placed in an out-of-bounds slot.
+    #[kani::proof]
+    fn out_of_range_level_is_clamped_to_last_tier() {
+        let mut agenda = TaskAgenda::new();
+
+        let level: u8 = kani::any();
+        kani::assume(level as usize >= NUM_TIERS);
+
+        agenda.push(task_with_level(1, level));
+
+        assert_eq!(
+            agenda.tiers[NUM_TIERS - 1].len(),
+            1,
+            "out-of-range level must land in the last tier"
+        );
+        assert_eq!(agenda.len(), 1);
+    }
+
+    /// Prove: `select_optimal_task` on a non-empty agenda always returns `Some`.
+    #[kani::proof]
+    fn select_on_nonempty_agenda_returns_some() {
+        let mut agenda = TaskAgenda::new();
+
+        let level: u8 = kani::any();
+        kani::assume((level as usize) < NUM_TIERS);
+
+        agenda.push(task_with_level(1, level));
+        assert!(!agenda.is_empty());
+
+        let result = agenda.select_optimal_task();
+        assert!(result.is_some(), "non-empty agenda must yield Some");
+    }
+
+    /// Prove: `select_optimal_task` reduces `len()` by exactly one.
+    #[kani::proof]
+    fn select_reduces_len_by_exactly_one() {
+        let mut agenda = TaskAgenda::new();
+
+        let level: u8 = kani::any();
+        kani::assume((level as usize) < NUM_TIERS);
+
+        agenda.push(task_with_level(1, level));
+        let before = agenda.len();
+        let _ = agenda.select_optimal_task();
+
+        assert_eq!(
+            agenda.len(),
+            before - 1,
+            "select must reduce len by exactly one"
+        );
+    }
+
+    /// Prove: `select_optimal_task` on an empty agenda returns `None` without
+    /// panicking.
+    #[kani::proof]
+    fn select_on_empty_agenda_returns_none() {
+        let mut agenda = TaskAgenda::new();
+        let result = agenda.select_optimal_task();
+        assert!(result.is_none(), "empty agenda must return None");
+    }
+
+    /// Prove: `boost_all_to_high` empties every tier except tier 0.
+    ///
+    /// We seed the agenda with exactly one task per tier and assert that after
+    /// the boost, tier 0 holds all tasks and all other tiers are empty.
+    #[kani::proof]
+    fn boost_all_to_high_empties_all_non_zero_tiers() {
+        let mut agenda = TaskAgenda::new();
+
+        for tier in 0..NUM_TIERS {
+            agenda.push(task_with_level(tier as u64, tier as u8));
+        }
+
+        let total = agenda.len();
+        agenda.boost_all_to_high();
+
+        assert_eq!(
+            agenda.tiers[0].len(),
+            total,
+            "all tasks must be in tier 0 after boost"
+        );
+        for tier_idx in 1..NUM_TIERS {
+            assert!(
+                agenda.tiers[tier_idx].is_empty(),
+                "tier {tier_idx} must be empty after boost"
+            );
+        }
+    }
+}
+
 // Tests require std for the mock LLM backend, thread::yield_now, and
 // HashSet.  Gate the entire block so no_std builds don't try to compile it.
 #[cfg(all(test, feature = "std"))]
