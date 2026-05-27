@@ -3,7 +3,7 @@ name = "anima-microvm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy → E4.3 smoltcp)"
+description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy → E4.3 smoltcp → E4.4 TLS)"
 # This package is intentionally NOT a member of the workspace root Cargo.toml.
 # It targets a bare-metal UEFI environment (x86_64-unknown-uefi) and requires
 # the nightly toolchain with build-std.  Its own rust-toolchain.toml pins the
@@ -89,6 +89,39 @@ smoltcp = { version = "0.11", default-features = false, features = [
     "medium-ethernet",
     "alloc",
 ] }
+
+# -------------------------------------------------------------------------
+# Epic E4.4 — TLS 1.3 over RustCrypto (no_std + alloc)
+# -------------------------------------------------------------------------
+# p256: NIST P-256 elliptic curve.
+#   ecdh    — ephemeral ECDHE key exchange for TLS 1.3 key schedule.
+#   ecdsa   — digital signatures for CertificateVerify message.
+#
+# sha2: SHA-2 family hash functions.  SHA-256 is used for the TLS 1.3
+#   transcript hash and HKDF base hash.
+#
+# hmac: HMAC construction.  Used for the TLS 1.3 Finished MAC.
+#
+# hkdf: HKDF (RFC 5869) key derivation.  Implements HKDF-Extract and
+#   HKDF-Expand for the TLS 1.3 key schedule (RFC 8446 §7.1).
+#
+# aes-gcm: AES-GCM authenticated encryption.  TLS_AES_128_GCM_SHA256
+#   (cipher suite 0x1301) uses AES-128-GCM as the AEAD algorithm.
+#
+# rand_core: Minimal RNG traits used by p256 key generation.  The concrete
+#   RNG is our RDRAND-backed RdRand struct in tls.rs.
+#
+# der: DER / ASN.1 parsing for loading the build-time-generated ECDSA key.
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa"] }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+rand_core = { version = "0.6", default-features = false }
+der = { version = "0.7", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+rcgen = "0.13"
 
 [profile.release]
 opt-level = "s"
