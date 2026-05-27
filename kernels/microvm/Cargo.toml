@@ -1,0 +1,44 @@
+[package]
+name = "anima-microvm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "AnimaOS Stage 4 — microVM UEFI boot trampoline"
+# This package is intentionally NOT a member of the workspace root Cargo.toml.
+# It targets a bare-metal UEFI environment (x86_64-unknown-uefi) and requires
+# the nightly toolchain with build-std.  Its own rust-toolchain.toml pins the
+# channel so `cargo` invoked inside this directory always picks the right
+# toolchain, regardless of which toolchain the rest of the workspace uses.
+
+# -------------------------------------------------------------------------
+# Standalone workspace declaration so this package can be built in isolation.
+# -------------------------------------------------------------------------
+[workspace]
+
+[[bin]]
+name = "anima-microvm"
+path = "src/main.rs"
+
+[dependencies]
+# corpus: shared no_std substrate — FrameAllocator + BumpAllocator.
+corpus = { path = "../../crates/corpus" }
+
+# uefi: UEFI application framework.
+# Features used:
+#   logger       — wires `log` crate to the UEFI console (SimpleTextOutputProtocol).
+#   panic_handler — installs a panic handler that writes the panic message to
+#                  the UEFI console and spins.  The panic message is what the
+#                  CI QEMU grep looks for ("ANIMA_PANIC").
+# Deliberately excluded:
+#   global_allocator — we supply corpus::BumpAllocator as our own
+#                      #[global_allocator] to demonstrate S4.1.2.
+uefi = { version = "0.37", features = ["logger", "panic_handler"] }
+
+log = { version = "0.4", default-features = false }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,9 @@
+# The microVM kernel targets x86_64-unknown-uefi, which is a Tier 2 target
+# without pre-built std.  We therefore require:
+#   - nightly toolchain (for -Z build-std)
+#   - rust-src component (so cargo can build core/alloc from source)
+#   - the target itself
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy"]
+targets = ["x86_64-unknown-uefi"]
