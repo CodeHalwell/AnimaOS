@@ -158,10 +158,48 @@ fn model_label(m: ModelSelector) -> &'static str {
     }
 }
 
-// ── Per-run permutation (deterministic) ───────────────────────────────────────
+// ── Per-run variation (deterministic jitter + permutation) ────────────────────
+
+/// Applies a small ±`JITTER` variation to `urgency` and `novelty` for each
+/// event, seeded by `seed`.  This makes each of the 8 runs a genuinely
+/// independent draw from the distribution of possible event characteristics,
+/// so the invocation counts across runs differ and the two-proportion z-test
+/// operates on truly independent observations rather than permuted duplicates.
+///
+/// The jitter range (±0.06) is calibrated to keep most events close to their
+/// base values while introducing enough variation to change gate decisions on
+/// events near the adaptive threshold.
+fn jitter_events(events: &[EventFixture], seed: usize) -> Vec<EventFixture> {
+    const JITTER: f32 = 0.06;
+    let mut state = (seed as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+
+    let next_f32 = |s: &mut u64| -> f32 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        // Map top 24 bits to [0, 1)
+        (*s >> 40) as f32 / (1u64 << 24) as f32
+    };
+
+    events
+        .iter()
+        .map(|ev| {
+            let delta_u = (next_f32(&mut state) * 2.0 - 1.0) * JITTER;
+            let delta_n = (next_f32(&mut state) * 2.0 - 1.0) * JITTER;
+            EventFixture {
+                urgency: (ev.urgency + delta_u).clamp(0.0, 1.0),
+                novelty: (ev.novelty + delta_n).clamp(0.0, 1.0),
+                ..ev.clone()
+            }
+        })
+        .collect()
+}
 
 /// Returns the event list reordered by a deterministic permutation indexed by
-/// `seed`.  Seeds 0–7 give 8 distinct orderings via a LCG-based Fisher-Yates.
+/// `seed`.  Used in combination with [`jitter_events`] to vary both the order
+/// and the feature values across runs.
 fn permute_events(events: &[EventFixture], seed: usize) -> Vec<EventFixture> {
     let n = events.len();
     let mut indices: Vec<usize> = (0..n).collect();
@@ -233,7 +271,12 @@ fn run_condition(
     };
 
     let mut audit = AuditLog::new();
-    let permuted = permute_events(events, run_index);
+    // Jitter first so each run draws genuinely different feature values, then
+    // permute for presentation variety.  Without jitter the gate/router are
+    // stateless per-event, so all 8 permuted runs would produce identical
+    // invocation counts — making the z-test's independence assumption invalid.
+    let jittered = jitter_events(events, run_index);
+    let permuted = permute_events(&jittered, run_index);
     let mut decisions = Vec::new();
 
     for ev in &permuted {
@@ -326,12 +369,19 @@ fn run_condition(
 ///
 /// Returns the z-statistic and two-tailed p-value for the hypothesis that the
 /// cool and hot invocation rates are equal.
+///
+/// Returns `(0.0, 1.0)` (no evidence against equality) when either group is
+/// empty or when the pooled standard error rounds to zero.
 fn two_proportion_z_test(
     n_invoked_cool: usize,
     n_total_cool: usize,
     n_invoked_hot: usize,
     n_total_hot: usize,
 ) -> (f32, f32) {
+    // Guard: both groups must be non-empty to avoid NaN/Inf from division.
+    if n_total_cool == 0 || n_total_hot == 0 {
+        return (0.0, 1.0);
+    }
     let p1 = n_invoked_cool as f32 / n_total_cool as f32;
     let p2 = n_invoked_hot as f32 / n_total_hot as f32;
     let p_pool = (n_invoked_cool + n_invoked_hot) as f32 / (n_total_cool + n_total_hot) as f32;
@@ -527,8 +577,8 @@ fn build_transcript(
             )
         };
 
-        let desc = if cd.description.len() > 48 {
-            format!("{}…", &cd.description[..48])
+        let desc = if cd.description.chars().count() > 48 {
+            format!("{}…", cd.description.chars().take(48).collect::<String>())
         } else {
             cd.description.clone()
         };

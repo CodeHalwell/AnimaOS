@@ -189,6 +189,84 @@ pub fn run_lru_benchmark(config: &NeedleBenchmarkConfig) -> NeedleRecallResult {
     }
 }
 
+// ── Feature-slice benchmark runners ───────────────────────────────────────────
+
+/// Runs the needle-recall benchmark on a **pre-built** block-feature slice.
+///
+/// Unlike [`run_controller_benchmark`], this function does not synthesise its
+/// own blocks via `NeedleBenchmarkConfig::build_features()`.  The caller
+/// supplies the feature slice directly, enabling benchmarks over real session
+/// fixtures that contain mixed needle types (`is_user_constraint`,
+/// `is_error_trace`, …).
+///
+/// `needle_fn` is a predicate that returns `true` for any block that should be
+/// counted as a needle in the recall metric.
+pub fn run_controller_benchmark_on_features(
+    controller: &mut KvController,
+    features: &[BlockFeatures],
+    budget: usize,
+    needle_fn: impl Fn(&BlockFeatures) -> bool,
+) -> NeedleRecallResult {
+    let decisions = controller.select_blocks(features, budget);
+
+    let total_needles = features.iter().filter(|f| needle_fn(f)).count();
+    let retained_needles = decisions
+        .iter()
+        .zip(features.iter())
+        .filter(|(d, f)| d.retain && needle_fn(f))
+        .count();
+
+    let recall = if total_needles == 0 {
+        1.0
+    } else {
+        retained_needles as f32 / total_needles as f32
+    };
+
+    NeedleRecallResult {
+        total_needles,
+        retained_needles,
+        recall,
+        budget,
+        total_blocks: features.len(),
+    }
+}
+
+/// Runs the needle-recall benchmark using LRU eviction on a **pre-built**
+/// block-feature slice.
+///
+/// See [`run_controller_benchmark_on_features`] for the motivation.  `needle_fn`
+/// must be the same predicate used for the paired controller benchmark so that
+/// the recall advantage metric (`recall_advantage_pp`) is computed on the same
+/// needle set.
+pub fn run_lru_benchmark_on_features(
+    features: &[BlockFeatures],
+    budget: usize,
+    needle_fn: impl Fn(&BlockFeatures) -> bool,
+) -> NeedleRecallResult {
+    let decisions = KvController::lru_rank(features, budget);
+
+    let total_needles = features.iter().filter(|f| needle_fn(f)).count();
+    let retained_needles = decisions
+        .iter()
+        .zip(features.iter())
+        .filter(|(d, f)| d.retain && needle_fn(f))
+        .count();
+
+    let recall = if total_needles == 0 {
+        1.0
+    } else {
+        retained_needles as f32 / total_needles as f32
+    };
+
+    NeedleRecallResult {
+        total_needles,
+        retained_needles,
+        recall,
+        budget,
+        total_blocks: features.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

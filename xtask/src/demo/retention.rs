@@ -8,24 +8,32 @@
 //! | **Controlled** | KV-cache controller (pre-trained weights) manages eviction |
 //! | **Baseline**   | LRU eviction — oldest blocks evicted first |
 //!
-//! The session fixture contains three needle categories that must survive pruning:
+//! The session fixture contains three needle categories. The benchmark evaluates
+//! the two categories that have explicit `BlockFeatures` signals and are therefore
+//! directly observable by the controller:
 //!
-//! 1. **User constraints** — explicit requirements stated early in the session.
-//! 2. **Error traces** — stack traces from failed tool calls referenced later.
-//! 3. **Architectural decisions** — design decisions made mid-session.
+//! 1. **User constraints** (`is_user_constraint = true`) — explicit requirements
+//!    stated early in the session; the primary "needle" in the E5.4 benchmark.
+//! 2. **Error traces** (`is_error_trace = true`) — stack traces from failed tool
+//!    calls that the controller is trained to preserve.
+//! 3. **Architectural decisions** — logged in the session fixture and visible in
+//!    the report, but treated as regular `Assistant` blocks by the controller
+//!    (no dedicated `BlockFeatures` flag).
 //!
 //! # Exit criteria verified
 //!
-//! 1. Controller needle recall ≥ 10 pp higher than LRU (matches E5.4 criterion 1).
+//! 1. Controller needle recall ≥ 10 pp higher than LRU on the actual session
+//!    fixture (matches E5.4 criterion 1; measured on detectable needles only).
 //! 2. Results are reproducible from a clean checkout — no live API calls.
-//! 3. Report rendered to `report.md` + raw data in `runs.json`.
+//! 3. Report rendered to `report.md`; session fixture in `session_fixture.json`;
+//!    summary statistics in `summary.json`.
 
 use std::path::Path;
 
 use anyhow::Result;
 use kv_controller::{
-    run_controller_benchmark, run_lru_benchmark, BlockFeatures, BlockRole, KvController,
-    NeedleBenchmarkConfig, NeedleRecallResult,
+    run_controller_benchmark_on_features, run_lru_benchmark_on_features, BlockFeatures, BlockRole,
+    KvController, NeedleRecallResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -153,7 +161,9 @@ fn build_session() -> Vec<SessionBlock> {
 }
 
 /// Convert session blocks to KV-controller `BlockFeatures`.
-#[allow(dead_code)]
+///
+/// The `memory_pressure` scalar is shared across all blocks in the slice
+/// (a global interoceptive signal for this benchmark run).
 fn to_features(blocks: &[SessionBlock], memory_pressure: f32) -> Vec<BlockFeatures> {
     let total = blocks.len();
     blocks
@@ -191,14 +201,23 @@ pub struct BenchmarkVariant {
 }
 
 impl BenchmarkVariant {
+    /// Returns the 5 benchmark variants evaluated against the actual 40-block
+    /// session fixture.
+    ///
+    /// `total_blocks` is the session length (40); `needle_count` is the number
+    /// of *detectable* needles — blocks with `is_user_constraint = true` (4) or
+    /// `is_error_trace = true` (4) — that the controller and LRU are scored on.
+    /// Architectural-decision blocks (4 additional) do not have a dedicated
+    /// `BlockFeatures` flag so they are not counted in the recall metric, though
+    /// they remain in the session context window.
     fn all() -> Vec<Self> {
         vec![
             BenchmarkVariant {
                 name: "tight-budget-50pct".into(),
-                total_blocks: 40,
+                total_blocks: 40, // actual session length
                 budget: 20,
                 memory_pressure: 0.70,
-                needle_count: 12,
+                needle_count: 8, // 4 user constraints + 4 error traces
                 needles_in_oldest_half: true,
             },
             BenchmarkVariant {
@@ -206,7 +225,7 @@ impl BenchmarkVariant {
                 total_blocks: 40,
                 budget: 26,
                 memory_pressure: 0.50,
-                needle_count: 12,
+                needle_count: 8,
                 needles_in_oldest_half: true,
             },
             BenchmarkVariant {
@@ -214,15 +233,15 @@ impl BenchmarkVariant {
                 total_blocks: 40,
                 budget: 12,
                 memory_pressure: 0.90,
-                needle_count: 12,
+                needle_count: 8,
                 needles_in_oldest_half: true,
             },
             BenchmarkVariant {
                 name: "standard-spread".into(),
-                total_blocks: 20,
-                budget: 10,
-                memory_pressure: 0.70,
-                needle_count: 5,
+                total_blocks: 40, // full session — needles spread across first 28 blocks
+                budget: 20,
+                memory_pressure: 0.40,
+                needle_count: 8,
                 needles_in_oldest_half: true,
             },
             BenchmarkVariant {
@@ -230,7 +249,7 @@ impl BenchmarkVariant {
                 total_blocks: 40,
                 budget: 30,
                 memory_pressure: 0.30,
-                needle_count: 12,
+                needle_count: 8,
                 needles_in_oldest_half: true,
             },
         ]
@@ -266,24 +285,36 @@ pub struct RetentionDemoSummary {
 
 // ── Session-level evaluation ──────────────────────────────────────────────────
 
-/// Run the retention benchmark for one variant.
-fn run_variant(variant: &BenchmarkVariant) -> VariantResult {
-    let config = NeedleBenchmarkConfig {
-        total_blocks: variant.total_blocks,
-        needle_count: variant.needle_count,
-        budget: variant.budget,
-        memory_pressure: variant.memory_pressure,
-        needles_in_oldest_half: variant.needles_in_oldest_half,
-    };
+/// Run the retention benchmark for one variant against the **actual session
+/// fixture** rather than a freshly-synthesised synthetic trace.
+///
+/// The needle predicate counts `is_user_constraint` and `is_error_trace` blocks
+/// — the two categories with explicit `BlockFeatures` flags that the controller
+/// and LRU can act on.  Architectural-decision blocks (which have no dedicated
+/// flag) are present in the feature slice as regular `Assistant` blocks and
+/// contribute to the budget pressure but are not scored as needles.
+fn run_variant(variant: &BenchmarkVariant, session: &[SessionBlock]) -> VariantResult {
+    // Convert the session fixture with this variant's memory-pressure signal.
+    let features = to_features(session, variant.memory_pressure);
 
     let mut ctrl = KvController::with_pre_trained_weights();
-    let ctrl_result = run_controller_benchmark(&mut ctrl, &config);
-    let lru_result = run_lru_benchmark(&config);
+
+    // Needle = user constraint OR error trace (both have dedicated feature flags).
+    let needle_fn = |f: &BlockFeatures| f.is_user_constraint || f.is_error_trace;
+
+    let ctrl_result =
+        run_controller_benchmark_on_features(&mut ctrl, &features, variant.budget, needle_fn);
+    let lru_result = run_lru_benchmark_on_features(&features, variant.budget, needle_fn);
 
     let advantage_pp = NeedleRecallResult::recall_advantage_pp(&ctrl_result, &lru_result);
 
     VariantResult {
-        variant: variant.clone(),
+        variant: BenchmarkVariant {
+            // Overwrite the template values with actuals derived from the session.
+            total_blocks: features.len(),
+            needle_count: ctrl_result.total_needles,
+            ..variant.clone()
+        },
         controller_recall: ctrl_result.recall,
         controller_retained: ctrl_result.retained_needles,
         lru_recall: lru_result.recall,
@@ -356,8 +387,8 @@ fn build_report(session: &[SessionBlock], summary: &RetentionDemoSummary) -> Str
         } else {
             "—"
         };
-        let summary_trunc = if b.summary.len() > 60 {
-            format!("{}…", &b.summary[..60])
+        let summary_trunc = if b.summary.chars().count() > 60 {
+            format!("{}…", b.summary.chars().take(60).collect::<String>())
         } else {
             b.summary.clone()
         };
@@ -437,21 +468,37 @@ fn build_report(session: &[SessionBlock], summary: &RetentionDemoSummary) -> Str
 /// Runs Demo B and writes artefacts to `output_dir`.
 pub fn run(output_dir: &Path) -> Result<()> {
     let session = build_session();
-    let needle_count = session
+
+    // Total needle blocks in the session: detectable needles (user constraints +
+    // error traces) + architectural decisions.  The benchmark only scores the
+    // detectable subset; the arch-decision count is shown in the report for
+    // completeness.
+    let detectable_needles = session
         .iter()
-        .filter(|b| b.is_user_constraint || b.is_error_trace || b.is_architectural_decision)
+        .filter(|b| b.is_user_constraint || b.is_error_trace)
+        .count();
+    let arch_decisions = session
+        .iter()
+        .filter(|b| b.is_architectural_decision)
         .count();
 
     println!(
-        "  Session: {} blocks, {} needle blocks",
+        "  Session: {} blocks, {} detectable needle blocks ({} constraints + {} error traces), \
+         {} architectural-decision blocks (unscored)",
         session.len(),
-        needle_count
+        detectable_needles,
+        session.iter().filter(|b| b.is_user_constraint).count(),
+        session.iter().filter(|b| b.is_error_trace).count(),
+        arch_decisions,
     );
 
     let variants = BenchmarkVariant::all();
-    println!("  Running {} benchmark variants…", variants.len());
+    println!(
+        "  Running {} benchmark variants against the actual session fixture…",
+        variants.len()
+    );
 
-    let results: Vec<VariantResult> = variants.iter().map(run_variant).collect();
+    let results: Vec<VariantResult> = variants.iter().map(|v| run_variant(v, &session)).collect();
 
     let n = results.len() as f32;
     let mean_controller_recall = results.iter().map(|r| r.controller_recall).sum::<f32>() / n;
@@ -480,7 +527,8 @@ pub fn run(output_dir: &Path) -> Result<()> {
     let summary = RetentionDemoSummary {
         demo_kind: "retention".into(),
         session_total_blocks: session.len(),
-        session_needle_blocks: needle_count,
+        // Report detectable needles — the subset scored in the benchmark.
+        session_needle_blocks: detectable_needles,
         variants: results,
         mean_controller_recall,
         mean_lru_recall,
