@@ -66,11 +66,18 @@ docker compose --profile training run --rm trainer python /app/check.py
 The router in `crates/vita/src/router.rs` already classifies invocations
 into three tiers; the container stack realises them like this:
 
-| `CostClass`   | Model                              | Engine                    |
-|---------------|------------------------------------|---------------------------|
-| `CheapLocal`  | 270 M – 1 B instinct (e.g. `llama3.2:1b`) | local Ollama       |
-| `MidTier`     | 3 – 13 B workhorse (e.g. `llama3.2:3b`)   | local Ollama       |
-| `Frontier`    | API call (Claude / GPT)            | Anthropic / OpenAI live   |
+| `CostClass`   | Model                                                                | Engine                    |
+|---------------|----------------------------------------------------------------------|---------------------------|
+| `CheapLocal`  | Gemma 4 E2B instinct (`hf.co/unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`)    | local Ollama              |
+| `MidTier`     | Qwen 3.5 9B MTP workhorse (`hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M`) | local Ollama            |
+| `Frontier`    | API call (Claude / GPT)                                              | Anthropic / OpenAI live   |
+
+Both default tags are pulled directly from Hugging Face by Ollama's
+`hf.co/<owner>/<repo>:<quant>` resolver, which needs Ollama ≥ 0.21 for
+Gemma 4 support and ≥ 0.23 for the MTP draft-head speculative-decoding
+path used by the workhorse — the compose pin (`OLLAMA_VERSION=0.30.0`)
+clears both. Bump to a newer tag in `.env` when validating Ollama
+upgrades.
 
 Today `anima-hosted` picks a *single* backend at startup via
 `ANIMA_BACKEND`; wiring the router so it dispatches each invocation to the
@@ -79,32 +86,35 @@ not a Docker change).
 
 ## VRAM budget on a 3090 (24 GB)
 
-| Component                        | VRAM (typical)        |
-|----------------------------------|-----------------------|
-| `llama3.2:1b` instinct (Q4)      | ~0.7 GB               |
-| `llama3.2:3b` workhorse (Q4)     | ~2.5 GB               |
-| KV cache (8 k ctx, two slots)    | ~1.0 GB               |
-| Headroom for QLoRA (sleep phase) | ~12 GB                |
-| Spare                            | ~7 GB                 |
+| Component                                | VRAM (typical) |
+|------------------------------------------|----------------|
+| `gemma-4-E2B-it` instinct (Q4_K_M)       | ~3.5 GB        |
+| `Qwen3.5-9B-MTP` workhorse (Q4_K_M)      | ~5.5 GB        |
+| KV cache (8 k ctx, two slots)            | ~1.5 GB        |
+| Headroom for QLoRA (sleep phase)         | ~10 GB         |
+| Spare                                    | ~3 GB          |
 
-Bigger workhorses (`llama3.1:8b` ≈ 5.5 GB, `llama3.1:13b` ≈ 8 GB at Q4_K_M)
-fit comfortably alongside the instinct; override
-`ANIMA_WORKHORSE_MODEL=llama3.1:8b` in the environment before
-`compose up` to pull a different default.
+Drop to `Q4_K_S` or `Q3_K_M` on smaller cards, or step up to `Q5_K_M` /
+`Q8_0` on cards with more headroom — Ollama resolves the suffix straight
+to the matching file in the HF repo. Override
+`ANIMA_WORKHORSE_MODEL` / `ANIMA_INSTINCT_MODEL` in the environment
+before `compose up` to swap quants or models entirely.
 
 ## Configuration env vars
 
-| Variable                  | Default                       | Used by         |
-|---------------------------|-------------------------------|-----------------|
-| `ANIMA_BACKEND`           | `ollama`                      | `hosted`        |
-| `ANIMA_OLLAMA_URL`        | `http://ollama:11434`         | `hosted`        |
-| `ANIMA_OLLAMA_MODEL`      | `llama3.2:3b`                 | `hosted`        |
-| `ANIMA_OLLAMA_CTX`        | `8192`                        | `hosted`        |
-| `ANIMA_OLLAMA_TIMEOUT`    | `300` (seconds)               | `hosted`        |
-| `ANIMA_INSTINCT_MODEL`    | `llama3.2:1b`                 | `ollama-init`   |
-| `ANIMA_WORKHORSE_MODEL`   | `llama3.2:3b`                 | `ollama-init`   |
-| `ANTHROPIC_API_KEY`       | (empty)                       | `hosted`        |
-| `OPENAI_API_KEY`          | (empty)                       | `hosted`        |
+| Variable                  | Default                                              | Used by         |
+|---------------------------|------------------------------------------------------|-----------------|
+| `OLLAMA_VERSION`          | `0.30.0`                                             | `ollama`, `ollama-init` |
+| `ANIMA_BACKEND`           | `ollama`                                             | `hosted`        |
+| `ANIMA_OLLAMA_URL`        | `http://ollama:11434`                                | `hosted`        |
+| `ANIMA_OLLAMA_MODEL`      | `hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M`           | `hosted`        |
+| `ANIMA_OLLAMA_CTX`        | `8192`                                               | `hosted`        |
+| `ANIMA_OLLAMA_TIMEOUT`    | `300` (seconds)                                      | `hosted`        |
+| `ANIMA_INSTINCT_MODEL`    | `hf.co/unsloth/gemma-4-E2B-it-GGUF:Q4_K_M`           | `ollama-init`   |
+| `ANIMA_WORKHORSE_MODEL`   | `hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M`           | `ollama-init`   |
+| `TRAINER_BASE_MODEL`      | `unsloth/gemma-4-E2B-it-unsloth-bnb-4bit`            | `trainer`       |
+| `ANTHROPIC_API_KEY`       | (empty)                                              | `hosted`        |
+| `OPENAI_API_KEY`          | (empty)                                              | `hosted`        |
 
 Persistent state:
 
