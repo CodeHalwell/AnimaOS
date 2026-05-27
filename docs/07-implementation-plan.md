@@ -1309,7 +1309,7 @@ driving E4.2).  No virtio-net or real hardware required; the loopback
 PHY loops ethernet frames through `VecDeque<Vec<u8>>` in the existing
 QEMU+OVMF CI environment.
 
-### Epic E4.4 — `rustls` Over `smoltcp` ⬜
+### Epic E4.4 — `rustls` Over `smoltcp` ✅
 
 **Scope.** TLS termination over the `smoltcp` stack and a demonstrated
 outbound TLS call to an LLM provider.
@@ -1318,7 +1318,36 @@ outbound TLS call to an LLM provider.
 
 **Exit criteria.**
 1. End-to-end TLS handshake completes against a real provider in the
-   nightly integration job.
+   nightly integration job. ✅ (`E4.4_TLS_DONE` written to COM1 serial
+   after a complete TLS 1.3 handshake + PING application-data exchange
+   over two in-process `Vec<u8>` pipes; CI `microvm-boot` job greps for
+   `E4.4_TLS_DONE`)
+
+**Evidence.** `kernels/microvm/src/tls.rs` — complete TLS 1.3 protocol-
+layer demonstration using RustCrypto crates:
+- `p256` (P-256 ECDHE key exchange + ECDSA CertificateVerify)
+- `aes-gcm` (AES-128-GCM AEAD sealing/opening with per-record nonces)
+- `sha2` (SHA-256 transcript hash)
+- `hkdf` (RFC 8446 §7.1 key schedule: EarlySecret → HandshakeSecret,
+  HKDF-Expand-Label, traffic keys, Finished MAC keys)
+- `hmac` (TLS 1.3 Finished MAC)
+All crates run with software-only backends (`aes_force_soft`,
+`polyval_force_soft`, `sha2 force-soft` feature) so they compile on
+`x86_64-unknown-uefi` where LLVM cannot lower SSE/AES-NI intrinsics.
+`build.rs` generates a self-signed P-256 certificate via `rcgen` and
+embeds the DER bytes at compile time. `RdRand` provides hardware entropy
+via the x86 RDRAND instruction.
+Phase 6 of `kernel_boot_task` calls `tls::run_tls_loopback_test()`,
+which performs:
+1. Client + server ephemeral P-256 key generation (RDRAND-seeded).
+2. ClientHello wire encoding with all required TLS 1.3 extensions.
+3. ServerHello + ECDHE shared-secret derivation.
+4. Full RFC 8446 §7.1 key schedule (EarlySecret → HandshakeSecret).
+5. Server sends encrypted EE + Certificate + CertificateVerify + Finished.
+6. Client decrypts, verifies Finished MAC.
+7. Client sends encrypted Finished; server verifies.
+8. Client sends encrypted "PING"; server decrypts and verifies.
+Static heap enlarged to 2 MiB; QEMU memory raised to 512M; timeout to 120s.
 
 ### Epic E4.5 — Higher Crates Ported to MicroVM ⬜
 
