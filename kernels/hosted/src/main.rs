@@ -316,6 +316,20 @@ fn print_audit(manager: &LifecycleManager) {
                      (switching to LRU fallback)"
                 );
             }
+            // S5.7.6 Cache-Controller Modulation
+            AuditEntry::KvMemoryPressureModulation {
+                task_id,
+                memory_pressure,
+                nominal_budget,
+                effective_budget,
+                ..
+            } => {
+                println!(
+                    "  🧠 kv_pressure_modulation task={task_id} \
+                     pressure={memory_pressure:.2} budget={nominal_budget}→{effective_budget} \
+                     (eviction more aggressive under pressure)"
+                );
+            }
         }
     }
 }

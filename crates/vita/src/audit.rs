@@ -311,6 +311,33 @@ pub enum AuditEntry {
         /// Number of faults the controller has accumulated.
         fault_count: u32,
     },
+
+    // ── S5.7.6 Cache-Controller Modulation audit entries ──────────────────────
+    /// Memory-pressure from interoception triggered a block-budget reduction.
+    ///
+    /// Written by [`crate::kv_gate::gate_working_context_with_signals`] when
+    /// `memory_pressure >= 0.5`, immediately before the `KvGatePass` entry for
+    /// the same call. The entry records the nominal budget requested by the
+    /// caller and the tighter effective budget applied to the gate, so the
+    /// full eviction chain is auditable.
+    ///
+    /// Satisfies S5.7.6: "the controller's state incorporates a memory-pressure
+    /// signal so eviction becomes more aggressive under pressure."
+    KvMemoryPressureModulation {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier (matches the subsequent `KvGatePass`).
+        task_id: String,
+        /// Memory-pressure reading that triggered the reduction (`[0.0, 1.0]`).
+        memory_pressure: f32,
+        /// Block budget requested by the caller before pressure scaling.
+        nominal_budget: usize,
+        /// Effective budget applied to the gate after pressure scaling.
+        ///
+        /// Always `< nominal_budget` when this entry is written, and
+        /// always `>= 1`.
+        effective_budget: usize,
+    },
 }
 
 /// Append-only audit log.

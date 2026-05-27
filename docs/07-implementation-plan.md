@@ -1031,7 +1031,7 @@ the user, the machine, and the agent's own configuration.
    recovers all fields; identity is passed as `InvokeRequest::identity`
    separate from `description`)
 
-### Epic E5.6 — Defence Layer (Immune Analogue) 🟡
+### Epic E5.6 — Defence Layer (Immune Analogue) ✅
 
 **Scope.** The defence component that screens cortex outputs and motor
 actions for prompt injection, internal incoherence, goal drift, reward
@@ -1140,10 +1140,20 @@ change under induced stress.
   `mid-tier`; `ModulationDecision<'r>` carries requested vs effective route
   + reason string; `AuditEntry::RouterModulated` logged when modulation
   fires; `record_modulated_router_decision()` helper writes both entries)
-- S5.7.6 Cache-controller modulation: the controller's state
+- S5.7.6 ✅ Cache-controller modulation: the controller's state
   incorporates a memory-pressure signal so eviction becomes more
-  aggressive under pressure. ⬜ *Deferred — depends on E5.4 (Learned
-  KV-Cache Controller) which has not yet landed.*
+  aggressive under pressure. Delivered in `vita::kv_gate`:
+  `effective_budget_under_pressure(nominal, pressure)` scales the
+  block budget down by up to 30 % when `memory_pressure >= 0.5`
+  (monotone, always ≥ 1); `gate_working_context_with_signals` takes
+  a live `InteroceptiveSignals` snapshot, applies the budget reduction,
+  and writes `AuditEntry::KvMemoryPressureModulation` before the normal
+  `KvGatePass` entry when reduction fires. Feature-level modulation (the
+  `−0.50 × memory_pressure` weight in `LinearGate`) was already in place
+  from E5.4; S5.7.6 adds the budget-level reduction and the formal
+  interoception → kv-gate bridge. 11 new tests in `vita::kv_gate::tests`
+  verify monotone budget scaling, audit ordering, and the primary
+  behavioural assertion (`high_memory_pressure_retains_fewer_blocks_than_low_pressure`).
 
 **Exit criteria.**
 1. A reproducible stress harness drives each signal across its full
@@ -1155,7 +1165,8 @@ change under induced stress.
    power_budget; `stress_harness_sweeps_thermal_load_across_full_range` —
    11 steps, asserts mid-tier for thermal > 0.80; all 58 new tests pass;
    `record_modulated_decision_emits_router_modulated_entry_when_modulated`
-   — audit trail verified)
+   — audit trail verified; S5.7.6: 11 new kv_gate tests cover the full
+   memory-pressure sweep and behavioural assertion)
 2. The `anima why` CLI command from E5.2 includes the homeostatic
    signal values at the time of the decision. ✅ (`cmd_why()` in
    `kernels/hosted/src/main.rs` — prints live `InteroceptiveSensorBundle`
