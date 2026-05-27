@@ -299,7 +299,13 @@ jobs:
           # TLS 1.3) then panics.  120 s is ample — TLS loopback completes
           # in ms on hardware.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
+          # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
+          #   QEMU's default qemu64 CPU model does not include RDRAND; without
+          #   this flag the CPUID feature check in RdRand::is_available()
+          #   returns false and run_tls_loopback_test() returns an error before
+          #   writing E4.4_TLS_DONE to COM1.
           timeout 120 qemu-system-x86_64 \
+            -cpu qemu64,+rdrand \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive format=raw,file=fat:rw:esp \
             -serial file:/tmp/qemu-serial.txt \
