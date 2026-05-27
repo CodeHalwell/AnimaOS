@@ -78,6 +78,11 @@ enum BenchBaselineOp {
         /// Path to the checked-in baseline JSON.
         #[arg(long)]
         baseline: PathBuf,
+        /// Print the report but exit 0 even on regression.  Used while CI-side
+        /// baselines are still being calibrated against shared-runner jitter
+        /// (the checked-in baselines are captured on the maintainer's host).
+        #[arg(long)]
+        warn_only: bool,
     },
     /// Overwrite the baseline with the measurements from the current bencher log.
     Update {
@@ -152,7 +157,8 @@ fn main() -> Result<()> {
                 crate_name,
                 input,
                 baseline,
-            } => bench_baseline::run_check(&input, &baseline, &crate_name),
+                warn_only,
+            } => bench_baseline::run_check(&input, &baseline, &crate_name, warn_only),
             BenchBaselineOp::Update {
                 crate_name,
                 input,

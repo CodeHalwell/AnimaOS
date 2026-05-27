@@ -1488,17 +1488,21 @@ test are all in-tree.
   step fails if the time-to-marker exceeds 2 000 ms.  Replaces the
   previous foreground `timeout 120` invocation that timed the full
   panic-spin loop instead of actual boot).
-- S4.7.3 Regression benchmark suite. ✅ (`xtask bench-baseline`
+- S4.7.3 Regression benchmark suite. 🟡 (`xtask bench-baseline`
   sub-command parses Criterion's `--output-format bencher` log,
   compares against checked-in baselines at `bench/baselines/<crate>.json`,
-  and fails the run on any regression that clears both the per-crate
+  and reports any regression that clears both the per-crate
   `regression_threshold_pct` (default 20 %) and `noise_floor_ns`
   (default 100 ns).  Initial baselines captured for `scheduler`
   (16 measurements), `memory` (21), and `praxis` (16).  Wired into
   `.github/workflows/bench.yml` — also fixes a pre-existing latent bug
   where `cargo bench -p <crate> -- --output-format bencher` fed the
   unrecognised flag into the lib unit-test runner first and silently
-  produced partial output).
+  produced partial output.  Currently invoked with `--warn-only` in
+  CI: the checked-in baselines were captured on a developer host and
+  GitHub-hosted shared runners are 2-5× noisier, so a hard gate would
+  flap on jitter.  Follow-up is to re-capture baselines from a stable
+  CI run and drop `--warn-only`).
 - S4.7.4 30-day soak harness. ✅ (`xtask soak --hours <N>` drives QEMU
   in a loop, records per-iteration boot latency and outcome
   classification — `ok` / `timeout` / `unscheduled_exit` — and writes

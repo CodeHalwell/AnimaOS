@@ -273,7 +273,19 @@ pub fn render_outcomes(crate_name: &str, outcomes: &[(String, CheckOutcome)]) ->
 }
 
 /// Glue used by the CLI: load both files, run the check, render, exit code.
-pub fn run_check(input_path: &Path, baseline_path: &Path, crate_name: &str) -> Result<()> {
+///
+/// `warn_only`: print the report but always return `Ok(())`.  Used while the
+/// CI-side baselines are still being calibrated — shared GitHub runners are
+/// 2-5× noisier than a local machine, so a checked-in baseline captured on a
+/// developer host will flag spurious regressions on PR runs.  We keep the
+/// report visible (it still surfaces real regressions for human review) but
+/// don't block PR merges until baselines are captured from CI itself.
+pub fn run_check(
+    input_path: &Path,
+    baseline_path: &Path,
+    crate_name: &str,
+    warn_only: bool,
+) -> Result<()> {
     let raw =
         fs::read_to_string(input_path).with_context(|| format!("read {}", input_path.display()))?;
     let measurements = parse_bencher_output(&raw);
@@ -295,6 +307,13 @@ pub fn run_check(input_path: &Path, baseline_path: &Path, crate_name: &str) -> R
     let (outcomes, failed) = check_against_baseline(&measurements, &baseline);
     print!("{}", render_outcomes(crate_name, &outcomes));
     if failed {
+        if warn_only {
+            eprintln!(
+                "bench-baseline: regression(s) detected for {crate_name} but --warn-only is set; exit 0 (threshold {:.1}%)",
+                baseline.regression_threshold_pct
+            );
+            return Ok(());
+        }
         bail!(
             "bench-baseline check FAILED for {crate_name} (threshold {:.1}%)",
             baseline.regression_threshold_pct
