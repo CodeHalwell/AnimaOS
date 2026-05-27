@@ -1,0 +1,22 @@
+[workspace]
+
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cargo xtask runner: demo artefact generation and workspace automation."
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vita = { path = "../crates/vita" }
+kv-controller = { path = "../crates/kv-controller" }

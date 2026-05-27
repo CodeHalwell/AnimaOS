@@ -68,6 +68,31 @@ jobs:
   # Both jobs use pre-built binaries from GitHub Marketplace actions to keep
   # CI fast (avoids compiling the tools from source on every run).
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Epic E5.8 — Kill-Shot Demonstrations
+  # -------------------------------------------------------------------------
+  # Verifies that the xtask demo runner builds cleanly on every PR.
+  # The actual demo run (which writes to artifacts/) is not executed in CI
+  # because the artefact bundle is intentionally not version-controlled.
+  # -------------------------------------------------------------------------
+  xtask-build:
+    name: xtask build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-cargo-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-cargo-
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml
+
   security-audit:
     name: security audit (cargo-audit)
     runs-on: ubuntu-latest

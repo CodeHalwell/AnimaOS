@@ -1,0 +1,4 @@
+# Generated demo artefact bundles — excluded from version control.
+# Regenerate with: cargo xtask demo --kind all
+demos/*/
+!demos/.gitkeep
