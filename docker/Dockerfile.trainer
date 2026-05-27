@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+#
+# AnimaOS trainer — Unsloth QLoRA fine-tuning for the sleep phase.
+#
+# Starts from PyTorch's official CUDA 12.4 / cuDNN 9 devel image (nvcc is
+# present, which Unsloth's Triton kernels need on first run) and layers
+# Unsloth + the standard fine-tuning toolchain on top.
+#
+# This image is only built when the `training` compose profile is active:
+#
+#   docker compose --profile training up --build trainer
+#
+# Image size is large (~10-12 GB) because PyTorch + CUDA + cuDNN dominate;
+# that's intrinsic to GPU training and unavoidable.
+
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unsloth pulls in transformers, peft, trl, accelerate, datasets and the
+# correct bitsandbytes wheel for the detected CUDA build.  Pinning the
+# major version keeps the image reproducible; bump deliberately.
+RUN pip install --upgrade pip \
+ && pip install \
+        "unsloth>=2025.1" \
+        "bitsandbytes>=0.43" \
+        "transformers>=4.45" \
+        "peft>=0.13" \
+        "trl>=0.11" \
+        "accelerate>=1.0" \
+        "datasets>=3.0" \
+        "sentencepiece" \
+        "huggingface-hub"
+
+WORKDIR /app
+COPY trainer/ /app/
+
+# Default: run the sanity check so `docker compose run trainer` proves the
+# environment immediately.  Real training scripts go in /app and are
+# invoked explicitly, e.g. `python /app/sleep_phase.py`.
+CMD ["python", "/app/check.py"]

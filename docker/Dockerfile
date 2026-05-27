@@ -3,14 +3,15 @@
 # AnimaOS hosted-kernel container.
 #
 # Multi-stage build:
-#   1. builder   — nvidia/cuda devel image + rustup, compiles `anima-hosted`
-#   2. runtime   — nvidia/cuda runtime image, runs the binary
+#   1. builder   — debian-slim + rustup, compiles `anima-hosted` against
+#                  the workspace.
+#   2. runtime   — debian-slim, ships only the binary + CA certs.
 #
-# Both stages share the same Ubuntu 22.04 base so the glibc the binary was
-# linked against is the same one available at runtime. The runtime image
-# ships CUDA 12.4 libraries so a future local-inference LLM backend can
-# reach an attached NVIDIA GPU (e.g. the user's RTX 3090) without rebuilding
-# the image.
+# The heavy GPU work happens in the sibling `ollama` compose service, which
+# wraps llama.cpp's CUDA kernels.  AnimaOS itself only needs an HTTP client
+# to reach it, so the agent container stays small (~120 MB) and starts
+# instantly.  Switching the runtime to a CUDA-bearing base is a single-line
+# change if we ever load a model directly from `anima-hosted`.
 #
 # Build from repo root:
 #   docker build -f docker/Dockerfile -t animaos/hosted:dev .
@@ -19,7 +20,7 @@
 #   docker compose up --build
 
 # ---- Stage 1: build ---------------------------------------------------------
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+FROM debian:bookworm-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
@@ -31,7 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         pkg-config \
-        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -40,8 +40,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 WORKDIR /src
 COPY . .
 
-# BuildKit cache mounts keep the cargo registry and target/ warm across
-# rebuilds. Requires Docker 23+ (BuildKit is the default there).
+# BuildKit cache mounts keep cargo registry + target/ warm across rebuilds.
+# Requires Docker 23+ (BuildKit is the default there).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
@@ -49,13 +49,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/anima-hosted /usr/local/bin/anima-hosted
 
 # ---- Stage 2: runtime -------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+FROM debian:bookworm-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash --uid 1000 anima
 
@@ -64,15 +63,12 @@ COPY --from=builder /usr/local/bin/anima-hosted /usr/local/bin/anima-hosted
 USER anima
 WORKDIR /home/anima
 
-# Default backend is the deterministic mock; override at runtime to use a
-# live provider, e.g. `-e ANIMA_BACKEND=anthropic -e ANTHROPIC_API_KEY=...`.
-#
-# NVIDIA_* hints let nvidia-container-toolkit expose the host GPU(s) when
-# the container is launched with `--gpus all` or the compose device
-# reservation block below.
-ENV ANIMA_BACKEND=mock \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+# Defaults assume the sibling `ollama` compose service is reachable as
+# `ollama:11434`.  Override with `-e ANIMA_BACKEND=mock` to bypass.
+ENV ANIMA_BACKEND=ollama \
+    ANIMA_OLLAMA_URL=http://ollama:11434 \
+    ANIMA_OLLAMA_MODEL=llama3.2:3b \
+    ANIMA_OLLAMA_CTX=8192
 
 ENTRYPOINT ["anima-hosted"]
 CMD []

@@ -38,6 +38,8 @@ This directory contains the full design for Anima. Read in order if you are new;
 | [`06-glossary.md`](./06-glossary.md) | Terminology mapping: anatomical names ↔ engineering meanings. |
 | [`07-implementation-plan.md`](./07-implementation-plan.md) | Epic-by-epic delivery plan, aligned to the roadmap milestones, with stories and exit criteria. |
 | [`08-cognitive-architecture.md`](./08-cognitive-architecture.md) | Cognitive layer above the somatic substrate: cortex, gate, router, learned KV-cache controller, episodic/identity memory, defence layer. Reconciled into Stage 5 of the implementation plan. |
+| [`09-threat-model.md`](./09-threat-model.md) | Security posture: trust boundaries, attack surfaces, mitigations, and the defence layer's role. |
+| [`10-deployment-pathways.md`](./10-deployment-pathways.md) | The two parallel deployment surfaces — containerised (Docker + Ollama + Unsloth) for iteration, bare-metal native for the production target — and how the workspace stays one codebase across both. |
 
 ## Status
 
