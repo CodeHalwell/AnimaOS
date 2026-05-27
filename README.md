@@ -10,20 +10,27 @@ See [`docs/`](./docs/README.md) for the full design suite.
 
 ```
 anima-os/
-├── .github/workflows/ci.yml   # fmt + build + test + clippy
+├── .github/workflows/         # ci.yml, nightly.yml, bench.yml, pages.yml
 ├── Cargo.toml
 ├── crates/
 │   ├── corpus/                # The body (TCB): frame allocator, PCB, syscall enum
-│   ├── vita/                  # Autonomous lifecycle director + sleep routines
+│   ├── vita/                  # Autonomous lifecycle director + sleep routines + router/gate
 │   ├── scheduler/             # 3-tier MLFQ, bounded token pipe, LlmBackend
-│   ├── memory/                # CLS L1/L2/L3, ARC cache, emotional decay
+│   ├── memory/                # CLS L1/L2/L3, ARC cache, emotional decay, TurboQuant
 │   ├── praxis/                # Efferent actuator: routing, circuit breaker, MCP/A2A envelopes
 │   ├── self/                  # Self/non-self barrier: typestate capability tokens
-│   ├── interoception/         # Stress index, TTFT window
-│   └── senses/                # Afferent input: text / PCM packetization
-└── kernels/
-    ├── hosted/                # Linux process emulation binary (`anima-hosted`)
-    └── microvm/               # Firecracker / Cloud Hypervisor unikernel (TBD)
+│   ├── interoception/         # Stress index, TTFT window, sensory bridge
+│   ├── senses/                # Afferent input: text / PCM packetization
+│   ├── kv-controller/         # Learned KV-cache gate over TurboQuant (Stage 5, E5.4)
+│   └── defence/               # Defence layer: prompt-injection / drift detection (Stage 5, E5.6)
+├── kernels/
+│   ├── hosted/                # Linux process emulation binary (`anima-hosted`)
+│   └── microvm/               # UEFI no_std kernel, Firecracker / Cloud Hypervisor (E4.1–E4.6)
+├── cortex/                    # Python cognitive layer MVP (Stage 5, E5.1)
+├── llm-backends/              # Out-of-workspace providers (Anthropic, OpenAI, Ollama, mock)
+├── trainer/                   # Sleep-phase Unsloth QLoRA harness
+├── xtask/                     # Kill-shot demo runner (separate workspace)
+└── docker/                    # docker-compose stack: anima-hosted + Ollama + Unsloth
 ```
 
 > The `self` directory contains the package `anima-self` (Rust import: `anima_self`).
@@ -68,6 +75,15 @@ anima-os/
 ### Afferent Input Vector (`senses`)
 - `HumanGuidance` policy bounds
 - Text / PCM packetization through `SensoryPacket`
+
+### Learned KV-Cache Controller (`kv-controller`, Stage 5 / E5.4)
+- Semantic gating on top of TurboQuant: `kv_controller::controller`,
+  `kv_controller::trace`, `kv_controller::training`
+- `MemoryScope::kv_controller` opt-in from `vita::router`
+
+### Defence Layer (`defence`, Stage 5 / E5.6)
+- Prompt-injection screen, drift detection, immune-analogue veto
+- Vetoed actions logged at elevated severity; repeated vetoes escalate to the gate
 
 The non-TCB crates explicitly enforce `#![forbid(unsafe_code)]`.
 

@@ -43,7 +43,7 @@ This directory contains the full design for Anima. Read in order if you are new;
 
 ## Status
 
-Early implementation. The Cargo workspace, the eight crates named in `01-architecture.md`, and the hosted kernel target are in place; the MLFQ scheduler, bounded token pipe, three-tier memory shells, circuit breaker, capability typestate, stress-index monitor, and sensory bridge primitives are all merged and tested. Phase 1's exit criteria are partially met. See `05-roadmap.md` for the per-milestone state.
+Stages 1–3 closed, Stage 5 (cognitive layer) closed, Stage 4 closed through E4.6 (no_std port, Embassy executor, smoltcp TCP/IP, TLS 1.3 in the microVM, higher-crate microVM port, Kani + Miri formal verification). Stage 4's remaining work is Epic E4.7 — production hardening and the 30-day soak run. The workspace now holds ten crates: the foundational eight from `01-architecture.md` plus `kv-controller` (E5.4) and `defence` (E5.6) introduced in Stage 5. See `07-implementation-plan.md` for the epic-by-epic state.
 
 The documents in this suite are the authoritative reference during implementation and are updated in lockstep with the codebase. Anatomical crate names in the documentation map one-to-one to Cargo packages: `corpus`, `vita`, `praxis`, `senses`, and `interoception` use those package names directly, while the `self` crate is published as `anima-self` (imported as `anima_self`) because `self` is a reserved Rust keyword. See the glossary for the full mapping.
 

@@ -1,0 +1,118 @@
+# -----------------------------------------------------------------------------
+# Epic EX.4 — Security Posture and Threat Model
+# -----------------------------------------------------------------------------
+# Dependabot keeps the supply chain current. Two ecosystems are watched:
+#
+#   1. cargo — the root workspace Cargo.lock plus the two nested manifests
+#              that live outside the root workspace (xtask and the no_std
+#              microvm kernel). Each has its own Cargo.lock and so needs
+#              its own Dependabot entry.
+#
+#   2. github-actions — every workflow's `uses:` reference. Because all
+#              actions are SHA-pinned (see docs/09-threat-model.md §6),
+#              Dependabot rewrites the SHA and updates the trailing `# vX`
+#              comment when a new release ships.
+#
+# Updates are batched into grouped PRs per directory so the reviewer sees
+# one PR per ecosystem per week rather than a flood of single-crate bumps.
+# -----------------------------------------------------------------------------
+
+version: 2
+updates:
+  # ---------------------------------------------------------------------------
+  # GitHub Actions — pinned SHAs across ci.yml / nightly.yml / pages.yml / bench.yml
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci(deps)"
+      include: scope
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # Cargo — root workspace (crates/*, kernels/hosted, llm-backends)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "deps"
+      include: scope
+    groups:
+      patch-updates:
+        update-types:
+          - patch
+      minor-updates:
+        update-types:
+          - minor
+
+  # ---------------------------------------------------------------------------
+  # Cargo — xtask (Stage 5 kill-shot harness, separate workspace)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: cargo
+    directory: /xtask
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+      - xtask
+    commit-message:
+      prefix: "deps(xtask)"
+      include: scope
+    groups:
+      xtask-updates:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # Cargo — kernels/microvm (no_std UEFI kernel, separate workspace)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: cargo
+    directory: /kernels/microvm
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+      - microvm
+    commit-message:
+      prefix: "deps(microvm)"
+      include: scope
+    # The microvm Cargo.lock pins very specific RustCrypto versions whose ABI
+    # affects the no_std TLS path. Restrict to patch updates so an unattended
+    # minor bump can't break the x86_64-unknown-uefi build.
+    allow:
+      - dependency-type: direct
+    groups:
+      microvm-updates:
+        update-types:
+          - patch

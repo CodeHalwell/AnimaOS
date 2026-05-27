@@ -18,7 +18,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check formatting
@@ -28,9 +28,9 @@ jobs:
     name: build + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -48,7 +48,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install clippy
         run: rustup component add clippy
       - name: Run clippy
@@ -82,7 +82,7 @@ jobs:
     name: xtask rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check xtask formatting
@@ -92,9 +92,9 @@ jobs:
     name: xtask build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -110,11 +110,11 @@ jobs:
     name: xtask clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install clippy
         run: rustup component add clippy
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -130,9 +130,9 @@ jobs:
     name: xtask test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -148,11 +148,11 @@ jobs:
     name: security audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # rustsec/audit-check provides a pre-built cargo-audit binary and
       # produces structured annotations on the PR diff for any advisories.
       - name: Run cargo audit
-        uses: rustsec/audit-check@v2
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -160,15 +160,82 @@ jobs:
     name: supply-chain policy (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # EmbarkStudios/cargo-deny-action provides a pre-built cargo-deny binary.
       # Checks all four categories: advisories, bans, licenses, sources.
       # Policy is read from deny.toml at the repo root.
       - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@a531616d8ce3b9177443e48a1159bc945a099823 # v2
         with:
           command: check
           arguments: --all-features
+
+  # -------------------------------------------------------------------------
+  # Epic EX.4 — Software Bill of Materials (CycloneDX)
+  # -------------------------------------------------------------------------
+  # sbom: generates a CycloneDX 1.5 SBOM for every Cargo manifest in the
+  #   repo and uploads them as PR artefacts. Three SBOMs are produced:
+  #     - bom.cdx.json (root workspace: crates/*, kernels/hosted, llm-backends)
+  #     - xtask/bom.cdx.json
+  #     - kernels/microvm/bom.cdx.json
+  #
+  # The SBOMs document every transitive dependency, its version, source
+  # registry, and licence — the same surface that cargo-audit and cargo-deny
+  # scan, but in a machine-readable format consumable by external supply-
+  # chain tooling (Grype, Trivy, Dependency-Track, ...).
+  #
+  # cargo-cyclonedx is installed from crates.io (no GitHub Action available).
+  # The binary is cached across runs via the cargo cache key.
+  # -------------------------------------------------------------------------
+  sbom:
+    name: SBOM (cargo-cyclonedx)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Two separate caches: the cargo registry tracks Cargo.lock; the
+      # cargo-cyclonedx binary is keyed on its requested version so it is
+      # reused across PRs that bump Cargo.lock.
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-sbom-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sbom-registry-
+      - name: Cache cargo-cyclonedx binary
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-cyclonedx
+          key: ${{ runner.os }}-cargo-cyclonedx-0.5
+      - name: Install cargo-cyclonedx
+        run: |
+          if ! command -v cargo-cyclonedx >/dev/null; then
+            cargo install cargo-cyclonedx --locked --version "^0.5"
+          fi
+      - name: Generate root workspace SBOM
+        run: cargo cyclonedx --format json --spec-version 1.5 --override-filename bom.cdx
+      - name: Generate xtask SBOM
+        working-directory: xtask
+        run: cargo cyclonedx --format json --spec-version 1.5 --override-filename bom.cdx
+      - name: Generate microvm SBOM
+        # microvm uses build-std + a nightly target; cargo-cyclonedx only
+        # reads Cargo.lock so the host toolchain is sufficient here.
+        working-directory: kernels/microvm
+        run: cargo cyclonedx --format json --spec-version 1.5 --override-filename bom.cdx
+      - name: Collect SBOMs
+        run: |
+          mkdir -p sbom-out
+          find . -maxdepth 4 -name 'bom.cdx.json' -not -path './sbom-out/*' \
+            -exec cp --parents {} sbom-out/ \;
+          ls -R sbom-out
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cyclonedx-sboms
+          path: sbom-out/**/bom.cdx.json
+          retention-days: 90
 
   # -------------------------------------------------------------------------
   # Epic E4.1 — corpus no_std Port + UEFI Boot Trampoline  ✅
@@ -217,13 +284,13 @@ jobs:
         --cfg polyval_force_soft
         --cfg sha2_force_soft
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install nightly toolchain + rust-src
         run: |
           rustup toolchain install nightly --component rust-src,rustfmt,clippy
           rustup target add --toolchain nightly x86_64-unknown-uefi
       - name: Cache cargo (microvm)
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -245,7 +312,7 @@ jobs:
         working-directory: kernels/microvm
         run: cargo +nightly build --release
       - name: Upload EFI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: anima-microvm-efi
           path: kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi
@@ -256,7 +323,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: microvm-build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install QEMU and OVMF firmware
         run: |
           sudo apt-get update
@@ -338,7 +405,7 @@ jobs:
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }
       - name: Upload QEMU serial log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qemu-serial-log
           path: /tmp/qemu-serial.txt

@@ -1555,6 +1555,52 @@ A single durable audit log and a telemetry export that is consumed by
 both development tooling and the homeostatic monitor. Owners change as
 stages progress; the epic remains open.
 
+**Current emitter inventory.** Five physical sinks exist today; only
+the first is a true durable structured log, and the rest are candidates
+to fold into it (with one exception called out below):
+
+| # | Sink                                | Location                                            | Active? | Fold into `AuditLog`? |
+|---|-------------------------------------|-----------------------------------------------------|---------|----------------------|
+| 1 | `vita::AuditLog::push()`            | `crates/vita/src/audit.rs` (23 entry variants)      | yes — 26 call sites across vita (gate, router, sleep, cortex_bridge, kv_gate, identity) | n/a (this is the sink) |
+| 2 | `SignalPublisher::publish()`        | `crates/interoception/src/signals.rs:166`           | trait + `FnPublisher`/`NullPublisher`; production impl pending | **yes** — emit as `AuditEntry::InteroceptiveSnapshot` (variant already defined) |
+| 3 | `BoundedTokenPipe::push()` (memory) | `crates/memory/src/pressure.rs::emit_to_pipe()`     | design complete; not yet wired by scheduler         | **yes** — emit as a new `AuditEntry::MemoryPressureEvent` variant alongside the credit debit |
+| 4 | `serial_write()` to COM1 @ 0x3F8    | `kernels/microvm/src/main.rs:206` + `sleep_soak.rs` | yes — exit-criteria string emitter (`E4.x_*_DONE`, `ANIMA_PANIC`) | **eventually** — once microVM has a durable sink, mirror these into `AuditLog`; until then COM1 stays the canonical CI-observable channel |
+| 5 | Python cortex IPC (UDS, JSON)       | `cortex/ipc.py` + `cortex/agent_loop.py`            | yes — already bridged into `AuditEntry::CortexInvoked/Completed/Fault` by `cortex_bridge.rs` | already integrated downstream; no action |
+
+In addition to the five sinks there are three **audit variants defined
+but not yet emitted** (the call sites are the next slice of work):
+
+- `AuditEntry::InteroceptiveSnapshot` (vita/src/audit.rs:233) — needs the
+  E5.7 `SignalPublisher` impl to call `AuditLog::push` on every tick.
+- `AuditEntry::DefenceVeto` and `AuditEntry::AttentionDemandEscalated`
+  (vita/src/audit.rs:100, 115) — needs the defence-layer screening
+  outcome in `crates/defence/src/layer.rs:138` to route a veto back
+  through the cortex bridge into the audit log.
+
+And one parallel stream is **intentionally not folded in**:
+
+- `kv_controller::trace::TraceCapture` (`crates/kv-controller/src/trace.rs`)
+  — per-invocation episode buffer with provenance tags
+  (`LiveCortexTrace` / `Synthetic` / `PublicDataset`). This is a training
+  corpus, not operational telemetry; it has its own privacy-gated
+  retention policy (`TraceConfig::enabled`) and belongs in a separate
+  durable sink.
+
+**Consolidation slice (next sprint, when EX.2 is picked up).**
+
+1. Implement a real `SignalPublisher` in `vita` that pushes
+   `InteroceptiveSnapshot` audit entries at the existing 1 Hz cadence.
+   ~20 LOC, no schema change.
+2. Add a `MemoryPressureEvent` audit variant and have the scheduler call
+   `AuditLog::push` next to `memory::emit_to_pipe`. ~30 LOC.
+3. Route `defence::ScreeningOutcome::vetoed` back through
+   `vita::cortex_bridge` and push `DefenceVeto` / `AttentionDemandEscalated`.
+   ~40 LOC.
+4. Replace the in-memory `Vec<AuditEntry>` with a durable backend
+   (initial pick: append-only `bincode` log under a configurable
+   `ANIMA_AUDIT_DIR`; SQLite or RocksDB if the access pattern grows).
+   That single change closes the epic.
+
 ### Epic EX.3 — Performance Regression Benchmark Suite ✅
 
 A per-PR microbenchmark suite (Criterion) plus a nightly macro-benchmark
@@ -1607,7 +1653,7 @@ Stage 4.
 Maintain a living threat model, run `cargo audit` and `cargo deny` in
 CI, and produce a security review at the end of each stage.
 
-**Delivered in this epic (partial — first pass):**
+**Delivered in this epic (second pass):**
 - `cargo audit` job added to `.github/workflows/ci.yml` — scans `Cargo.lock`
   against the RustSec advisory database on every PR; findings at error level
   block merge. ✅
@@ -1620,12 +1666,23 @@ CI, and produce a security review at the end of each stage.
   attack surface catalogue (AS-1 through AS-7), STRIDE threat catalogue
   (T-1 through T-8), security controls matrix, and per-stage security
   review checklist. ✅
+- **All four workflow files SHA-pinned.** Every `uses:` reference in
+  `.github/workflows/{ci,nightly,pages,bench}.yml` now points to an
+  immutable commit SHA with a trailing `# vX` comment for human
+  readability. Dependabot rewrites the SHA on each upstream release. ✅
+- **Dependabot configured.** `.github/dependabot.yml` watches four
+  ecosystems on a weekly cadence: github-actions (root), cargo (root
+  workspace), cargo (xtask), cargo (kernels/microvm). Cargo updates are
+  grouped by patch/minor to keep PR volume manageable. ✅
+- **SBOM job (cargo-cyclonedx).** The `sbom` job in `ci.yml` emits
+  CycloneDX 1.5 JSON SBOMs for every crate in the root workspace plus
+  the xtask and microvm manifests, and uploads them as a 90-day
+  retention artefact (`cyclonedx-sboms`). ✅
 
 **Remaining (future iterations):**
-- Pin GitHub Actions `uses:` references to SHAs (currently tag-pinned only).
-- SBOM generation via `cargo cyclonedx` or `cargo spdx`.
-- Enable Dependabot / Renovate for automated dependency updates.
 - Per-stage security review sign-off as each stage closes.
+- Publish SBOMs to a Dependency-Track instance or attach to GitHub
+  Releases once Stage 4 closes.
 
 ---
 
