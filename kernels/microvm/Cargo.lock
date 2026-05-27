@@ -48,10 +48,13 @@ dependencies = [
  "embassy-futures",
  "hkdf",
  "hmac",
+ "interoception",
  "log",
+ "memory",
  "p256",
  "rand_core",
  "rcgen",
+ "scheduler",
  "sha2",
  "smoltcp",
  "static_cell",
@@ -481,10 +484,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "interoception"
+version = "0.1.0"
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "litrs"
@@ -503,6 +516,14 @@ name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
+
+[[package]]
+name = "memory"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "scheduler",
+]
 
 [[package]]
 name = "num-conv"
@@ -692,6 +713,10 @@ checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
 dependencies = [
  "zeroize",
 ]
+
+[[package]]
+name = "scheduler"
+version = "0.1.0"
 
 [[package]]
 name = "sec1"

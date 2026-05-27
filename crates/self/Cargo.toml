@@ -7,6 +7,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# E4.5: anima-self is already fully no_std-clean (uses only core::marker::PhantomData).
+# The std feature is included for consistency with other crates in this workspace.
+[features]
+default = ["std"]
+std = []
+
 [lib]
 name = "anima_self"
 path = "src/lib.rs"

@@ -12,7 +12,15 @@
 //! Set `boost_interval = 0` (the default) to disable the boost (useful in
 //! unit tests that exercise a single priority tier).
 
+// VecDeque lives in std::collections under std, alloc::collections under no_std.
+#[cfg(not(feature = "std"))]
+use alloc::collections::VecDeque;
+#[cfg(feature = "std")]
 use std::collections::VecDeque;
+
+// alloc types needed by IterationAwareMlfq and TaskOutcome in no_std mode.
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
 
 use crate::backend::{CancellationToken, LlmBackend, LlmBackendError, StreamingCompletion};
 use crate::Task;
@@ -230,7 +238,9 @@ impl IterationAwareMlfq {
     }
 }
 
-#[cfg(test)]
+// Tests require std for the mock LLM backend, thread::yield_now, and
+// HashSet.  Gate the entire block so no_std builds don't try to compile it.
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use std::future::Future;

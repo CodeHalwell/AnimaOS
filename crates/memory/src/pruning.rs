@@ -12,16 +12,34 @@
 //! [`L1PruningStore::run_pruning_pass`] applies a decay pass and removes
 //! below-floor entries.
 //!
-//! # L2 pruning
+//! # L2 pruning (std only)
 //!
 //! [`prune_l2_cache`] operates on an [`ArcCache<K, MemoryNode>`][crate::ArcCache]
-//! by calling the cache's [`ArcCache::retain`] method.  It returns the same
-//! [`PruningReport`] structure so callers get a uniform view of both tiers.
+//! and is only available in `std` builds (the L2 ARC cache depends on
+//! `std::sync::Mutex` and `scc`).
+//!
+//! # `no_std` support
+//!
+//! [`L1PruningStore`] is available in `no_std` builds: it uses a `BTreeMap`
+//! as the backing store instead of `HashMap` so no hashing infrastructure
+//! is required.
 
+// In no_std+alloc mode we alias BTreeMap as HashMap so all existing code
+// continues to compile unchanged.
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap as HashMap;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
 
-use crate::decay::{MemoryNode, SEMANTIC_FLOOR};
+// Vec and String need explicit imports in no_std+alloc mode.
+#[cfg(not(feature = "std"))]
+use alloc::{string::String, vec::Vec};
+
+// ArcCache is std-only (depends on scc + std::sync::Mutex).
+#[cfg(feature = "std")]
 use crate::l2_cache::ArcCache;
+
+use crate::decay::{MemoryNode, SEMANTIC_FLOOR};
 
 // ── PruningReport ─────────────────────────────────────────────────────────────
 
@@ -50,6 +68,10 @@ impl PruningReport {
 /// Stores named [`MemoryNode`]s and exposes [`run_pruning_pass`][Self::run_pruning_pass]
 /// to evict nodes whose emotional-decay activation has fallen to or below the
 /// semantic floor.
+///
+/// In `std` builds the backing map is `HashMap<String, MemoryNode>`.
+/// In `no_std` builds the backing map is `BTreeMap<String, MemoryNode>`
+/// (same API, no hashing dependency).
 ///
 /// # Exit-criterion guarantees (E3.5)
 ///
@@ -152,7 +174,7 @@ impl L1PruningStore {
     }
 }
 
-// ── L2 pruning ────────────────────────────────────────────────────────────────
+// ── L2 pruning (std only) ─────────────────────────────────────────────────────
 
 /// Prunes an L2 [`ArcCache<K, MemoryNode>`] by removing entries whose
 /// activation at `elapsed` is at or below `floor`.
@@ -160,6 +182,9 @@ impl L1PruningStore {
 /// Uses [`ArcCache::retain`] so the ARC internal invariants (T1/T2 structure,
 /// ghost-list bookkeeping) are respected.  The effective floor is
 /// `floor.max(SEMANTIC_FLOOR)`.
+///
+/// **std only** — ArcCache depends on `scc` and `std::sync::Mutex`.
+#[cfg(feature = "std")]
 pub fn prune_l2_cache<K>(cache: &ArcCache<K, MemoryNode>, elapsed: f32, floor: f32) -> PruningReport
 where
     K: Eq + std::hash::Hash + Clone + Send + 'static,
@@ -228,8 +253,6 @@ mod tests {
             arousal: 3.0,
             surprise: 1.0,
         };
-        // At t=0.5, activation = 0.5 * e^(-1.0) * (1 + 1.5*3.0 + 2.0*1.0)
-        //   ≈ 0.5 * 0.6065 * 7.5 ≈ 2.274 — well above floor
         store.insert("stressed", stressed_node);
 
         // Borderline node: activation just above floor at t=0.5.
@@ -238,7 +261,6 @@ mod tests {
 
         let report = store.run_pruning_pass(0.5);
 
-        // Both nodes should survive: stressed is highly active, borderline is above floor.
         assert_eq!(
             report.nodes_removed, 0,
             "no nodes should be pruned when activation > floor"
@@ -257,12 +279,24 @@ mod tests {
         // Mix of fast-, slow-, and zero-decay nodes.
         for i in 0..20u32 {
             let lambda = i as f32 * 0.5;
-            store.insert(format!("node-{i}"), MemoryNode::new(0.8, lambda));
+            store.insert(
+                {
+                    #[cfg(feature = "std")]
+                    {
+                        format!("node-{i}")
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        use alloc::format;
+                        format!("node-{i}")
+                    }
+                },
+                MemoryNode::new(0.8, lambda),
+            );
         }
 
         let _ = store.run_pruning_pass(elapsed);
 
-        // Post-pass invariant: every surviving node is strictly above the floor.
         for (key, node) in &store.nodes {
             let activation = node.activation_at(elapsed);
             assert!(
@@ -275,27 +309,46 @@ mod tests {
     #[test]
     fn custom_floor_is_bounded_by_semantic_floor() {
         let mut store = L1PruningStore::new();
-        // A node whose natural activation at t=1 is 0.32 — above SEMANTIC_FLOOR (0.3)
-        // but might be below a custom floor of 0.35.
         store.insert("node", MemoryNode::new(0.35, 0.05));
-        // Requesting floor BELOW semantic floor should not cause the node to be pruned
-        // if its activation > SEMANTIC_FLOOR, even if floor_arg < SEMANTIC_FLOOR.
-        // The effective floor is max(floor_arg, SEMANTIC_FLOOR).
-        let report = store.run_pruning_pass_with(1.0, 0.0); // floor_arg below semantic floor
+        let report = store.run_pruning_pass_with(1.0, 0.0);
         assert_eq!(report.floor_enforced, SEMANTIC_FLOOR);
-        // Node activation at t=1: 0.35 * e^(-0.05) ≈ 0.3329 > 0.3 → survives
         assert_eq!(report.nodes_removed, 0);
     }
 
     #[test]
     fn pruning_report_nodes_retained_matches_store_len() {
         let mut store = L1PruningStore::new();
-        // Insert 5 fast-decaying and 3 stable nodes.
         for i in 0..5u32 {
-            store.insert(format!("fast-{i}"), MemoryNode::new(0.9, 20.0));
+            store.insert(
+                {
+                    #[cfg(feature = "std")]
+                    {
+                        format!("fast-{i}")
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        use alloc::format;
+                        format!("fast-{i}")
+                    }
+                },
+                MemoryNode::new(0.9, 20.0),
+            );
         }
         for i in 0..3u32 {
-            store.insert(format!("stable-{i}"), MemoryNode::new(0.9, 0.0));
+            store.insert(
+                {
+                    #[cfg(feature = "std")]
+                    {
+                        format!("stable-{i}")
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        use alloc::format;
+                        format!("stable-{i}")
+                    }
+                },
+                MemoryNode::new(0.9, 0.0),
+            );
         }
         let report = store.run_pruning_pass(5.0);
         assert_eq!(
@@ -305,8 +358,9 @@ mod tests {
         );
     }
 
-    // ── L2 cache pruning ─────────────────────────────────────────────────────
+    // ── L2 cache pruning (std only) ──────────────────────────────────────────
 
+    #[cfg(feature = "std")]
     #[test]
     fn prune_l2_cache_removes_decayed_entries() {
         let cache: ArcCache<String, MemoryNode> = ArcCache::new(16);
@@ -322,6 +376,7 @@ mod tests {
         assert!(cache.get(&"fast".to_string()).is_none());
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn prune_l2_cache_on_empty_cache_is_safe() {
         let cache: ArcCache<String, MemoryNode> = ArcCache::new(8);
@@ -331,6 +386,7 @@ mod tests {
         assert_eq!(report.nodes_retained(), 0);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn prune_l2_cache_post_pass_invariant() {
         let cache: ArcCache<String, MemoryNode> = ArcCache::new(32);
@@ -344,10 +400,6 @@ mod tests {
 
         prune_l2_cache(&cache, elapsed, floor);
 
-        // Verify the remaining entries are all above floor.
-        // We can't directly iterate the ArcCache (by design), but we can re-insert
-        // and check retrieval:  the fact that the cache.len() shrank and the
-        // `retain` closure enforced the invariant is the primary check.
         assert!(
             cache.len() < 16,
             "at least some nodes should have been pruned"

@@ -3,3 +3,11 @@ name = "senses"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+# E4.5: SensoryBridge uses std::sync::Mutex + Arc for thread-safe queuing.
+# In no_std mode, only the pure data types (SensoryPriority, SensoryPacket,
+# PrioritizedPacket) are available; the SensoryBridge itself is std-only
+# until a spin-lock variant is added.
+[features]
+default = ["std"]
+std = []

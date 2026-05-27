@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# E4.5: vita requires std (Unix socket cortex bridge, file-backed identity/episodic).
+# Future work: extract pure sub-modules (gate, router, sleep state machine) into
+# a no_std-compatible layer.
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 memory = { path = "../memory" }
 interoception = { path = "../interoception" }

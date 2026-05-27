@@ -4,11 +4,49 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# ---------------------------------------------------------------------------
+# E4.5 — no_std feature gate
+#
+# default = ["std"]: hosted builds get scc, serde_json, and the full set of
+# memory modules (l2_cache, archival, compilation, turboquant, replay,
+# dreaming).
+#
+# no_std build (default-features = false): only the pure-math modules are
+# compiled — decay, pressure, pruning (using BTreeMap), and the in-memory
+# dream-walk variant.  VirtualContextManager is always available since it
+# lives in lib.rs with no external deps.
+# ---------------------------------------------------------------------------
+[features]
+default = ["std"]
+# Propagate the std feature down to scheduler so that when memory is compiled
+# without std (e.g. in the microVM UEFI kernel), scheduler also gets no_std mode.
+# libm: included here so that std builds do NOT activate libm (std supplies its own float math).
+std = ["dep:scc", "dep:serde", "dep:serde_json", "scheduler/std"]
+# libm: activated by crates that compile memory without std (e.g. the microVM kernel).
+# Provides f32::exp() / sqrt() equivalents in bare-metal environments.
+libm = ["dep:libm"]
+
 [dependencies]
-scc = "3.7.1"
-scheduler = { version = "0.1.0", path = "../scheduler" }
-serde = { workspace = true }
-serde_json = { workspace = true }
+# scc: concurrent hash-map — only needed for the L2 ARC cache (std builds).
+scc = { version = "3.7.1", optional = true }
+
+# libm: software float math (exp, sqrt, etc.) for no_std builds.
+# In std builds the compiler resolves f32::exp()/sqrt() via libc's libm.
+# In no_std builds (microVM) we use this crate's implementations instead.
+# Marked optional so it is only compiled when the std feature is absent.
+libm = { version = "0.2", optional = true }
+
+# scheduler: BoundedTokenPipe (no_std-clean from E4.5) + TaskAgenda.
+# default-features = false: propagates no_std when memory is compiled without std.
+# The std feature is re-enabled via the "scheduler/std" entry in memory's std feature.
+scheduler = { version = "0.1.0", path = "../scheduler", default-features = false }
+
+# serde: derive macros used by ArchivedItem, training records, etc.
+# Only needed in std builds (archival.rs, compilation.rs are both std-only).
+serde = { workspace = true, optional = true }
+
+# serde_json: only needed for file-backed L3Archive and compilation output.
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

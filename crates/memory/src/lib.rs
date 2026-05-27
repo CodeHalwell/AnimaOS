@@ -1,39 +1,91 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 //! Synaptic memory layer implementing the CLS three-tier hierarchy.
+//!
+//! # `no_std` support (E4.5)
+//!
+//! In `no_std` mode (`default-features = false`) the following subset is
+//! available without `std`:
+//!
+//! | Module / type              | Always | std-only |
+//! |---------------------------|--------|----------|
+//! | `VirtualContextManager`   | ✓      |          |
+//! | `MemoryPressureEvent`      | ✓      |          |
+//! | `decay::{MemoryNode, …}`  | ✓      |          |
+//! | `pruning::L1PruningStore` | ✓      |          |
+//! | `dreaming::run_dream_walk_no_std` | ✓ |       |
+//! | `l2_cache::ArcCache`       |        | ✓        |
+//! | `archival::L3Archive`      |        | ✓        |
+//! | `compilation::*`           |        | ✓        |
+//! | `replay::*`                |        | ✓        |
+//! | `turboquant::*`            |        | ✓        |
 
-pub mod archival;
-pub mod compilation;
+// alloc is needed for Vec/BTreeMap/String etc. in no_std builds.
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+// ── Always-available modules ──────────────────────────────────────────────────
+
 pub mod decay;
 pub mod dreaming;
-pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
+
+// ── std-only modules ──────────────────────────────────────────────────────────
+
+#[cfg(feature = "std")]
+pub mod archival;
+#[cfg(feature = "std")]
+pub mod compilation;
+#[cfg(feature = "std")]
+pub mod l2_cache;
+#[cfg(feature = "std")]
 pub mod replay;
+#[cfg(feature = "std")]
 pub mod turboquant;
 
+// ── Re-exports ─────────────────────────────────────────────────────────────────
+
+// std-only re-exports
+#[cfg(feature = "std")]
 pub use archival::{
     archive_memory_node, embed_memory_node, retrieve_top_k_from_l3_for_l2, ArchivalEntry,
     ArchivalStore, ArchivalStoreError, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError,
     Provenance, SourceTier,
 };
+#[cfg(feature = "std")]
 pub use compilation::{
     compile_traces_to_pairs, emergency_consolidate, AlpacaRecord, AuditTraceEntry,
     ChainOfThoughtRecord, CompilationConfig, CompilationReport, ConversationRecord,
     ConversationTurn, TrainingFormat, TrainingPair,
 };
-pub use decay::{EmotionalContext, MemoryNode};
-pub use dreaming::{run_dream_walk, AssociativeEdge, DreamConfig, DreamReport};
+// run_dream_walk (L3Archive version) is std-only
+#[cfg(feature = "std")]
+pub use dreaming::run_dream_walk;
+#[cfg(feature = "std")]
 pub use l2_cache::ArcCache;
-pub use pressure::MemoryPressureEvent;
-pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
+#[cfg(feature = "std")]
 pub use replay::{run_replay_validation, ReplayConfig, ReplayReport};
+#[cfg(feature = "std")]
 pub use turboquant::{
     cosine_similarity_f32, dot_product_f32, l2_norm, pack_codes, quantized_search_archival,
     quantized_search_l3, target_has_simd_support, unpack_codes, BitDepth, LloydMaxCodebook, Metric,
     PSquareQuantile, PolarQuantRotation, QuantizedVector, TurboQuant, TurboQuantConfig,
     TurboQuantError,
 };
+
+// Always-available re-exports (no_std + std)
+pub use decay::{EmotionalContext, MemoryNode};
+pub use dreaming::{
+    run_dream_walk_no_std, AssociativeEdge, DreamConfig, DreamReport, InMemoryEntry,
+};
+pub use pressure::MemoryPressureEvent;
+pub use pruning::{L1PruningStore, PruningReport};
+
+// prune_l2_cache requires ArcCache which is std-only
+#[cfg(feature = "std")]
+pub use pruning::prune_l2_cache;
 
 /// Default block size in tokens, matching PagedAttention page granularity.
 pub const DEFAULT_BLOCK_SIZE: u32 = 16;

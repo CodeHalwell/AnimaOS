@@ -1,9 +1,30 @@
-#![forbid(unsafe_code)]
-
 //! Reflex loop control: iteration-aware MLFQ scheduler and supporting traits.
+//!
+//! # `no_std` support (E4.5)
+//!
+//! This crate is fully `no_std`-clean when the `std` feature is disabled
+//! (i.e. `default-features = false`).  All public types — [`Task`],
+//! [`TaskAgenda`], [`BoundedTokenPipe`], [`MlfqTier`], and the
+//! [`LlmBackend`] trait — are available in both modes.
+//!
+//! The only exclusion in `no_std` builds is [`MockLlmBackend`], which depends
+//! on test-only std infrastructure and is gated behind `#[cfg(feature = "std")]`.
+
+#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+// In no_std mode we pull in the `alloc` crate for Vec, String, Box, etc.
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+// Bring common alloc prelude types into scope in no_std mode.
+// (In std mode these come from the implicit std prelude.)
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 
 pub mod backend;
 pub mod mlfq;
+#[cfg(feature = "std")]
 pub mod mock;
 pub mod token_pipe;
 
@@ -11,6 +32,7 @@ pub use backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
 };
 pub use mlfq::{IterationAwareMlfq, MlfqTier, TaskAgenda, TaskOutcome};
+#[cfg(feature = "std")]
 pub use mock::MockLlmBackend;
 pub use token_pipe::{BoundedTokenPipe, TokenPipeError};
 
