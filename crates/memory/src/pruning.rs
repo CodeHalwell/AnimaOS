@@ -18,7 +18,9 @@
 //! by calling the cache's [`ArcCache::retain`] method.  It returns the same
 //! [`PruningReport`] structure so callers get a uniform view of both tiers.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::decay::{MemoryNode, SEMANTIC_FLOOR};
 use crate::l2_cache::ArcCache;
@@ -60,7 +62,7 @@ impl PruningReport {
 ///   `activation_at(elapsed) > floor_enforced`.
 #[derive(Debug, Clone, Default)]
 pub struct L1PruningStore {
-    nodes: HashMap<String, MemoryNode>,
+    nodes: BTreeMap<String, MemoryNode>,
 }
 
 impl L1PruningStore {
@@ -162,7 +164,7 @@ impl L1PruningStore {
 /// `floor.max(SEMANTIC_FLOOR)`.
 pub fn prune_l2_cache<K>(cache: &ArcCache<K, MemoryNode>, elapsed: f32, floor: f32) -> PruningReport
 where
-    K: Eq + std::hash::Hash + Clone + Send + 'static,
+    K: Eq + core::hash::Hash + Clone + Send + 'static,
 {
     let floor_enforced = floor.max(SEMANTIC_FLOOR);
     let nodes_before = cache.len();

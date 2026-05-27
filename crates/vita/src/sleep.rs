@@ -32,6 +32,9 @@
 //! The outcome struct has been extended with an optional [`PruningReport`]
 //! field that callers can inspect to observe the pruning statistics.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use memory::decay::SEMANTIC_FLOOR;
 use memory::{
     AuditTraceEntry, CompilationConfig, CompilationReport, DreamConfig, DreamReport,
@@ -241,7 +244,7 @@ pub fn run_maintenance_audited(
     let mut outcomes = Vec::with_capacity(PHASES.len());
 
     for &routine in PHASES {
-        let phase = routine.as_str().to_owned();
+        let phase = routine.as_str().to_string();
 
         audit.push(AuditEntry::SleepPhaseStarted {
             agent_id: agent_id.to_string(),
@@ -949,7 +952,7 @@ mod tests {
         let comp_ctx = CompilationContext {
             entries: &entries,
             config: CompilationConfig {
-                output_dir: dir.clone(),
+                output_dir: dir.to_string_lossy().into_owned(),
                 formats: vec![memory::TrainingFormat::Alpaca],
                 append: false,
             },
@@ -998,7 +1001,7 @@ mod tests {
         let comp_ctx = CompilationContext {
             entries: &entries,
             config: CompilationConfig {
-                output_dir: dir.clone(),
+                output_dir: dir.to_string_lossy().into_owned(),
                 formats: vec![memory::TrainingFormat::Alpaca],
                 append: false,
             },

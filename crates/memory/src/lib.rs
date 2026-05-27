@@ -1,6 +1,9 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Synaptic memory layer implementing the CLS three-tier hierarchy.
+
+extern crate alloc;
 
 pub mod archival;
 pub mod compilation;
@@ -10,6 +13,9 @@ pub mod l2_cache;
 pub mod pressure;
 pub mod pruning;
 pub mod replay;
+// TurboQuant requires `f32`/`f64` math intrinsics that only `std` provides.
+// `no_std` builds use the unquantised cosine path in `archival::search`.
+#[cfg(feature = "std")]
 pub mod turboquant;
 
 pub use archival::{
@@ -28,6 +34,7 @@ pub use l2_cache::ArcCache;
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{prune_l2_cache, L1PruningStore, PruningReport};
 pub use replay::{run_replay_validation, ReplayConfig, ReplayReport};
+#[cfg(feature = "std")]
 pub use turboquant::{
     cosine_similarity_f32, dot_product_f32, l2_norm, pack_codes, quantized_search_archival,
     quantized_search_l3, target_has_simd_support, unpack_codes, BitDepth, LloydMaxCodebook, Metric,

@@ -3,3 +3,9 @@ name = "interoception"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = ["std"]
+# `std` enables host-OS sensor backends (sysfs power read). Without `std` the
+# crate is `no_std + alloc`-clean and the power sensor always returns AC.
+std = []

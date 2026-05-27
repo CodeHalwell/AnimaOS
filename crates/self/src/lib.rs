@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Self/Non-Self barrier: typestate-encoded object-capability tokens.

@@ -1,5 +1,8 @@
 //! Message envelopes used to ferry tool calls across MCP / A2A buses.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// Stable identifier for the bus a message was routed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bus {

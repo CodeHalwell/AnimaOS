@@ -53,7 +53,10 @@
 //! `TurboQuantizer` will implement [`controller::Quantizer`] and the combined
 //! controller+TurboQuant retention priority replaces the gate score alone.
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
 
 pub mod controller;
 pub mod eval;

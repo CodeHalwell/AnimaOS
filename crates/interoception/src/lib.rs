@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Interoceptive engine: real-time telemetry for autonomic self-regulation.
@@ -19,7 +20,9 @@
 //! `HomeostaticSignals::from_interoceptive(&snapshot)` to convert the
 //! canonical signals into the form the gate and router expect.
 
-use std::collections::VecDeque;
+extern crate alloc;
+
+use alloc::collections::VecDeque;
 
 pub mod budget;
 pub mod power;

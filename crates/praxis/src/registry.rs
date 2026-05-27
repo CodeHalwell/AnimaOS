@@ -15,11 +15,17 @@
 //! | `clock`     | Returns the current Unix timestamp (ms)  |
 //! | `echo`      | Echoes the payload back unchanged        |
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::Mutex;
 
 use crate::{CircuitBreaker, ToolDriver, ToolEnvelope, ToolInvocationError};
+
+#[cfg(feature = "std")]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Built-in tool implementations ────────────────────────────────────────────
 
@@ -37,11 +43,22 @@ impl ToolDriver for ClockTool {
     }
 
     fn invoke(&self, _payload: &[u8]) -> Result<Vec<u8>, ToolInvocationError> {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as u64;
-        Ok(ms.to_le_bytes().to_vec())
+        #[cfg(feature = "std")]
+        {
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_millis() as u64;
+            Ok(ms.to_le_bytes().to_vec())
+        }
+        // microVM: no wall clock is available without a hardware timer driver,
+        // so the built-in tool returns a stable sentinel until the kernel
+        // supplies a tick source. Callers wanting real time should register
+        // their own tool.
+        #[cfg(not(feature = "std"))]
+        {
+            Ok(0u64.to_le_bytes().to_vec())
+        }
     }
 }
 
@@ -78,7 +95,8 @@ impl ToolDriver for TextIoTool {
     }
 
     fn invoke(&self, payload: &[u8]) -> Result<Vec<u8>, ToolInvocationError> {
-        let text = std::str::from_utf8(payload).map_err(|_| ToolInvocationError::InvalidPayload)?;
+        let text =
+            core::str::from_utf8(payload).map_err(|_| ToolInvocationError::InvalidPayload)?;
         let mut out = text.to_string();
         out.push('\n');
         Ok(out.into_bytes())
@@ -101,7 +119,7 @@ const DEFAULT_OPEN_THRESHOLD: u32 = 5;
 /// Registration, lookup, and dispatch are all thread-safe; the registry can be
 /// cloned (`Clone` shares the same underlying table via `Arc`).
 pub struct ToolRegistry {
-    entries: Arc<Mutex<HashMap<String, RegistryEntry>>>,
+    entries: Arc<Mutex<BTreeMap<String, RegistryEntry>>>,
 }
 
 impl Clone for ToolRegistry {
@@ -112,9 +130,9 @@ impl Clone for ToolRegistry {
     }
 }
 
-impl std::fmt::Debug for ToolRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let entries = self.entries.lock().unwrap();
+impl core::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let entries = self.entries.lock();
         f.debug_struct("ToolRegistry")
             .field("registered", &entries.len())
             .finish()
@@ -132,7 +150,7 @@ impl ToolRegistry {
     /// (`clock`, `echo`, `text-io`).
     pub fn new() -> Self {
         let registry = Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
         };
         registry.register(ClockTool);
         registry.register(EchoTool);
@@ -143,7 +161,7 @@ impl ToolRegistry {
     /// Creates an empty registry with no pre-registered tools.
     pub fn empty() -> Self {
         Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            entries: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -158,7 +176,7 @@ impl ToolRegistry {
             driver: Arc::new(driver),
             breaker: CircuitBreaker::new(),
         };
-        self.entries.lock().unwrap().insert(id, entry);
+        self.entries.lock().insert(id, entry);
     }
 
     /// Registers a pre-built `Arc<dyn ToolDriver>`.
@@ -168,35 +186,31 @@ impl ToolRegistry {
             driver,
             breaker: CircuitBreaker::new(),
         };
-        self.entries.lock().unwrap().insert(id, entry);
+        self.entries.lock().insert(id, entry);
     }
 
     // ── Discovery ─────────────────────────────────────────────────────────────
 
     /// Returns a clone of the driver for `id`, or `None` if unregistered.
     pub fn lookup(&self, id: &str) -> Option<Arc<dyn ToolDriver>> {
-        self.entries
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|e| Arc::clone(&e.driver))
+        self.entries.lock().get(id).map(|e| Arc::clone(&e.driver))
     }
 
     /// Returns a sorted list of all registered tool identifiers.
     pub fn list(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();
+        let mut ids: Vec<String> = self.entries.lock().keys().cloned().collect();
         ids.sort();
         ids
     }
 
     /// Returns the number of registered tools.
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().len()
     }
 
     /// Returns true when no tools are registered.
     pub fn is_empty(&self) -> bool {
-        self.entries.lock().unwrap().is_empty()
+        self.entries.lock().is_empty()
     }
 
     // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -212,32 +226,40 @@ impl ToolRegistry {
     /// - [`ToolInvocationError::InvalidPayload`] — tool rejected the payload.
     /// - [`ToolInvocationError::ExecutionFailed`] — tool failed internally.
     /// - A synthetic `ExecutionFailed("unknown tool: …")` when the tool is not registered.
+    #[cfg(feature = "std")]
     pub fn dispatch(&self, envelope: &ToolEnvelope) -> Result<Vec<u8>, ToolInvocationError> {
-        let mut entries = self.entries.lock().unwrap();
+        self.dispatch_at(envelope, std::time::Instant::now())
+    }
+
+    /// Dispatches a [`ToolEnvelope`] using an explicit clock tick.
+    ///
+    /// On std targets [`BreakerInstant`](crate::circuit::BreakerInstant) is
+    /// `std::time::Instant`; on no_std targets it is a `u64` millisecond tick
+    /// that the caller maintains.
+    pub fn dispatch_at(
+        &self,
+        envelope: &ToolEnvelope,
+        now: crate::circuit::BreakerInstant,
+    ) -> Result<Vec<u8>, ToolInvocationError> {
+        let mut entries = self.entries.lock();
         let entry = entries.get_mut(&envelope.tool_id).ok_or_else(|| {
             ToolInvocationError::ExecutionFailed(format!("unknown tool: {}", envelope.tool_id))
         })?;
 
-        // Check circuit breaker health.
-        entry.breaker.verify_pathway_health()?;
+        entry.breaker.verify_pathway_health_at(now)?;
 
-        // Invoke the tool.
         let result = entry.driver.invoke(&envelope.payload);
         match &result {
             Ok(_) => entry.breaker.record_success(),
             Err(ToolInvocationError::BreakerOpen) => {} // already open
-            Err(_) => entry.breaker.record_failure(DEFAULT_OPEN_THRESHOLD),
+            Err(_) => entry.breaker.record_failure_at(DEFAULT_OPEN_THRESHOLD, now),
         }
         result
     }
 
     /// Returns the current [`BreakerState`] for a tool, or `None` if unregistered.
     pub fn breaker_state(&self, id: &str) -> Option<crate::BreakerState> {
-        self.entries
-            .lock()
-            .unwrap()
-            .get(id)
-            .map(|e| e.breaker.state)
+        self.entries.lock().get(id).map(|e| e.breaker.state)
     }
 }
 

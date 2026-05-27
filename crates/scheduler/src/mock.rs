@@ -1,5 +1,9 @@
 //! Deterministic mock [`LlmBackend`] used for hosted-target development and tests.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec::Vec;
+
 use crate::backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
 };

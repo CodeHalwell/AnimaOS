@@ -20,6 +20,9 @@
 
 #![forbid(unsafe_code)]
 
+use alloc::string::String;
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -206,10 +209,13 @@ impl TraceCapture {
         invocation_id: impl Into<String>,
         route_id: impl Into<String>,
     ) -> Self {
+        #[cfg(feature = "std")]
         let started_at_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        #[cfg(not(feature = "std"))]
+        let started_at_secs = 0u64;
         Self {
             config,
             records: Vec::new(),

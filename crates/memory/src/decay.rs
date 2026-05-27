@@ -54,7 +54,7 @@ impl MemoryNode {
     pub fn activation_at(&self, t: f32) -> f32 {
         let modulator =
             1.0 + self.alpha * self.emotion.arousal + self.sigma * self.emotion.surprise;
-        let raw = self.initial_activation * (-self.lambda * t).exp() * modulator;
+        let raw = self.initial_activation * libm::expf(-self.lambda * t) * modulator;
         raw.max(SEMANTIC_FLOOR)
     }
 

@@ -20,9 +20,10 @@
 //! `Arc<std::sync::Mutex<ArcCacheInner>>`, making [`ArcCache`] cheaply
 //! cloneable and safe to share across threads.
 
-use std::collections::{HashMap, VecDeque};
-use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::hash::Hash;
+use spin::Mutex;
 
 // ── Promotion hint ────────────────────────────────────────────────────────────
 
@@ -247,13 +248,13 @@ where
     }
 }
 
-impl<K, V> std::fmt::Debug for ArcCache<K, V>
+impl<K, V> core::fmt::Debug for ArcCache<K, V>
 where
     K: Eq + Hash + Clone + Send + 'static,
     V: Clone + Send + 'static,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.lock().unwrap();
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let inner = self.inner.lock();
         f.debug_struct("ArcCache")
             .field("capacity", &inner.capacity())
             .field("len", &inner.len())
@@ -276,22 +277,22 @@ where
 
     /// Returns the configured capacity.
     pub fn capacity(&self) -> usize {
-        self.inner.lock().unwrap().capacity()
+        self.inner.lock().capacity()
     }
 
     /// Returns the total number of live cached items (|T1| + |T2|).
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().len()
     }
 
     /// Returns true when no items are cached.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
+        self.inner.lock().is_empty()
     }
 
     /// Inserts a key/value pair, running the ARC admission/eviction policy.
     pub fn insert(&self, key: K, value: V) {
-        self.inner.lock().unwrap().insert(key, value);
+        self.inner.lock().insert(key, value);
     }
 
     /// Retrieves a value and returns a [`PromotionHint`] indicating whether the
@@ -299,7 +300,7 @@ where
     ///
     /// Returns `None` on a complete cache miss.
     pub fn get_with_hint(&self, key: &K) -> Option<(V, PromotionHint)> {
-        self.inner.lock().unwrap().get(key)
+        self.inner.lock().get(key)
     }
 
     /// Retrieves a value (without the promotion hint).
@@ -317,7 +318,7 @@ where
     where
         F: FnMut(&K, &V) -> bool,
     {
-        self.inner.lock().unwrap().retain(f)
+        self.inner.lock().retain(f)
     }
 
     /// Computes the ARC hit rate on `trace`, treating missing values as
@@ -327,13 +328,9 @@ where
     where
         V: Default,
     {
-        self.inner.lock().unwrap().hit_rate_on_trace(trace)
+        self.inner.lock().hit_rate_on_trace(trace)
     }
 }
-
-// Silence the dead_code warning on the HashMap import used by inner state.
-#[allow(unused_imports)]
-use HashMap as _;
 
 #[cfg(test)]
 mod tests {
@@ -403,10 +400,10 @@ mod tests {
         cache.insert(1, 10); // T1: [1]
         cache.insert(2, 20); // T1: [1, 2]
         cache.insert(3, 30); // T1 full → evict 1 → B1: [1], T1: [2, 3]
-        let p_before = cache.inner.lock().unwrap().p;
+        let p_before = cache.inner.lock().p;
         // Re-insert 1: B1 ghost hit → p should increase.
         cache.insert(1, 10);
-        let p_after = cache.inner.lock().unwrap().p;
+        let p_after = cache.inner.lock().p;
         assert!(p_after >= p_before, "B1 ghost hit must not decrease p");
     }
 

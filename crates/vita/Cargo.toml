@@ -4,14 +4,46 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+# `std` enables host-OS modules: Unix-socket cortex bridge, JSON file-backed
+# identity store, std::thread-driven somatic loop, and the file-persistent
+# L3 archive path. Without `std` the crate is `no_std + alloc`-clean and
+# only the in-memory subsystems are reachable; the microVM kernel drives
+# the somatic loop manually via `LifecycleManager::run_sleep_cycle`.
+std = [
+    "memory/std",
+    "scheduler/std",
+    "interoception/std",
+    "senses/std",
+    "kv-controller/std",
+    "serde/std",
+    "serde_json/std",
+]
+
 [dependencies]
-memory = { path = "../memory" }
-interoception = { path = "../interoception" }
-scheduler = { path = "../scheduler" }
-senses = { path = "../senses" }
-kv-controller = { path = "../kv-controller" }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+libm = { version = "0.2", default-features = false }
+memory = { path = "../memory", default-features = false }
+interoception = { path = "../interoception", default-features = false }
+scheduler = { path = "../scheduler", default-features = false }
+senses = { path = "../senses", default-features = false }
+kv-controller = { path = "../kv-controller", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+# -------------------------------------------------------------------------
+# Epic E4.7 — Production hardening: soak harness binary
+# -------------------------------------------------------------------------
+# `vita-soak` is a long-running stress harness that drives
+# `LifecycleManager::run_sleep_cycle` in a loop and reports memory churn,
+# audit-log integrity, and per-cycle latency. CI runs it for 60 s on every
+# PR (see .github/workflows/ci.yml -> vita-soak); the 30-day production
+# soak runs the same binary with `--duration 2592000`.
+[[bin]]
+name = "vita-soak"
+path = "src/bin/vita_soak.rs"
+required-features = ["std"]

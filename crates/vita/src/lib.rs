@@ -1,17 +1,24 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Self-preservation plane: autonomous lifecycle director.
 
+extern crate alloc;
+
 pub mod audit;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 pub mod episodic;
 pub mod gate;
+#[cfg(feature = "std")]
 pub mod identity;
 pub mod kv_gate;
+#[cfg(feature = "std")]
 pub mod router;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
+#[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
@@ -25,6 +32,7 @@ pub use gate::{
     record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
     HomeostaticSignals, SemanticClass, ThresholdGate,
 };
+#[cfg(feature = "std")]
 pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
@@ -33,6 +41,7 @@ pub use kv_gate::{
     effective_budget_under_pressure, gate_working_context, gate_working_context_with_signals,
     ContextBlock, GatePassResult,
 };
+#[cfg(feature = "std")]
 pub use router::{
     build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
@@ -40,8 +49,12 @@ pub use router::{
 };
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::time::Duration;
+use spin::Mutex;
 
 use interoception::HomeostaticMonitor;
 use memory::{
@@ -50,6 +63,21 @@ use memory::{
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
 use sleep::{CompilationContext, DreamContext, PruningContext, ReplayContext};
+
+/// Builds an L1 demotion provenance record. Uses wall-clock time when `std`
+/// is enabled; otherwise stamps `0` (the microVM kernel injects its own
+/// timestamp before persisting to the L3 archive).
+#[inline]
+fn provenance_l1(key: &str) -> memory::Provenance {
+    #[cfg(feature = "std")]
+    {
+        memory::Provenance::now(memory::SourceTier::L1, key)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        memory::Provenance::at_ns(memory::SourceTier::L1, key, 0)
+    }
+}
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,8 +167,8 @@ pub struct LifecycleManager {
     iterations: u32,
 }
 
-impl std::fmt::Debug for LifecycleManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for LifecycleManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LifecycleManager")
             .field("agent_id", &self.agent_id)
             .field("state", &self.state)
@@ -159,7 +187,7 @@ impl std::fmt::Debug for LifecycleManager {
                 &self
                     .compilation_config
                     .as_ref()
-                    .map(|c| c.output_dir.display().to_string()),
+                    .map(|c| c.output_dir.as_str()),
             )
             .field("backend", &self.backend.id())
             .field("audit_len", &self.audit.len())
@@ -209,13 +237,13 @@ impl LifecycleManager {
     /// Clones share state with the live token, so tripping the clone cancels
     /// the running backend stream.
     pub fn current_cancel_handle(&self) -> CancellationToken {
-        self.task_cancel.lock().expect("poisoned").clone()
+        self.task_cancel.lock().clone()
     }
 
     /// Trips the cancellation token for the dispatch currently in flight.
     /// Safe to call from any thread that holds a reference to the manager.
     pub fn cancel_current_task(&self) {
-        self.task_cancel.lock().expect("poisoned").cancel();
+        self.task_cancel.lock().cancel();
     }
 
     /// Installs a fresh [`CancellationToken`] and returns a clone bound to it.
@@ -224,7 +252,7 @@ impl LifecycleManager {
     fn install_fresh_cancel(&self) -> CancellationToken {
         let fresh = CancellationToken::new();
         let handle = fresh.clone();
-        *self.task_cancel.lock().expect("poisoned") = fresh;
+        *self.task_cancel.lock() = fresh;
         handle
     }
 
@@ -310,7 +338,7 @@ impl LifecycleManager {
                         let id = self.next_archive_id;
                         self.next_archive_id += 1;
                         let item = memory::archive_memory_node(id, key, node);
-                        let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
+                        let prov = provenance_l1(key.as_str());
                         let _ = l3.demote(item, prov);
                     }
                 }
@@ -403,7 +431,7 @@ impl LifecycleManager {
                     let id = self.next_archive_id;
                     self.next_archive_id += 1;
                     let item = memory::archive_memory_node(id, key, node);
-                    let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
+                    let prov = provenance_l1(key.as_str());
                     let _ = l3.demote(item, prov);
                 }
             }
@@ -592,7 +620,15 @@ pub async fn somatic_execution_loop(
         };
 
         if is_idle {
+            // Yield briefly when idle. Under `std` this delegates to the OS
+            // scheduler; on `no_std` (microVM) the caller's Embassy executor
+            // drives polling, so we spin-wait without a syscall.
+            #[cfg(feature = "std")]
             std::thread::sleep(Duration::from_millis(1));
+            #[cfg(not(feature = "std"))]
+            {
+                let _ = Duration::from_millis(1);
+            }
         }
 
         lifecycle.iterations = lifecycle.iterations.saturating_add(1);
@@ -1451,7 +1487,7 @@ mod tests {
 
         let mut m = manager("compile-log-agent", None);
         m.compilation_config = Some(memory::CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,
         });
@@ -1502,7 +1538,7 @@ mod tests {
         });
 
         m.compilation_config = Some(memory::CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,
         });
@@ -1548,7 +1584,7 @@ mod tests {
         ];
 
         let cfg = memory::CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,
         };

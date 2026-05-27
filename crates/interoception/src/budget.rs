@@ -21,7 +21,9 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 // ── Spend record ──────────────────────────────────────────────────────────────
 
@@ -47,7 +49,6 @@ pub struct SpendRecord {
 ///
 /// ```
 /// use interoception::CostTable;
-/// use std::collections::HashMap;
 /// let mut ct = CostTable::default();
 /// ct.0.insert("claude-sonnet-4-6".into(), 3.0);  // $3 / 1 M tokens
 /// ct.0.insert("*".into(), 1.0);                  // default $1 / 1 M tokens
@@ -55,7 +56,7 @@ pub struct SpendRecord {
 /// assert!((ct.cost_usd(1_000_000, "unknown-model") - 1.0).abs() < 1e-9);
 /// ```
 #[derive(Debug, Clone, Default)]
-pub struct CostTable(pub HashMap<String, f64>);
+pub struct CostTable(pub BTreeMap<String, f64>);
 
 impl CostTable {
     /// Returns the cost in USD for `tokens` tokens on `model`.
@@ -143,9 +144,9 @@ impl FinancialBudgetSensor {
         self.ledger
             .retain(|r| r.timestamp_ns / DAY_NS == current_day);
         self.ledger.push(SpendRecord {
-            provider: provider.to_owned(),
+            provider: provider.to_string(),
             tokens,
-            model: model.to_owned(),
+            model: model.to_string(),
             timestamp_ns,
         });
     }
@@ -211,7 +212,7 @@ mod tests {
 
     fn sensor_at_ten_dollars_per_million() -> FinancialBudgetSensor {
         let mut costs = CostTable::default();
-        costs.0.insert("*".to_owned(), 10.0); // $10 / 1 M tokens
+        costs.0.insert("*".to_string(), 10.0); // $10 / 1 M tokens
         FinancialBudgetSensor::new(
             BudgetConfig {
                 daily_usd_limit: 10.0,
@@ -285,8 +286,8 @@ mod tests {
     #[test]
     fn exact_model_match_takes_priority_over_wildcard() {
         let mut costs = CostTable::default();
-        costs.0.insert("premium-model".to_owned(), 20.0);
-        costs.0.insert("*".to_owned(), 1.0);
+        costs.0.insert("premium-model".to_string(), 20.0);
+        costs.0.insert("*".to_string(), 1.0);
         let sensor = FinancialBudgetSensor::new(
             BudgetConfig {
                 daily_usd_limit: 20.0,
@@ -312,7 +313,7 @@ mod tests {
     #[test]
     fn cost_table_wildcard_used_when_model_not_listed() {
         let mut costs = CostTable::default();
-        costs.0.insert("*".to_owned(), 5.0); // $5 / 1 M
+        costs.0.insert("*".to_string(), 5.0); // $5 / 1 M
         let ct = costs;
         assert!((ct.cost_usd(1_000_000, "any-unknown-model") - 5.0).abs() < 1e-9);
     }

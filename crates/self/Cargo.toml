@@ -10,3 +10,9 @@ license.workspace = true
 [lib]
 name = "anima_self"
 path = "src/lib.rs"
+
+[features]
+default = ["std"]
+# `std` enables std-host conveniences (none required today, but reserved for
+# parity with the other higher crates). The crate itself is core-only.
+std = []

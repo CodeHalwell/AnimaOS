@@ -122,6 +122,15 @@ impl PowerSensor {
     ///
     /// Returns `None` if sysfs is absent, the directory is empty, any read
     /// fails, or no `Battery`-type supply is found.
+    ///
+    /// On `no_std` builds (the microVM target) sysfs is unreachable so this
+    /// always returns `None` and the caller falls back to `ac_power()`.
+    #[cfg(not(feature = "std"))]
+    fn try_read_sysfs() -> Option<PowerReading> {
+        None
+    }
+
+    #[cfg(feature = "std")]
     fn try_read_sysfs() -> Option<PowerReading> {
         use std::fs;
         let dir = fs::read_dir("/sys/class/power_supply").ok()?;

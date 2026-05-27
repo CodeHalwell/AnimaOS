@@ -4,9 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std", "wasm-sandbox"]
+# `std` enables hosted-target conveniences: `std::time::Instant`-based circuit
+# breaker timing and the tool registry's threading-friendly types. Without
+# `std` the crate is `no_std + alloc`-clean; circuit-breaker timing then runs
+# off caller-supplied `u64` millisecond ticks.
+std = []
+# `wasm-sandbox` pulls in `wasmtime`. Wasmtime is std-only so this feature
+# implies `std`. The microVM target builds praxis without it (the WASI sandbox
+# isn't reachable from inside the kernel anyway).
+wasm-sandbox = ["std", "dep:wasmtime", "dep:anyhow"]
+
 [dependencies]
-anyhow.workspace = true
-wasmtime.workspace = true
+anyhow = { workspace = true, optional = true }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+wasmtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

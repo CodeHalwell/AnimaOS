@@ -53,6 +53,9 @@
 
 #![forbid(unsafe_code)]
 
+use alloc::format;
+use alloc::string::{String, ToString};
+
 use crate::{AuditEntry, AuditLog};
 
 // ── Event features ────────────────────────────────────────────────────────────

@@ -32,6 +32,9 @@
 
 #![forbid(unsafe_code)]
 
+use alloc::string::ToString;
+use alloc::vec::Vec;
+
 use interoception::InteroceptiveSignals;
 use kv_controller::{BlockFeatures, BlockRole, ControllerState, KvController, KvGateDecision};
 
@@ -216,7 +219,7 @@ pub fn effective_budget_under_pressure(nominal_budget: usize, memory_pressure: f
     let excess = (pressure - 0.5) * 2.0; // normalise to [0.0, 1.0]
     let max_reduction = 0.30_f32;
     let factor = 1.0 - max_reduction * excess;
-    let effective = (nominal_budget as f32 * factor).ceil() as usize;
+    let effective = libm::ceilf(nominal_budget as f32 * factor) as usize;
     effective.max(1)
 }
 

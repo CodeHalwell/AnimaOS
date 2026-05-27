@@ -10,6 +10,9 @@
 //! [`AuditEntry::SleepPhaseCompleted`]) were added to support audited end-to-end
 //! tracing of each sleep cycle (exit criterion 1 of E3.4).
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// A single observable lifecycle event.
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);

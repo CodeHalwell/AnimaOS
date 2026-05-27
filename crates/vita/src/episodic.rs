@@ -40,7 +40,10 @@
 
 #![forbid(unsafe_code)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use memory::{
     ArchivalEntry, ArchivedItem, DemotionOutcome, L3Archive, L3ArchiveError, Provenance, SourceTier,
@@ -101,11 +104,22 @@ impl EpisodeRecord {
     }
 
     /// Returns the current wall-clock time as nanoseconds since UNIX epoch.
+    ///
+    /// Available only with the `std` feature; `no_std` builds receive `0` and
+    /// must rely on caller-supplied `started_at_ns` / `ended_at_ns` values.
     pub fn now_ns() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
+        #[cfg(feature = "std")]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            0
+        }
     }
 }
 
@@ -176,13 +190,13 @@ pub fn unpack_episode(entry: &ArchivalEntry) -> Option<EpisodeRecord> {
         return None;
     }
     Some(EpisodeRecord {
-        invocation_id: parts[0].to_owned(),
-        event_class: parts[1].to_owned(),
-        route_id: parts[2].to_owned(),
+        invocation_id: parts[0].to_string(),
+        event_class: parts[1].to_string(),
+        route_id: parts[2].to_string(),
         started_at_ns,
         ended_at_ns,
-        outcome: parts[3].to_owned(),
-        summary: parts[4].to_owned(),
+        outcome: parts[3].to_string(),
+        summary: parts[4].to_string(),
     })
 }
 
@@ -204,7 +218,16 @@ pub fn make_episode_provenance(record: &EpisodeRecord) -> Provenance {
         "{}|{}|{}|{}|{}",
         record.invocation_id, record.event_class, record.route_id, record.outcome, record.summary,
     );
-    Provenance::now(SourceTier::Episode, &source_key)
+    // `no_std` builds substitute the record's own `ended_at_ns` for the
+    // wall-clock timestamp `Provenance::now` would normally synthesise.
+    #[cfg(feature = "std")]
+    {
+        Provenance::now(SourceTier::Episode, &source_key)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        Provenance::at_ns(SourceTier::Episode, &source_key, record.ended_at_ns)
+    }
 }
 
 // ── Retrieval ─────────────────────────────────────────────────────────────
@@ -320,7 +343,7 @@ impl EpisodeStore {
         // Descending similarity, then ascending invocation_id for determinism.
         scored.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
                 .then_with(|| a.1.invocation_id.cmp(&b.1.invocation_id))
         });
         scored.truncate(query.k);
@@ -339,8 +362,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mag_a: f32 = libm::sqrtf(a.iter().map(|x| x * x).sum::<f32>());
+    let mag_b: f32 = libm::sqrtf(b.iter().map(|x| x * x).sum::<f32>());
     if mag_a < 1e-8 || mag_b < 1e-8 {
         0.0
     } else {
@@ -365,13 +388,13 @@ mod tests {
 
     fn episode(id: &str, outcome: &str, summary: &str) -> EpisodeRecord {
         EpisodeRecord {
-            invocation_id: id.to_owned(),
-            event_class: "UserQuery".to_owned(),
-            route_id: "cheap-local".to_owned(),
+            invocation_id: id.to_string(),
+            event_class: "UserQuery".to_string(),
+            route_id: "cheap-local".to_string(),
             started_at_ns: 1_000_000_000,
             ended_at_ns: 2_000_000_000,
-            outcome: outcome.to_owned(),
-            summary: summary.to_owned(),
+            outcome: outcome.to_string(),
+            summary: summary.to_string(),
         }
     }
 
@@ -453,22 +476,22 @@ mod tests {
 
         // Store two episodes with distinct embeddings.
         let success_rec = EpisodeRecord {
-            invocation_id: "success-inv".to_owned(),
-            event_class: "UserQuery".to_owned(),
-            route_id: "cheap-local".to_owned(),
+            invocation_id: "success-inv".to_string(),
+            event_class: "UserQuery".to_string(),
+            route_id: "cheap-local".to_string(),
             started_at_ns: 1_000_000_000,
             ended_at_ns: 1_100_000_000,
-            outcome: "success".to_owned(),
-            summary: "task completed".to_owned(),
+            outcome: "success".to_string(),
+            summary: "task completed".to_string(),
         };
         let fault_rec = EpisodeRecord {
-            invocation_id: "fault-inv".to_owned(),
-            event_class: "OperatorCommand".to_owned(),
-            route_id: "frontier".to_owned(),
+            invocation_id: "fault-inv".to_string(),
+            event_class: "OperatorCommand".to_string(),
+            route_id: "frontier".to_string(),
             started_at_ns: 2_000_000_000,
             ended_at_ns: 2_200_000_000,
-            outcome: "fault".to_owned(),
-            summary: "cortex crashed".to_owned(),
+            outcome: "fault".to_string(),
+            summary: "cortex crashed".to_string(),
         };
 
         EpisodeStore::archive(&mut archive, 1, &success_rec).expect("archive success_rec");
@@ -522,26 +545,26 @@ mod tests {
 
         // Construct an episode with `ended_at_ns` far in the past (1 ns from epoch).
         let old_rec = EpisodeRecord {
-            invocation_id: "old-inv".to_owned(),
-            event_class: "UserQuery".to_owned(),
-            route_id: "cheap-local".to_owned(),
+            invocation_id: "old-inv".to_string(),
+            event_class: "UserQuery".to_string(),
+            route_id: "cheap-local".to_string(),
             started_at_ns: 0,
             ended_at_ns: 1, // 1 ns after UNIX epoch — ancient
-            outcome: "success".to_owned(),
-            summary: "ancient episode".to_owned(),
+            outcome: "success".to_string(),
+            summary: "ancient episode".to_string(),
         };
 
         // Build the "fresh" episode with ended_at_ns set to the current time so
         // it always passes a 1-hour recency cutoff regardless of when the test runs.
         let now = EpisodeRecord::now_ns();
         let fresh_rec = EpisodeRecord {
-            invocation_id: "fresh-inv".to_owned(),
-            event_class: "UserQuery".to_owned(),
-            route_id: "cheap-local".to_owned(),
+            invocation_id: "fresh-inv".to_string(),
+            event_class: "UserQuery".to_string(),
+            route_id: "cheap-local".to_string(),
             started_at_ns: now,
             ended_at_ns: now,
-            outcome: "success".to_owned(),
-            summary: "recent episode".to_owned(),
+            outcome: "success".to_string(),
+            summary: "recent episode".to_string(),
         };
 
         EpisodeStore::archive(&mut archive, 1, &old_rec).expect("archive old");
@@ -618,20 +641,20 @@ mod tests {
     #[test]
     fn episode_record_helper_methods_are_correct() {
         let rec = EpisodeRecord {
-            invocation_id: "inv-h".to_owned(),
-            event_class: "UserQuery".to_owned(),
-            route_id: "mid-tier".to_owned(),
+            invocation_id: "inv-h".to_string(),
+            event_class: "UserQuery".to_string(),
+            route_id: "mid-tier".to_string(),
             started_at_ns: 1_000_000_000,
             ended_at_ns: 3_000_000_000,
-            outcome: "success".to_owned(),
-            summary: "helpers".to_owned(),
+            outcome: "success".to_string(),
+            summary: "helpers".to_string(),
         };
         assert!(rec.is_success());
         let dur = rec.duration_secs();
         assert!((dur - 2.0).abs() < 1e-6, "duration must be 2.0 s");
 
         let fault = EpisodeRecord {
-            outcome: "fault".to_owned(),
+            outcome: "fault".to_string(),
             ..rec.clone()
         };
         assert!(!fault.is_success());

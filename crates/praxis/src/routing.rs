@@ -1,5 +1,8 @@
 //! Length-robust relative routing for efferent tool selection.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 /// Candidate tool with an associated relevance score for a given query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCandidate {

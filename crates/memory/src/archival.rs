@@ -7,10 +7,12 @@
 //!   E2.6 feature set: demotion provenance, deterministic retrieval, and
 //!   crash-safe atomic flushing.
 
-use std::collections::HashMap;
-use std::io;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +101,7 @@ impl ArchivalStore {
             .iter()
             .map(|item| (cosine_similarity(query, &item.embedding), item))
             .collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
         scored.into_iter().take(k).map(|(_, item)| item).collect()
     }
 }
@@ -133,17 +135,29 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// Constructs a provenance record stamped with the current wall-clock time.
-    pub fn now(source_tier: SourceTier, source_key: &str) -> Self {
-        let demoted_at_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
+    /// Constructs a provenance record stamped with `demoted_at_ns` directly.
+    ///
+    /// Use this from any execution context (incl. `no_std` builds).
+    pub fn at_ns(source_tier: SourceTier, source_key: &str, demoted_at_ns: u64) -> Self {
         Self {
             source_tier,
             source_key: source_key.to_string(),
             demoted_at_ns,
         }
+    }
+
+    /// Constructs a provenance record stamped with the current wall-clock time.
+    ///
+    /// Available only with the `std` feature; `no_std` callers must use
+    /// [`Provenance::at_ns`] with a caller-supplied timestamp.
+    #[cfg(feature = "std")]
+    pub fn now(source_tier: SourceTier, source_key: &str) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let demoted_at_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        Self::at_ns(source_tier, source_key, demoted_at_ns)
     }
 }
 
@@ -178,13 +192,21 @@ pub enum L3ArchiveError {
     /// The archive has reached its configured capacity limit.
     AtCapacity,
     /// An I/O error occurred while reading or writing the backing file.
-    Io(io::Error),
+    ///
+    /// Only constructed under the `std` feature; the variant is still defined
+    /// in `no_std` builds so external callers can match exhaustively, but the
+    /// payload is `String` (not `io::Error`) when std is unavailable.
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
+    /// I/O error (no_std representation: opaque message).
+    #[cfg(not(feature = "std"))]
+    Io(String),
     /// The on-disk snapshot could not be deserialized.
     Corrupt(String),
 }
 
-impl std::fmt::Display for L3ArchiveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for L3ArchiveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             L3ArchiveError::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {expected}, got {got}")
@@ -196,8 +218,9 @@ impl std::fmt::Display for L3ArchiveError {
     }
 }
 
-impl std::error::Error for L3ArchiveError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+#[cfg(feature = "std")]
+impl core::error::Error for L3ArchiveError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         if let L3ArchiveError::Io(e) = self {
             Some(e)
         } else {
@@ -227,18 +250,35 @@ struct ArchiveSnapshot {
 /// (descending cosine similarity, ascending entry id) (E2.6 exit criterion 2).
 #[derive(Clone)]
 pub struct L3Archive {
-    path: PathBuf,
+    #[cfg(feature = "std")]
+    path: Option<PathBuf>,
     expected_dim: usize,
     capacity: usize,
-    index: HashMap<u64, ArchivalEntry>,
+    index: BTreeMap<u64, ArchivalEntry>,
 }
 
 impl L3Archive {
+    /// Creates an entirely in-memory archive that never persists.
+    ///
+    /// This is the only constructor available in `no_std` builds (the microVM
+    /// target). Std builds also expose [`L3Archive::open`] for file-backed
+    /// persistence.
+    pub fn in_memory(expected_dim: usize, capacity: usize) -> Self {
+        Self {
+            #[cfg(feature = "std")]
+            path: None,
+            expected_dim,
+            capacity,
+            index: BTreeMap::new(),
+        }
+    }
+
     /// Opens (or creates) an archive at `path`.
     ///
     /// If the file already exists its JSON snapshot is loaded and the stored
     /// `expected_dim` is validated against the supplied value.  If the file does
     /// not exist an empty archive is returned.
+    #[cfg(feature = "std")]
     pub fn open(path: &Path, expected_dim: usize, capacity: usize) -> Result<Self, L3ArchiveError> {
         if path.exists() {
             let bytes = std::fs::read(path).map_err(L3ArchiveError::Io)?;
@@ -256,17 +296,17 @@ impl L3Archive {
                 .map(|e| (e.item.id, e))
                 .collect();
             Ok(Self {
-                path: path.to_path_buf(),
+                path: Some(path.to_path_buf()),
                 expected_dim,
                 capacity,
                 index,
             })
         } else {
             Ok(Self {
-                path: path.to_path_buf(),
+                path: Some(path.to_path_buf()),
                 expected_dim,
                 capacity,
-                index: HashMap::new(),
+                index: BTreeMap::new(),
             })
         }
     }
@@ -319,7 +359,10 @@ impl L3Archive {
         }
         self.index
             .insert(item.id, ArchivalEntry { item, provenance });
-        self.flush()?;
+        #[cfg(feature = "std")]
+        {
+            self.flush()?;
+        }
         Ok(DemotionOutcome::Inserted)
     }
 
@@ -342,7 +385,7 @@ impl L3Archive {
         // Sort descending by similarity, then ascending by id for determinism.
         scored.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
                 .then_with(|| a.1.cmp(&b.1))
         });
         scored.into_iter().take(k).map(|(_, _, e)| e).collect()
@@ -352,7 +395,14 @@ impl L3Archive {
     ///
     /// The snapshot is first written to a `.tmp`-suffixed path, then renamed
     /// over the target path so readers never observe a partial write.
+    ///
+    /// In-memory archives (those created via [`L3Archive::in_memory`]) have no
+    /// backing file; `flush` is a no-op in that case.
+    #[cfg(feature = "std")]
     pub fn flush(&self) -> Result<(), L3ArchiveError> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(());
+        };
         let snapshot = ArchiveSnapshot {
             expected_dim: self.expected_dim,
             capacity: self.capacity,
@@ -362,13 +412,13 @@ impl L3Archive {
             serde_json::to_string(&snapshot).map_err(|e| L3ArchiveError::Corrupt(e.to_string()))?;
 
         // Build a sibling .tmp path.
-        let mut tmp_path = self.path.clone();
-        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        let mut tmp_path = path.clone();
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
         name.push(".tmp");
         tmp_path.set_file_name(name);
 
         std::fs::write(&tmp_path, json.as_bytes()).map_err(L3ArchiveError::Io)?;
-        std::fs::rename(&tmp_path, &self.path).map_err(L3ArchiveError::Io)?;
+        std::fs::rename(&tmp_path, path).map_err(L3ArchiveError::Io)?;
         Ok(())
     }
 }
@@ -462,8 +512,8 @@ pub fn retrieve_top_k_from_l3_for_l2(
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_a: f32 = libm::sqrtf(a.iter().map(|x| x * x).sum::<f32>());
+    let norm_b: f32 = libm::sqrtf(b.iter().map(|x| x * x).sum::<f32>());
     if norm_a == 0.0 || norm_b == 0.0 {
         0.0
     } else {

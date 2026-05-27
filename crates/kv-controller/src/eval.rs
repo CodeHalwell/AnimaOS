@@ -26,6 +26,8 @@
 
 #![forbid(unsafe_code)]
 
+use alloc::vec::Vec;
+
 use crate::controller::KvController;
 use crate::features::{BlockFeatures, BlockRole};
 
@@ -106,7 +108,7 @@ impl NeedleBenchmarkConfig {
             (0..self.needle_count).map(|i| i * step.max(1)).collect()
         };
 
-        let needle_set: std::collections::HashSet<usize> = needle_indices.into_iter().collect();
+        let needle_set: alloc::collections::BTreeSet<usize> = needle_indices.into_iter().collect();
 
         (0..self.total_blocks)
             .map(|i| {

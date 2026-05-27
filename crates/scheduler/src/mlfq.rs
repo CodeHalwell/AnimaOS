@@ -12,7 +12,9 @@
 //! Set `boost_interval = 0` (the default) to disable the boost (useful in
 //! unit tests that exercise a single priority tier).
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::backend::{CancellationToken, LlmBackend, LlmBackendError, StreamingCompletion};
 use crate::Task;

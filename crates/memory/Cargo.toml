@@ -4,11 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+# `std` enables host-OS persistence paths: file-backed L3 archive snapshots
+# (`L3Archive::open` / `flush`) and the training-corpus JSONL writer in
+# `compilation::write_format`. Without `std` the crate is `no_std + alloc`-
+# clean: the L3 archive is in-memory only (via `L3Archive::in_memory`) and
+# the compilation phase emits pairs in-memory without flushing to disk.
+std = ["serde/std", "serde_json/std", "scheduler/std"]
+
 [dependencies]
-scc = "3.7.1"
-scheduler = { version = "0.1.0", path = "../scheduler" }
-serde = { workspace = true }
-serde_json = { workspace = true }
+libm = { version = "0.2", default-features = false }
+scheduler = { version = "0.1.0", path = "../scheduler", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 
 [dev-dependencies]
 criterion.workspace = true

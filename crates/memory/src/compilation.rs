@@ -26,8 +26,10 @@
 //! 1. Output corpora validate against the documented schemas above.
 //! 2. Emergency consolidation can trigger and recover under stress injection.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -111,8 +113,10 @@ pub struct ChainOfThoughtRecord {
 pub struct CompilationConfig {
     /// Directory under which the JSONL corpus files are written.
     ///
-    /// Created if it does not yet exist.
-    pub output_dir: PathBuf,
+    /// Created if it does not yet exist. Held as a `String` so the type is
+    /// portable between the hosted target (`std::fs`) and the microVM target
+    /// (no filesystem; file output is silently skipped).
+    pub output_dir: String,
     /// Formats to emit.  An empty list disables file output (useful for tests
     /// that only need the in-memory `TrainingPair` list).
     pub formats: Vec<TrainingFormat>,
@@ -124,7 +128,7 @@ pub struct CompilationConfig {
 impl Default for CompilationConfig {
     fn default() -> Self {
         Self {
-            output_dir: PathBuf::from("training_corpus"),
+            output_dir: String::from("training_corpus"),
             formats: vec![
                 TrainingFormat::Alpaca,
                 TrainingFormat::Conversation,
@@ -200,11 +204,11 @@ pub enum AuditTraceEntry {
 pub fn compile_traces_to_pairs(
     entries: &[AuditTraceEntry],
     config: &CompilationConfig,
-) -> (CompilationReport, Vec<TrainingPair>, Vec<io::Error>) {
+) -> (CompilationReport, Vec<TrainingPair>, Vec<String>) {
     // ── 1. Pair-extraction ────────────────────────────────────────────────────
     // Build an index of TaskStarted entries keyed by task_id.
-    use std::collections::HashMap;
-    let mut started: HashMap<u64, (u8, String)> = HashMap::new();
+    use alloc::collections::BTreeMap;
+    let mut started: BTreeMap<u64, (u8, String)> = BTreeMap::new();
     let mut pairs: Vec<TrainingPair> = Vec::new();
 
     for entry in entries {
@@ -235,19 +239,22 @@ pub fn compile_traces_to_pairs(
     let pairs_compiled = pairs.len();
     let entries_processed = entries.len();
 
-    // ── 2. File output ────────────────────────────────────────────────────────
+    // ── 2. File output (std-only) ─────────────────────────────────────────────
     let mut files_written = 0usize;
-    let mut errors: Vec<io::Error> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
+    #[cfg(feature = "std")]
     if !config.formats.is_empty() && !pairs.is_empty() {
+        use std::path::Path;
+        let dir = Path::new(&config.output_dir);
         // Ensure the output directory exists.
-        if let Err(e) = std::fs::create_dir_all(&config.output_dir) {
-            errors.push(e);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            errors.push(e.to_string());
         } else {
             for &fmt in &config.formats {
-                match write_format(&config.output_dir, fmt, &pairs, config.append) {
+                match write_format(dir, fmt, &pairs, config.append) {
                     Ok(()) => files_written += 1,
-                    Err(e) => errors.push(e),
+                    Err(e) => errors.push(e.to_string()),
                 }
             }
         }
@@ -271,20 +278,22 @@ pub fn compile_traces_to_pairs(
 pub fn emergency_consolidate(
     entries: &[AuditTraceEntry],
     config: &CompilationConfig,
-) -> (CompilationReport, Vec<TrainingPair>, Vec<io::Error>) {
+) -> (CompilationReport, Vec<TrainingPair>, Vec<String>) {
     let (mut report, pairs, errors) = compile_traces_to_pairs(entries, config);
     report.emergency_consolidation = true;
     (report, pairs, errors)
 }
 
-// ── Format writers ────────────────────────────────────────────────────────────
+// ── Format writers (std-only) ─────────────────────────────────────────────────
 
+#[cfg(feature = "std")]
 fn write_format(
-    dir: &Path,
+    dir: &std::path::Path,
     fmt: TrainingFormat,
     pairs: &[TrainingPair],
     append: bool,
-) -> io::Result<()> {
+) -> std::io::Result<()> {
+    use std::io;
     let filename = format!("{}.jsonl", fmt.filename_stem());
     let target = dir.join(&filename);
     let tmp = dir.join(format!("{}.tmp", filename));
@@ -480,7 +489,7 @@ mod tests {
 
         let entries = make_entries(&[(1, 0, "Question", "First step\nFinal answer")]);
         let config = CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![
                 TrainingFormat::Alpaca,
                 TrainingFormat::Conversation,
@@ -529,7 +538,7 @@ mod tests {
         let entries = make_entries(&[(1, 0, "p", "r")]);
         let config = CompilationConfig {
             formats: vec![],
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             append: false,
         };
         let (report, _, errors) = compile_traces_to_pairs(&entries, &config);
@@ -547,7 +556,7 @@ mod tests {
 
         let entries = make_entries(&[(99, 0, "urgent prompt", "urgent response")]);
         let config = CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![TrainingFormat::Alpaca],
             append: false,
         };
@@ -603,7 +612,7 @@ mod tests {
         let e2 = make_entries(&[(2, 0, "second", "answer2")]);
 
         let cfg = CompilationConfig {
-            output_dir: dir.clone(),
+            output_dir: dir.to_string_lossy().into_owned(),
             formats: vec![TrainingFormat::Alpaca],
             append: true,
         };

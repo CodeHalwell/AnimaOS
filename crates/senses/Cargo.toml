@@ -3,3 +3,13 @@ name = "senses"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = ["std"]
+# `std` is reserved for future host-OS integration (Unix socket bridge etc.);
+# the crate body is `no_std + alloc`-clean. The internal queue uses
+# `spin::Mutex`, which works in both targets.
+std = []
+
+[dependencies]
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }

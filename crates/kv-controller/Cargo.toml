@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Learned KV-cache gating controller — Epic E5.4"
 
+[features]
+default = ["std"]
+std = ["serde/std", "serde_json/std"]
+
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+libm = { version = "0.2", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 
 [dev-dependencies]

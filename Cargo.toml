@@ -23,6 +23,9 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `default-features = false` so consumers can opt out of `std` for the
+# microVM target. The default still enables `std` because every consumer
+# pulls in the `derive` feature here.
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false }
 wasmtime = { version = "43", default-features = true }

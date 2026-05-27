@@ -4,6 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["std"]
+# `std` enables hosted-target conveniences (currently nothing beyond the
+# default `String` / `Vec` access; reserved for future async-executor glue).
+# The crate body is `no_std + alloc`-clean either way.
+std = []
+# `kani-harness` compiles in the symbolic-verification entry points used by
+# `cargo kani --features kani-harness`. The harness functions are inert
+# (`#[kani::proof]`) under a normal build, so this feature is safe to enable
+# on a hosted build for IDE inspection.
+kani-harness = []
+
 [dev-dependencies]
 criterion.workspace = true
 

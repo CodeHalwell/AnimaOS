@@ -31,6 +31,11 @@
 //! 1. Candidate yield is logged and monotonic-reproducible per seed.
 //! 2. Bad candidates (similarity below threshold) are filtered out.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::archival::L3Archive;
 
 // ── Seeded PRNG ───────────────────────────────────────────────────────────────
@@ -172,8 +177,7 @@ pub fn run_dream_walk(l3: &L3Archive, config: &DreamConfig) -> (DreamReport, Vec
     let mut rng = Xorshift64::new(config.seed);
     let mut steps_taken = 0usize;
     // Map from dedup key → best AssociativeEdge seen so far.
-    let mut edge_map: std::collections::HashMap<String, AssociativeEdge> =
-        std::collections::HashMap::new();
+    let mut edge_map: BTreeMap<String, AssociativeEdge> = BTreeMap::new();
 
     for _ in 0..config.num_walks {
         let mut current_idx = rng.next_usize(entries.len());
@@ -202,7 +206,7 @@ pub fn run_dream_walk(l3: &L3Archive, config: &DreamConfig) -> (DreamReport, Vec
             // Sort by descending similarity, then ascending index for determinism.
             scored.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .unwrap_or(core::cmp::Ordering::Equal)
                     .then_with(|| a.0.cmp(&b.0))
             });
 
@@ -234,7 +238,7 @@ pub fn run_dream_walk(l3: &L3Archive, config: &DreamConfig) -> (DreamReport, Vec
     candidates.sort_by(|a, b| {
         b.similarity
             .partial_cmp(&a.similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .unwrap_or(core::cmp::Ordering::Equal)
             .then_with(|| a.from_key.cmp(&b.from_key))
             .then_with(|| a.to_key.cmp(&b.to_key))
     });
@@ -257,8 +261,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_a: f32 = libm::sqrtf(a.iter().map(|x| x * x).sum::<f32>());
+    let norm_b: f32 = libm::sqrtf(b.iter().map(|x| x * x).sum::<f32>());
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
@@ -502,7 +506,7 @@ mod tests {
         let (_, candidates) = run_dream_walk(&l3, &cfg);
         let sims: Vec<f32> = candidates.iter().map(|e| e.similarity).collect();
         let mut sorted = sims.clone();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(core::cmp::Ordering::Equal));
         assert_eq!(
             sims, sorted,
             "edges must be sorted by descending similarity"

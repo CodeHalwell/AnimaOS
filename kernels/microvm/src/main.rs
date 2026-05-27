@@ -1,6 +1,6 @@
-//! AnimaOS Stage 4 — microVM UEFI kernel (E4.1 → E4.2 → E4.3 → E4.4).
+//! AnimaOS Stage 4 — microVM UEFI kernel (E4.1 → E4.2 → E4.3 → E4.4 → E4.5).
 //!
-//! This binary demonstrates the deliverables of E4.1, E4.2, E4.3, and E4.4.
+//! This binary demonstrates the deliverables of E4.1, E4.2, E4.3, E4.4, and E4.5.
 //!
 //! ## E4.1 deliverables (carried forward)
 //!
@@ -56,14 +56,27 @@
 //! 16550 UART at 0x3F8 and forwards bytes to the device given by `-serial`
 //! (in CI: `-serial file:/tmp/qemu-serial.txt`).
 //!
+//! ## E4.5 deliverables (new)
+//!
+//! 8. **S4.5 — Higher crates ported to microVM**: every Stage 1–3 higher
+//!    crate (`anima-self`, `interoception`, `memory`, `praxis`, `scheduler`,
+//!    `senses`, `vita`) is built with `default-features = false` so its
+//!    `no_std + alloc` surface lights up on `x86_64-unknown-uefi`. Phase 7
+//!    calls `sleep_demo::run_microvm_sleep_cycle` to drive one complete
+//!    `LifecycleManager::run_sleep_cycle` pass — MemoryPruning →
+//!    GenerativeReplay → DreamExploration → PolicyCompilation — against an
+//!    in-memory L3 archive and a pre-populated L1 episodic store, then writes
+//!    `E4.5_SLEEP_DONE` to COM1.
+//!
 //! # Exit criteria
 //!
 //! - E4.2: `E4.2_TASK_DONE` — Embassy async task completed and signalled.
 //! - E4.3: `E4.3_TCP_DONE` — first TCP connection over smoltcp loopback.
 //! - E4.4: `E4.4_TLS_DONE` — TLS 1.3 handshake and app data exchange complete.
+//! - E4.5: `E4.5_SLEEP_DONE` — Stage-3 sleep cycle inside the microVM.
 //! - `ANIMA_PANIC` — panic handler reached (carried forward from E4.1).
 //!
-//! The CI job (`microvm-boot`) asserts all four.
+//! The CI job (`microvm-boot`) asserts all five.
 // ---------------------------------------------------------------------------
 // Nightly feature gates
 // ---------------------------------------------------------------------------
@@ -75,6 +88,7 @@
 
 extern crate alloc;
 
+mod sleep_demo;
 mod tls;
 
 use alloc::vec::Vec;
@@ -213,8 +227,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
         serial_init();
     }
     serial_write("\r\n");
-    serial_write("ANIMA_PANIC: E4.4 — all exit criteria met, panic handler reached\r\n");
-    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ E4.4 ✅ — kernel boot task complete.\r\n");
+    serial_write("ANIMA_PANIC: panic handler reached\r\n");
+    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ E4.4 ✅ E4.5 ✅ — kernel boot task complete.\r\n");
     loop {
         core::hint::spin_loop();
     }
@@ -359,9 +373,29 @@ async fn kernel_boot_task() {
     tls::run_tls_loopback_test().expect("TLS loopback test failed");
     serial_write("E4.4_TLS_DONE: TLS 1.3 handshake and app data exchange complete\n");
 
+    // ------------------------------------------------------------------
+    // Phase 7 — Stage-3 sleep cycle inside the microVM (E4.5)
+    //
+    // "Stage 3 sleep-cycle soak passes inside the microVM target."
+    //
+    // Wires the no_std + alloc port of every higher crate (anima-self,
+    // interoception, memory, praxis, scheduler, senses, vita) into the
+    // kernel and runs a single complete sleep cycle: MemoryPruning →
+    // GenerativeReplay → DreamExploration → PolicyCompilation. The cycle
+    // is driven by `vita::LifecycleManager::run_sleep_cycle` over an
+    // in-memory L3 archive and pre-populated L1 episodic memory.
+    // ------------------------------------------------------------------
+    serial_write("\n[E4.5] kernel_boot_task: Phase 7 — Stage-3 sleep cycle\n");
+    embassy_futures::yield_now().await;
+
+    sleep_demo::run_microvm_sleep_cycle();
+    serial_write(
+        "E4.5_SLEEP_DONE: Stage-3 sleep cycle completed inside microVM — exit criterion met\n",
+    );
+
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.
-    panic!("ANIMA_PANIC: deliberate panic — E4.1/E4.2/E4.3/E4.4 exit criteria all met");
+    panic!("ANIMA_PANIC: deliberate panic — E4.1–E4.5 exit criteria all met");
 }
 
 // ---------------------------------------------------------------------------

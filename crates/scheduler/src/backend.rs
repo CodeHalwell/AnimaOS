@@ -1,7 +1,12 @@
 //! Provider-agnostic LLM backend abstraction.
 
-use std::future::Future;
-use std::pin::Pin;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Streaming completion item: a single emitted token or signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +78,7 @@ pub trait LlmBackend: Send + Sync {
 /// Cooperative cancellation flag for streaming requests.
 #[derive(Debug, Default, Clone)]
 pub struct CancellationToken {
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl CancellationToken {
@@ -84,12 +89,11 @@ impl CancellationToken {
 
     /// Trips the token.
     pub fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 
     /// Returns true if the token has been tripped.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst)
     }
 }

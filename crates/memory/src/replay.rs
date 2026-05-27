@@ -15,6 +15,9 @@
 //! 2. Validation accuracy is logged in the [`ReplayReport`] returned from
 //!    every cycle (populated even when accuracy is perfect).
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::archival::L3Archive;
 use crate::decay::MemoryNode;
 

@@ -56,8 +56,8 @@ pub enum TurboQuantError {
     InvalidConfig(String),
 }
 
-impl std::fmt::Display for TurboQuantError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TurboQuantError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             TurboQuantError::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {expected}, got {got}")
@@ -68,7 +68,7 @@ impl std::fmt::Display for TurboQuantError {
     }
 }
 
-impl std::error::Error for TurboQuantError {}
+impl core::error::Error for TurboQuantError {}
 
 // ── BitDepth ──────────────────────────────────────────────────────────────────
 
@@ -263,11 +263,11 @@ fn erf_approx(x: f64) -> f64 {
 }
 
 fn gaussian_cdf(x: f64) -> f64 {
-    (1.0 + erf_approx(x / std::f64::consts::SQRT_2)) / 2.0
+    (1.0 + erf_approx(x / core::f64::consts::SQRT_2)) / 2.0
 }
 
 fn gaussian_pdf(x: f64) -> f64 {
-    (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
+    (-0.5 * x * x).exp() / (2.0 * core::f64::consts::PI).sqrt()
 }
 
 // ── Lloyd-Max codebook (S2.7.2) ───────────────────────────────────────────────
@@ -306,8 +306,8 @@ impl LloydMaxCodebook {
 
     fn one_bit() -> Self {
         // Centroids: ±√(2/π); D = 1 − 2/π ≈ 0.3634.
-        let c = (2.0_f64 / std::f64::consts::PI).sqrt() as f32;
-        let d = 1.0_f32 - 2.0 / std::f32::consts::PI;
+        let c = (2.0_f64 / core::f64::consts::PI).sqrt() as f32;
+        let d = 1.0_f32 - 2.0 / core::f32::consts::PI;
         Self {
             centroids: vec![-c, c],
             thresholds: vec![0.0],
@@ -416,7 +416,7 @@ fn lloyd_max_iterate(n_levels: usize, n_iter: usize) -> LloydMaxCodebook {
         thresholds[half - 2 - i] = -b;
         thresholds[half + i] = b;
     }
-    thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
 
     let distortion = compute_distortion_f64(&centroids, &thresholds) as f32;
     LloydMaxCodebook {
@@ -528,7 +528,7 @@ impl PSquareQuantile {
             self.init_buf.push(x);
             if self.init_buf.len() == 5 {
                 let mut sorted = self.init_buf.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
                 self.markers.copy_from_slice(&sorted);
             }
             return;
@@ -1011,7 +1011,7 @@ pub fn quantized_search_archival(
             (score, item.id)
         })
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
 }
@@ -1037,7 +1037,7 @@ pub fn quantized_search_l3(
             (score, entry.item.id)
         })
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
 }
@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn codebook_1bit_centroids_are_analytical() {
         let cb = LloydMaxCodebook::for_bit_depth(BitDepth::One);
-        let expected = (2.0_f64 / std::f64::consts::PI).sqrt() as f32;
+        let expected = (2.0_f64 / core::f64::consts::PI).sqrt() as f32;
         assert!((cb.centroids[0] + expected).abs() < 1e-4);
         assert!((cb.centroids[1] - expected).abs() < 1e-4);
     }
@@ -1270,7 +1270,7 @@ mod tests {
         for _ in 0..1000 {
             let u1 = (prng.next_u64() as f64 + 1.0) / (u64::MAX as f64 + 2.0);
             let u2 = (prng.next_u64() as f64 + 1.0) / (u64::MAX as f64 + 2.0);
-            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * core::f64::consts::PI * u2).cos();
             pq.observe(z);
         }
         let median = pq.quantile().unwrap();
@@ -1468,7 +1468,7 @@ mod tests {
                     .map(|_| {
                         let u1 = (prng.next_u64() as f64 + 1.0) / (u64::MAX as f64 + 2.0);
                         let u2 = (prng.next_u64() as f64 + 1.0) / (u64::MAX as f64 + 2.0);
-                        ((-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()) as f32
+                        ((-2.0 * u1.ln()).sqrt() * (2.0 * core::f64::consts::PI * u2).cos()) as f32
                     })
                     .collect()
             })
@@ -1483,7 +1483,7 @@ mod tests {
             .enumerate()
             .map(|(i, v)| (cosine_similarity_f32(query, v), i))
             .collect();
-        full_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        full_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
         let full_top_k: std::collections::HashSet<usize> =
             full_scores.iter().take(k).map(|&(_, i)| i).collect();
 
@@ -1506,7 +1506,7 @@ mod tests {
                 (tq.score_cosine(&q_query, &qv), i)
             })
             .collect();
-        quant_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        quant_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
         let quant_top_k: std::collections::HashSet<usize> =
             quant_scores.iter().take(k).map(|&(_, i)| i).collect();
 

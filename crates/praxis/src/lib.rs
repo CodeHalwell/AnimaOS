@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Efferent actuator core: tool driver registry, routing, and isolation.
@@ -6,17 +7,25 @@
 //!
 //! - [`circuit`] — Closed/Open/HalfOpen circuit breaker per tool pathway.
 //! - [`compute`] — Wasmtime sandbox for untrusted tool execution (E2.5).
+//!   Available only with the `wasm-sandbox` feature (std-only).
 //! - [`envelope`] — [`ToolEnvelope`] type carrying calls across MCP/A2A buses.
 //! - [`registry`] — [`ToolRegistry`]: registration, discovery, and dispatch.
 //! - [`routing`] — [`length_robust_filter`]: relative-score tool selection.
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
 pub mod circuit;
+#[cfg(feature = "wasm-sandbox")]
 pub mod compute;
 pub mod envelope;
 pub mod registry;
 pub mod routing;
 
 pub use circuit::{BreakerState, CircuitBreaker};
+#[cfg(feature = "wasm-sandbox")]
 pub use compute::{
     SandboxCapabilities, SandboxConfig, SandboxError, SandboxResult, SandboxedMathEvaluator,
     WasmSandbox,

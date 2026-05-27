@@ -1,8 +1,15 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 //! Reflex loop control: iteration-aware MLFQ scheduler and supporting traits.
 
+extern crate alloc;
+
+use alloc::string::String;
+
 pub mod backend;
+#[cfg(feature = "kani-harness")]
+pub mod kani_proofs;
 pub mod mlfq;
 pub mod mock;
 pub mod token_pipe;
