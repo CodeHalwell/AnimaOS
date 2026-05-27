@@ -266,16 +266,30 @@ mod kani_proofs {
         Task::new(id, level, "")
     }
 
-    /// Prove: `push` always increases `len()` by exactly one.
+    /// Prove: `push` always increases `len()` by exactly one, starting from
+    /// an **arbitrary** (possibly non-empty) agenda state.
+    ///
+    /// We seed the agenda with a symbolic number of tasks (≤ 5) across
+    /// arbitrary valid tiers so the proof holds for all reachable occupancies,
+    /// not just the empty-agenda case.
     #[kani::proof]
     fn push_increases_len_by_exactly_one() {
         let mut agenda = TaskAgenda::new();
-        let initial_len = agenda.len();
 
+        // Drive the agenda into an arbitrary initial state.
+        let num_initial: usize = kani::any();
+        kani::assume(num_initial <= 5);
+        for i in 0..num_initial {
+            let level: u8 = kani::any();
+            kani::assume((level as usize) < NUM_TIERS);
+            agenda.push(task_with_level(i as u64, level));
+        }
+
+        let initial_len = agenda.len();
         let level: u8 = kani::any();
         kani::assume((level as usize) < NUM_TIERS);
 
-        agenda.push(task_with_level(1, level));
+        agenda.push(task_with_level(99, level));
         assert_eq!(
             agenda.len(),
             initial_len + 1,
@@ -317,15 +331,25 @@ mod kani_proofs {
         assert!(result.is_some(), "non-empty agenda must yield Some");
     }
 
-    /// Prove: `select_optimal_task` reduces `len()` by exactly one.
+    /// Prove: `select_optimal_task` reduces `len()` by exactly one, starting
+    /// from an **arbitrary** non-empty agenda state.
+    ///
+    /// We seed the agenda with a symbolic number of tasks (1–5) across
+    /// arbitrary valid tiers so the proof generalises beyond the single-task
+    /// case and covers multi-tier occupancies.
     #[kani::proof]
     fn select_reduces_len_by_exactly_one() {
         let mut agenda = TaskAgenda::new();
 
-        let level: u8 = kani::any();
-        kani::assume((level as usize) < NUM_TIERS);
+        // Seed with at least one task so select_optimal_task is non-trivial.
+        let num_initial: usize = kani::any();
+        kani::assume(num_initial > 0 && num_initial <= 5);
+        for i in 0..num_initial {
+            let level: u8 = kani::any();
+            kani::assume((level as usize) < NUM_TIERS);
+            agenda.push(task_with_level(i as u64, level));
+        }
 
-        agenda.push(task_with_level(1, level));
         let before = agenda.len();
         let _ = agenda.select_optimal_task();
 

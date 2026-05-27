@@ -106,10 +106,12 @@ impl FrameAllocator {
 mod kani_proofs {
     use super::*;
 
-    /// Prove: `allocated()` ≤ `capacity()` after any single `allocate` call.
+    /// Prove: `allocated()` ≤ `capacity()` after any single `allocate` call,
+    /// starting from an **arbitrary** (possibly non-zero) initial state.
     ///
-    /// `capacity` and `n` are symbolic; the `assume` bounds keep the
-    /// state space tractable for bounded model-checking.
+    /// A symbolic initial allocation puts the allocator into any valid
+    /// occupancy before the second call under test, making the proof hold
+    /// for all reachable states, not just the fresh-allocator case.
     #[kani::proof]
     fn allocated_never_exceeds_capacity_after_allocate() {
         let capacity: usize = kani::any();
@@ -117,13 +119,17 @@ mod kani_proofs {
 
         let allocator = FrameAllocator::new(capacity);
 
+        // Drive the allocator into an arbitrary initial state.
+        let initial_alloc: usize = kani::any();
+        let _ = allocator.allocate(initial_alloc);
+
         let n: usize = kani::any();
         kani::assume(n <= 128);
 
         // Attempt allocation — may succeed or fail.
         let _ = allocator.allocate(n);
 
-        // Invariant holds in both outcomes.
+        // Invariant holds in both outcomes and from any prior occupancy.
         assert!(
             allocator.allocated() <= allocator.capacity(),
             "allocated must never exceed capacity"
@@ -169,15 +175,22 @@ mod kani_proofs {
         }
     }
 
-    /// Prove: a successful allocation's range stays within `[0, capacity)`.
+    /// Prove: a successful allocation's range stays within `[0, capacity)`,
+    /// starting from an **arbitrary** initial state.
     ///
     /// For every `Ok(alloc)` result: `alloc.start_frame + alloc.frames ≤ capacity`.
+    /// The initial symbolic allocation drives the allocator into a non-trivial
+    /// occupancy so the proof generalises beyond the fresh-allocator case.
     #[kani::proof]
     fn successful_allocation_stays_within_capacity_bounds() {
         let capacity: usize = kani::any();
         kani::assume(capacity > 0 && capacity <= 128);
 
         let allocator = FrameAllocator::new(capacity);
+
+        // Drive the allocator into an arbitrary initial state.
+        let initial_alloc: usize = kani::any();
+        let _ = allocator.allocate(initial_alloc);
 
         let n: usize = kani::any();
         kani::assume(n > 0 && n <= 128);

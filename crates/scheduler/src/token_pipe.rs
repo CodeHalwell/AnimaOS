@@ -169,17 +169,26 @@ mod kani_proofs {
         }
     }
 
-    /// Prove: `push(n)` followed by `refund(n)` restores `available_credits`.
+    /// Prove: `push(n)` followed by `refund(n)` restores `available_credits`,
+    /// starting from an **arbitrary valid occupancy** (not just a fresh pipe).
     ///
-    /// This is the fundamental producer–consumer roundtrip property.
+    /// A symbolic initial push drives the pipe into any valid non-full state
+    /// so the roundtrip property is proved for all occupancy levels, not
+    /// just the initial-credits = capacity case.
     #[kani::proof]
     fn push_refund_roundtrip_restores_credits() {
         let capacity: u32 = kani::any();
         kani::assume(capacity > 0 && capacity <= 1024);
         let mut pipe = BoundedTokenPipe::new(capacity);
 
+        // Drive the pipe into an arbitrary valid state.
+        let initial_consume: u32 = kani::any();
+        kani::assume(initial_consume <= capacity);
+        let _ = pipe.push(initial_consume);
+
+        // Roundtrip a further symbolic amount within the remaining budget.
         let n: u32 = kani::any();
-        kani::assume(n > 0 && n <= capacity);
+        kani::assume(n > 0 && n <= pipe.available_credits());
 
         let before = pipe.available_credits();
         pipe.push(n).unwrap();

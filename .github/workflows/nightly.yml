@@ -115,6 +115,8 @@ jobs:
       - name: Run Kani proof harnesses (corpus + scheduler)
         uses: model-checking/kani-github-action@v1
         with:
-          kani-flags: >-
+          # The action exposes `args` for cargo-kani flags; `kani-flags` is not
+          # a supported input.  Pass the package selectors via `args`.
+          args: >-
             --package corpus
             --package scheduler
