@@ -28,10 +28,12 @@
 
 pub mod anthropic;
 pub mod factory;
+pub mod ollama;
 pub mod openai;
 
 pub use anthropic::AnthropicBackend;
 pub use factory::{BackendFactory, BackendKind};
+pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 
 // ── Shared fixture parsing ────────────────────────────────────────────────────

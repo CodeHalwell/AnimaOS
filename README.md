@@ -80,3 +80,31 @@ cargo run -p hosted --bin anima-hosted
 ```
 
 CI runs `cargo fmt --check`, build, test, and `cargo clippy -- -D warnings`.
+
+## Deployment
+
+Two parallel surfaces share the same workspace code — see
+[`docs/10-deployment-pathways.md`](./docs/10-deployment-pathways.md) for the
+full rationale.
+
+### Containerised (now)
+
+`anima-hosted` + Ollama (llama.cpp inference) + Unsloth trainer
+(profile-gated, for sleep-phase QLoRA), all wired through
+docker-compose with NVIDIA GPU passthrough:
+
+```sh
+docker compose up --build                       # inference stack
+docker compose --profile training up --build    # also build the trainer
+```
+
+Operational details — model defaults, env vars, VRAM budget on a 3090,
+known limitations — live in [`docker/README.md`](./docker/README.md).
+
+### Bare-metal native (target)
+
+Three flavours (host-native sidecar → in-process Rust inference →
+microVM framekernel) documented in
+[`docs/10-deployment-pathways.md`](./docs/10-deployment-pathways.md).
+Each step preserves the `LlmBackend` trait surface so cognitive code
+never needs rewriting.

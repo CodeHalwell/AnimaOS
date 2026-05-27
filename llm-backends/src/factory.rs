@@ -22,6 +22,7 @@ use std::sync::Arc;
 use scheduler::backend::LlmBackend;
 
 use crate::anthropic::AnthropicBackend;
+use crate::ollama::OllamaBackend;
 use crate::openai::OpenAiBackend;
 
 /// Identifies a concrete LLM provider.
@@ -33,18 +34,21 @@ pub enum BackendKind {
     OpenAi,
     /// Built-in deterministic mock (from [`scheduler`]).
     Mock,
+    /// Local Ollama daemon — GGUF inference on the host GPU.
+    Ollama,
 }
 
 impl BackendKind {
     /// Parses a case-insensitive provider name string.
     ///
-    /// Recognised values: `"anthropic"`, `"openai"`, `"mock"`.
+    /// Recognised values: `"anthropic"`, `"openai"`, `"mock"`, `"ollama"`.
     /// Returns `None` for unrecognised strings.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "anthropic" => Some(Self::Anthropic),
             "openai" | "open_ai" => Some(Self::OpenAi),
             "mock" => Some(Self::Mock),
+            "ollama" => Some(Self::Ollama),
             _ => None,
         }
     }
@@ -63,6 +67,10 @@ impl BackendFactory {
             BackendKind::Anthropic => Arc::new(AnthropicBackend::new()),
             BackendKind::OpenAi => Arc::new(OpenAiBackend::new()),
             BackendKind::Mock => Arc::new(scheduler::MockLlmBackend::new()),
+            // Ollama is a live HTTP backend, not a fixture; it reads its
+            // target URL + model from environment variables so the factory
+            // surface stays uniform.
+            BackendKind::Ollama => Arc::new(OllamaBackend::from_env()),
         }
     }
 
@@ -108,6 +116,19 @@ mod tests {
     fn factory_returns_mock_backend() {
         let b = BackendFactory::fixture(BackendKind::Mock);
         assert_eq!(b.id(), "mock");
+    }
+
+    #[test]
+    fn factory_returns_ollama_backend() {
+        // Construction does no network I/O; it only reads env defaults.
+        let b = BackendFactory::fixture(BackendKind::Ollama);
+        assert_eq!(b.id(), "ollama");
+    }
+
+    #[test]
+    fn backend_kind_parse_recognises_ollama() {
+        assert_eq!(BackendKind::parse("ollama"), Some(BackendKind::Ollama));
+        assert_eq!(BackendKind::parse("OLLAMA"), Some(BackendKind::Ollama));
     }
 
     #[test]

@@ -1,0 +1,156 @@
+# AnimaOS — containerised deployment.
+#
+# Three services across two profiles:
+#
+#   ┌─────────────────┐   HTTP    ┌─────────────────┐
+#   │  anima-hosted   │ ────────▶ │     ollama      │ ◀── GPU
+#   │  (Rust binary)  │           │  (llama.cpp)    │
+#   └─────────────────┘           └────────┬────────┘
+#                                          │ shares
+#                                          ▼ ollama-models volume
+#                                 ┌─────────────────┐
+#                                 │     trainer     │ ◀── GPU
+#                                 │  (Unsloth)      │     [profile: training]
+#                                 └─────────────────┘
+#
+# Default profile brings up `ollama` + `hosted` + a one-shot `ollama-init`
+# that pre-pulls the instinct and workhorse models.  The `training` profile
+# additionally builds the Unsloth trainer for sleep-phase fine-tuning.
+#
+# Host prereqs:
+#   - Docker 23+ (BuildKit default)
+#   - NVIDIA driver ≥ 550.54 (CUDA 12.4 ABI)
+#   - nvidia-container-toolkit, with `nvidia` runtime registered
+#
+# Bring it up (inference only):
+#   docker compose up --build
+#
+# Include the trainer:
+#   docker compose --profile training up --build
+#
+# One-shot subcommand:
+#   docker compose run --rm hosted why
+#   docker compose --profile training run --rm trainer python /app/check.py
+
+services:
+
+  # ── Inference engine ────────────────────────────────────────────────────
+  ollama:
+    # Pinned for reproducible builds; bump deliberately when validating a
+    # newer Ollama release.  Overridable via `OLLAMA_VERSION` in `.env`.
+    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
+    container_name: anima-ollama
+    restart: unless-stopped
+    ports:
+      # Bind to loopback only so the daemon isn't exposed to the LAN.
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      # Keep models hot for 24h between requests — avoids load-on-every-call
+      # latency for the workhorse model.
+      OLLAMA_KEEP_ALIVE: "24h"
+      # Two slots so instinct + workhorse can be co-resident on the 3090.
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      # Ampere supports Flash Attention; halves KV-cache VRAM use.
+      OLLAMA_FLASH_ATTENTION: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ── Model pre-pull (runs once, exits) ───────────────────────────────────
+  ollama-init:
+    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
+    container_name: anima-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_HOST: ollama:11434
+      # Two-model architecture: 1B instinct + 3B workhorse.  Override to
+      # bigger models (e.g. llama3.1:8b for workhorse) once you've confirmed
+      # they fit alongside the instinct on your card.
+      ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-llama3.2:1b}
+      ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-llama3.2:3b}
+    # Literal block scalar (|) preserves newlines and avoids any outer
+    # quoting that `/bin/sh -c` would misinterpret as a command name.
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -e
+      echo "anima-ollama-init: pulling $$ANIMA_INSTINCT_MODEL"
+      ollama pull "$$ANIMA_INSTINCT_MODEL"
+      echo "anima-ollama-init: pulling $$ANIMA_WORKHORSE_MODEL"
+      ollama pull "$$ANIMA_WORKHORSE_MODEL"
+      echo "anima-ollama-init: models ready"
+    restart: "no"
+
+  # ── Agent runtime ───────────────────────────────────────────────────────
+  hosted:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: animaos/hosted:dev
+    container_name: anima-hosted
+    depends_on:
+      ollama:
+        condition: service_healthy
+      # Block startup until the one-shot model pull has finished — otherwise
+      # the agent's first /api/generate can race the download and 404.
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      # `ollama` (default) / `mock` / `anthropic` / `openai`.
+      ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
+      ANIMA_OLLAMA_URL: http://ollama:11434
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-llama3.2:3b}
+      ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-8192}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      # Persist the identity store + audit logs across runs.
+      - anima-data:/home/anima/.anima
+
+  # ── Sleep-phase trainer (Unsloth) ───────────────────────────────────────
+  # Activated only by `docker compose --profile training up`.  Shares the
+  # ollama-models volume so adapted weights round-trip back into the
+  # inference engine without an explicit export step.
+  trainer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.trainer
+    image: animaos/trainer:dev
+    container_name: anima-trainer
+    profiles: ["training"]
+    volumes:
+      - ollama-models:/models
+      - ./trainer:/app
+    environment:
+      # Where Unsloth caches HF downloads / writes adapter checkpoints.
+      HF_HOME: /models/hf-cache
+      TRANSFORMERS_CACHE: /models/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # The default CMD runs the sanity check; override to invoke training.
+    # Example: `docker compose --profile training run --rm trainer python /app/sleep_phase.py`
+
+volumes:
+  anima-data:
+  ollama-models:
