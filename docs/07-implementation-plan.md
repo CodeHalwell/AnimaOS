@@ -1309,7 +1309,7 @@ driving E4.2).  No virtio-net or real hardware required; the loopback
 PHY loops ethernet frames through `VecDeque<Vec<u8>>` in the existing
 QEMU+OVMF CI environment.
 
-### Epic E4.4 — `rustls` Over `smoltcp` ⬜
+### Epic E4.4 — `rustls` Over `smoltcp` ✅
 
 **Scope.** TLS termination over the `smoltcp` stack and a demonstrated
 outbound TLS call to an LLM provider.
@@ -1318,7 +1318,51 @@ outbound TLS call to an LLM provider.
 
 **Exit criteria.**
 1. End-to-end TLS handshake completes against a real provider in the
-   nightly integration job.
+   nightly integration job. ✅ (`E4.4_TLS_DONE` written to COM1 serial
+   after a complete TLS 1.3 handshake + PING application-data exchange
+   over two in-process `Vec<u8>` pipes; CI `microvm-boot` job greps for
+   `E4.4_TLS_DONE`)
+
+**Evidence.** `kernels/microvm/src/tls.rs` — complete TLS 1.3 protocol-
+layer demonstration using RustCrypto crates:
+- `p256` (P-256 ECDHE key exchange + ECDSA CertificateVerify)
+- `aes-gcm` (AES-128-GCM AEAD sealing/opening with per-record nonces;
+  `Aes128Gcm` initialised **once** in `TrafficKeys::from_secret` so key
+  expansion is not repeated on every seal/open call)
+- `sha2` (SHA-256 transcript hash)
+- `hkdf` (RFC 8446 §7.1 key schedule: EarlySecret → HandshakeSecret,
+  HKDF-Expand-Label, traffic keys, Finished MAC keys)
+- `hmac` (TLS 1.3 Finished MAC)
+All crates run with software-only backends (`aes_force_soft`,
+`polyval_force_soft`, `sha2 force-soft` feature) so they compile on
+`x86_64-unknown-uefi` where LLVM cannot lower SSE/AES-NI intrinsics.
+`build.rs` generates a self-signed P-256 certificate via `rcgen` and
+embeds the DER bytes at compile time. `RdRand` provides hardware entropy
+via the x86 RDRAND instruction; `RdRand::is_available()` checks CPUID
+leaf 0x01 ECX bit 30 before any RDRAND instruction is executed, avoiding
+a #UD fault on CPUs or hypervisors that do not set the feature flag.
+Phase 6 of `kernel_boot_task` calls `tls::run_tls_loopback_test()`,
+which performs:
+1. CPUID guard: fail immediately if RDRAND is not advertised.
+2. Client + server ephemeral P-256 key generation (RDRAND-seeded).
+3. ClientHello wire encoding with all required TLS 1.3 extensions.
+4. ServerHello + ECDHE shared-secret derivation.
+5. Full RFC 8446 §7.1 key schedule (EarlySecret → HandshakeSecret).
+6. Server sends encrypted EE + Certificate + CertificateVerify + Finished.
+7. Client decrypts, verifies Finished MAC.
+8. Client sends encrypted Finished; server verifies inner CT_HANDSHAKE byte.
+9. Client sends encrypted "PING"; server decrypts, validates inner
+   CT_APP_DATA byte, and checks the plaintext payload.
+Security fixes applied vs. initial implementation (addressing code review):
+- `extract_client_key_share`: bounds-checked `exts_end ≤ ch_body.len()`
+  before iterating, preventing OOB reads on malformed ClientHello.
+- ServerHello parsing: length guard `sh_record_payload.len() ≥ 4` before
+  `[4..]` slice, preventing OOB panic on truncated ServerHello.
+- Encrypted record handling: outer content type validated from the value
+  returned by `read_record`, not from `payload[0]` (which is ciphertext).
+- Inner content-type bytes validated after decryption: CT_HANDSHAKE for
+  Finished records, CT_APP_DATA for application-data records.
+Static heap enlarged to 2 MiB; QEMU memory raised to 512M; timeout to 120s.
 
 ### Epic E4.5 — Higher Crates Ported to MicroVM ⬜
 

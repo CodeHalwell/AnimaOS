@@ -4,9 +4,29 @@
 # compiler_builtins) must be compiled from source with `-Z build-std`.
 # `compiler-builtins-mem` supplies the mem*/str* implementations so the binary
 # does not depend on a libc.
+#
+# RustCrypto force-soft flags:
+#   aes_force_soft      — disables AES-NI autodetect in the `aes` crate; uses
+#                         the pure-Rust fixsliced backend instead.
+#   polyval_force_soft  — disables CLMUL autodetect in the `polyval` crate
+#                         (used by `aes-gcm` for the GHash step); uses the
+#                         pure-Rust soft64 backend instead.
+#   sha2_force_soft     — disables SHA-256 extensions autodetect in `sha2`;
+#                         uses the pure-Rust backend.
+#
+# These are necessary because the UEFI target does not support runtime CPUID
+# feature detection, and LLVM fails to lower the SSE/AVX intrinsics when the
+# hardware feature is not guaranteed at compile time on this target.
 
 [build]
 target = "x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+rustflags = [
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+    "--cfg", "sha2_force_soft",
+]
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
