@@ -41,6 +41,11 @@ allow = [
   # use; required by wasmtime's wasm-compose feature, which pulls in im-rc /
   # bitmaps / sized-chunks (all MPL-2.0+).
   "MPL-2.0",
+  # CDLA-Permissive-2.0 is the licence Mozilla applies to its CA-bundle data,
+  # which webpki-roots re-exports.  Pulled in transitively via ureq → rustls
+  # → webpki-roots in the llm-backends Ollama path.  The licence is
+  # permissive (no copyleft, no notice burden beyond MIT/Apache equivalent).
+  "CDLA-Permissive-2.0",
 ]
 # Lower confidence threshold — detection below this level produces a warning
 # so that ambiguous licence files don't silently pass.
