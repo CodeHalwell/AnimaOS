@@ -344,20 +344,34 @@ async fn kernel_boot_task() {
     );
 
     // ------------------------------------------------------------------
-    // Phase 6 — TLS 1.3 loopback (E4.4 exit criterion)
+    // Phase 6a — TLS 1.3 protocol-layer loopback (E4.4 exit criterion part 1)
     //
-    // "TLS 1.3 handshake and application-data exchange demonstrated
-    //  inside the microVM kernel."
-    //
-    // The TLS handshake and PING exchange run entirely in-process using
-    // two Vec<u8> buffers as the transport.  No smoltcp or real network
-    // hardware is involved — this is a pure TLS protocol-layer demo.
+    // Complete TLS 1.3 state machine: CH→SH→EE→Cert→CV→SFin→CFin→PING.
+    // Transport: two in-process Vec<u8> buffers.
+    // Demonstrates: RFC 8446 key schedule, AEAD record layer, Finished
+    // MAC verification, CertificateVerify ECDSA verification.
     // ------------------------------------------------------------------
-    serial_write("\n[E4.4] kernel_boot_task: Phase 6 — TLS 1.3 loopback\n");
+    serial_write("\n[E4.4] kernel_boot_task: Phase 6a — TLS 1.3 protocol loopback\n");
     embassy_futures::yield_now().await;
 
-    tls::run_tls_loopback_test().expect("TLS loopback test failed");
-    serial_write("E4.4_TLS_DONE: TLS 1.3 handshake and app data exchange complete\n");
+    tls::run_tls_loopback_test().expect("TLS 1.3 loopback test failed");
+    serial_write("[E4.4] TLS 1.3 protocol loopback PASSED (all RFC 8446 states verified)\n");
+
+    // ------------------------------------------------------------------
+    // Phase 6b — TLS 1.3 over smoltcp TCP (E4.4 exit criterion part 2)
+    //
+    // ClientHello + ServerHello exchange over a real smoltcp TCP loopback
+    // socket, including ECDHE key share round-trip verification.
+    // Transport: smoltcp phy::Loopback (same stack as E4.3).
+    // Demonstrates: TLS 1.3 records transit smoltcp TCP intact.
+    // ------------------------------------------------------------------
+    serial_write("[E4.4] kernel_boot_task: Phase 6b — TLS 1.3 over smoltcp TCP\n");
+    embassy_futures::yield_now().await;
+
+    tls::run_tls_over_smoltcp_test().expect("TLS over smoltcp test failed");
+    serial_write("[E4.4] TLS 1.3 over smoltcp TCP PASSED (CH+SH round-trip, ECDHE verified)\n");
+
+    serial_write("E4.4_TLS_DONE: TLS 1.3 loopback + smoltcp TCP integration complete\n");
 
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.

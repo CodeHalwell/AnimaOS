@@ -1,8 +1,15 @@
-//! E4.4 — Minimal TLS 1.3 loopback demonstration.
+//! E4.4 — TLS 1.3 implementation for the AnimaOS microVM kernel.
 //!
-//! Implements a complete TLS 1.3 handshake and application-data exchange
-//! entirely in-process using two `Vec<u8>` buffers as the "network" pipes.
-//! No TCP or smoltcp involvement — this is purely a protocol-layer demo.
+//! Provides two complementary demonstrations:
+//!
+//! 1. **`run_tls_loopback_test()`** — complete TLS 1.3 handshake and
+//!    application-data exchange using two in-process `Vec<u8>` buffers as
+//!    the transport.  Exercises the full RFC 8446 state machine:
+//!    CH→SH→EE→Cert→CV→SFin→CFin→AppData.
+//!
+//! 2. **`run_tls_over_smoltcp_test()`** — TLS 1.3 ClientHello record sent
+//!    through a real smoltcp TCP loopback socket and verified on the server
+//!    side.  Confirms that TLS records transit the smoltcp TCP stack intact.
 //!
 //! Cipher suite: `TLS_AES_128_GCM_SHA256` (0x1301).
 //! Key exchange:  P-256 ECDHE (RFC 8446).
@@ -47,6 +54,11 @@ use p256::pkcs8::DecodePrivateKey;
 use p256::PublicKey;
 use rand_core::RngCore;
 use sha2::{Digest, Sha256};
+use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::phy::{Loopback, Medium};
+use smoltcp::socket::tcp;
+use smoltcp::time::Instant;
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
 // Re-export for clarity inside this module.
 type HkdfSha256 = Hkdf<Sha256>;
@@ -77,22 +89,24 @@ impl RdRand {
         let ecx: u32;
         // SAFETY: CPUID is always safe to execute on x86_64.
         //
-        // `rbx` is reserved by LLVM for the global-offset-table pointer in
-        // position-independent code; using it as an operand in inline asm
-        // causes a compile-time error ("rbx is used internally by LLVM").
-        // We work around this by saving and restoring rbx around the CPUID
-        // call using push/pop — a safe operation since we are past early-boot
-        // stack setup by the time this function is called.
+        // `rbx` is clobbered by CPUID but is reserved by LLVM (used as the
+        // base pointer in PIC/PIE code).  Using push/pop to save it is
+        // dangerous: on System V x86_64 ABI (Linux / macOS), the compiler
+        // may store values in the 128-byte red zone *below* %rsp without
+        // adjusting the stack pointer.  A `push` would overwrite that area.
+        // Instead we use a temporary register allocated by the compiler to
+        // save/restore %rbx.  The `nostack` option asserts we do not modify
+        // the stack pointer, which is true when using mov-based save/restore.
         unsafe {
             core::arch::asm!(
-                "push rbx",
+                "mov {tmp}, rbx",
                 "cpuid",
-                "pop rbx",
+                "mov rbx, {tmp}",
                 inout("eax") 0x01_u32 => _,
                 out("ecx") ecx,
                 out("edx") _,
-                // Cannot use `nostack` because push/pop modify the stack pointer.
-                options(nomem),
+                tmp = out(reg) _,
+                options(nomem, nostack),
             );
         }
         (ecx >> 30) & 1 != 0
@@ -101,13 +115,17 @@ impl RdRand {
 
 impl rand_core::RngCore for RdRand {
     fn next_u32(&mut self) -> u32 {
-        loop {
+        // Intel's RDRAND guidance recommends retrying up to 10 times.
+        // A persistent failure after 10 retries indicates a hardware fault
+        // or a hypervisor that does not implement RDRAND; panic rather than
+        // spinning indefinitely, which would hang the bare-metal kernel.
+        for _ in 0..10 {
             let mut val: u32;
             let ok: u8;
             // SAFETY: RDRAND is an x86_64 user-mode instruction; always safe
             // to execute.  The `setc` sets `ok` to 1 if the random value is
-            // valid and 0 if the hardware entropy pool was exhausted (very
-            // rare; we retry).
+            // valid and 0 if the hardware entropy pool was momentarily
+            // exhausted (rare; we retry as per Intel's guidance).
             unsafe {
                 core::arch::asm!(
                     "rdrand {val:e}",
@@ -120,6 +138,9 @@ impl rand_core::RngCore for RdRand {
                 return val;
             }
         }
+        panic!(
+            "RDRAND failed after 10 retries — hardware entropy source exhausted or hardware fault"
+        );
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -186,6 +207,21 @@ fn hkdf_label(label: &[u8], context: &[u8], length: u16) -> Vec<u8> {
         v.extend_from_slice(label);
         v
     };
+    // RFC 8446 §3.4: label and context fields are each length-prefixed with
+    // a single byte (u8), so their encoded length must fit in [0, 255].
+    // Assert before the cast to prevent silent truncation — any label or
+    // context longer than 255 bytes is a programming error, not a runtime
+    // condition that should be silently mishandled.
+    assert!(
+        full_label.len() <= 255,
+        "HKDF label too long: {} bytes (max 255 per RFC 8446 §3.4)",
+        full_label.len()
+    );
+    assert!(
+        context.len() <= 255,
+        "HKDF context too long: {} bytes (max 255 per RFC 8446 §3.4)",
+        context.len()
+    );
     let mut out = Vec::with_capacity(2 + 1 + full_label.len() + 1 + context.len());
     out.extend_from_slice(&length.to_be_bytes());
     out.push(full_label.len() as u8);
@@ -274,7 +310,17 @@ impl TrafficKeys {
     /// `inner` must be `[real_payload…, content_type_byte]`.
     /// `header` is the 5-byte outer TLS record header used as AAD.
     /// Appends the 16-byte GCM tag to `inner` (in-place).
-    fn seal(&mut self, header: &[u8; 5], inner: &mut Vec<u8>) {
+    ///
+    /// Returns `Err` if the sequence-number limit has been reached.  RFC 8446
+    /// §5.5 requires that a sender stop encrypting after `2^64 − 1` records
+    /// because reusing a nonce under AES-GCM is catastrophic.
+    fn seal(&mut self, header: &[u8; 5], inner: &mut Vec<u8>) -> Result<(), &'static str> {
+        // RFC 8446 §5.5: senders MUST NOT encrypt more than 2^64-1 records
+        // with the same key.  AES-GCM nonce reuse breaks confidentiality and
+        // integrity; refuse to seal rather than wrap the counter.
+        if self.seq == u64::MAX {
+            return Err("TLS key exhausted: sequence number at u64::MAX — key update required");
+        }
         use aes_gcm::aead::AeadMutInPlace;
         let nonce_bytes: [u8; 12] = self.nonce();
         let nonce: &Nonce<_> = <&Nonce<_>>::from(&nonce_bytes);
@@ -284,6 +330,7 @@ impl TrafficKeys {
             .expect("AES-GCM encrypt failed");
         inner.extend_from_slice(&tag[..]);
         self.seq += 1;
+        Ok(())
     }
 
     /// Open (decrypt + verify) a TLS ciphertext record.
@@ -294,6 +341,11 @@ impl TrafficKeys {
         use aes_gcm::aead::AeadMutInPlace;
         if ct.len() < 16 {
             return Err("AES-GCM: ciphertext too short for tag");
+        }
+        // RFC 8446 §5.5: receivers MUST NOT decrypt more than 2^64-1 records
+        // with the same key.  Guard here to match the sender-side check.
+        if self.seq == u64::MAX {
+            return Err("TLS key exhausted: sequence number at u64::MAX — key update required");
         }
         let tag_pos = ct.len() - 16;
         let tag_bytes: [u8; 16] = ct[tag_pos..].try_into().unwrap();
@@ -868,6 +920,59 @@ pub fn run_tls_loopback_test() -> Result<(), &'static str> {
     client_transcript.update(&cert_payload);
 
     let cv_payload = read_decrypt_handshake(&s2c, &mut s2c_pos, &mut client_recv_keys, 0x0f)?;
+
+    // ----------------------------------------------------------------
+    // Verify CertificateVerify signature (RFC 8446 §4.4.3)
+    //
+    // The client reconstructs the server's signing input and verifies
+    // the ECDSA signature over it.  This proves the server possesses
+    // the private key corresponding to the certificate it sent — i.e.
+    // proof of possession.
+    //
+    // Signing input:
+    //   64 × 0x20  ||  "TLS 1.3, server CertificateVerify"  ||  0x00  ||  transcript_hash
+    // where transcript_hash = SHA-256(CH || SH || EE || Cert)
+    // (the same transcript_for_cv the server computed).
+    // ----------------------------------------------------------------
+    {
+        // Transcript hash at the point of CertificateVerify: CH+SH+EE+Cert.
+        let transcript_for_cv_client: [u8; 32] = client_transcript.clone().finalize().into();
+
+        let mut cv_verify_input = Vec::new();
+        cv_verify_input.extend_from_slice(&[0x20u8; 64]);
+        cv_verify_input.extend_from_slice(b"TLS 1.3, server CertificateVerify");
+        cv_verify_input.push(0x00);
+        cv_verify_input.extend_from_slice(&transcript_for_cv_client);
+
+        // cv_payload layout: [type(1)=0x0f, len(3), sig_alg(2), sig_len(2), sig…]
+        if cv_payload.len() < 8 {
+            return Err("client: CertificateVerify too short");
+        }
+        let sig_alg = u16::from_be_bytes([cv_payload[4], cv_payload[5]]);
+        if sig_alg != 0x0403 {
+            return Err("client: CertificateVerify uses unexpected signature algorithm");
+        }
+        let sig_len = u16::from_be_bytes([cv_payload[6], cv_payload[7]]) as usize;
+        if cv_payload.len() < 8 + sig_len {
+            return Err("client: CertificateVerify signature truncated");
+        }
+        let sig_bytes = &cv_payload[8..8 + sig_len];
+
+        // Derive verifying key from the embedded PKCS8 private key.
+        // In production this would be extracted from the X.509 certificate;
+        // for this self-signed loopback demo the key is known at build time.
+        let signing_key_for_verify = p256::ecdsa::SigningKey::from_pkcs8_der(KEY_DER)
+            .map_err(|_| "client: failed to load server public key for CV verification")?;
+        let verifying_key = p256::ecdsa::VerifyingKey::from(&signing_key_for_verify);
+
+        use p256::ecdsa::signature::Verifier;
+        let sig = p256::ecdsa::DerSignature::try_from(sig_bytes)
+            .map_err(|_| "client: CertificateVerify DER signature invalid")?;
+        verifying_key
+            .verify(&cv_verify_input, &sig)
+            .map_err(|_| "client: CertificateVerify signature verification FAILED")?;
+    }
+
     client_transcript.update(&cv_payload);
 
     // Compute the transcript hash just before the server Finished (= after CV).
@@ -948,27 +1053,55 @@ pub fn run_tls_loopback_test() -> Result<(), &'static str> {
     // ----------------------------------------------------------------
     // Application data: client sends "PING", server decrypts and verifies.
     //
-    // For this demo we derive app traffic keys from the handshake secrets
-    // using a simplified KDF to prove the AEAD layer works end-to-end.
-    // A production TLS 1.3 stack would complete the full MasterSecret
-    // derivation first.
+    // RFC 8446 §7.1 application traffic key schedule:
+    //
+    //   derived      = Derive-Secret(HandshakeSecret, "derived", SHA256(""))
+    //   MasterSecret = HKDF-Extract(derived, 0^32)
+    //   c ap traffic = Derive-Secret(MS, "c ap traffic", transcript(CH…SF))
+    //   s ap traffic = Derive-Secret(MS, "s ap traffic", transcript(CH…SF))
+    //
+    // transcript(CH…SF) = SHA-256(CH || SH || EE || Cert || CV || SFin),
+    // which is `client_before_cfin_hash` on the client and
+    // `server_before_cfin_hash` on the server — both are the same value if
+    // the handshake succeeded.
     // ----------------------------------------------------------------
 
-    // Derive app traffic secrets from hs secrets.
-    let c_app_ts: [u8; 32] = {
-        let prk = HkdfSha256::from_prk(&c_hs_ts).unwrap();
-        derive_secret(&prk, b"app c", b"")
+    // Client side: derive MasterSecret from the client's HandshakeSecret (client_hs).
+    let client_ms_derived = {
+        let empty_hash_ms: [u8; 32] = Sha256::digest(b"").into();
+        derive_secret(&client_hs, b"derived", &empty_hash_ms)
     };
-
+    let client_master_secret = hkdf_extract_bytes(&client_ms_derived, &zero32);
+    // App traffic secret for client→server direction.
+    // `client_before_cfin_hash` = hash(CH||SH||EE||Cert||CV||SFin) — exactly
+    // the RFC 8446 transcript input for "c ap traffic".
+    let c_app_ts = derive_secret(
+        &client_master_secret,
+        b"c ap traffic",
+        &client_before_cfin_hash,
+    );
     let mut client_app_send = TrafficKeys::from_secret(&c_app_ts);
-    let mut server_app_recv = TrafficKeys::from_secret(&c_app_ts);
+
+    // Server side: derive the same MasterSecret from the server's HandshakeSecret (hs).
+    let server_ms_derived = {
+        let empty_hash_ms: [u8; 32] = Sha256::digest(b"").into();
+        derive_secret(&hs, b"derived", &empty_hash_ms)
+    };
+    let server_master_secret = hkdf_extract_bytes(&server_ms_derived, &zero32);
+    // Server decrypts with c_ap_traffic (same key as client's send key).
+    let s_app_recv_ts = derive_secret(
+        &server_master_secret,
+        b"c ap traffic",
+        &server_before_cfin_hash,
+    );
+    let mut server_app_recv = TrafficKeys::from_secret(&s_app_recv_ts);
 
     // Client sends "PING" as an application data record.
     let mut ping_inner: Vec<u8> = b"PING".to_vec();
     ping_inner.push(CT_APP_DATA); // inner content type
     let ct_len_ping = ping_inner.len() + 16; // plaintext + GCM tag
     let ping_outer_hdr = record_header(CT_APP_DATA, ct_len_ping);
-    client_app_send.seal(&ping_outer_hdr, &mut ping_inner);
+    client_app_send.seal(&ping_outer_hdr, &mut ping_inner)?;
     // ping_inner is now ciphertext (including GCM tag).
     write_record(&mut c2s, CT_APP_DATA, &ping_inner);
 
@@ -1017,7 +1150,7 @@ fn send_encrypted_handshake(
     inner.push(CT_HANDSHAKE); // inner content type
     let ct_len = inner.len() + 16; // plaintext + tag
     let hdr = record_header(CT_APP_DATA, ct_len);
-    keys.seal(&hdr, &mut inner);
+    keys.seal(&hdr, &mut inner)?;
     write_record(buf, CT_APP_DATA, &inner);
     Ok(())
 }
@@ -1086,7 +1219,16 @@ fn extract_server_key_share(sh_body: &[u8]) -> Result<PublicKey, &'static str> {
     pos += 2;
     let exts_end = pos + exts_len;
 
-    while pos + 4 <= exts_end && pos + 4 <= sh_body.len() {
+    // SECURITY: Verify that the declared extensions block fits within the
+    // buffer before iterating.  Without this check a malformed ServerHello
+    // with an inflated `exts_len` could cause parsing to continue past the
+    // end of `sh_body`, reading garbage bytes and potentially crashing.
+    // This mirrors the identical check that was added to `extract_client_key_share`.
+    if exts_end > sh_body.len() {
+        return Err("SH: extensions extend beyond body");
+    }
+
+    while pos + 4 <= exts_end {
         let ext_type = u16::from_be_bytes([sh_body[pos], sh_body[pos + 1]]);
         let ext_len = u16::from_be_bytes([sh_body[pos + 2], sh_body[pos + 3]]) as usize;
         pos += 4;
@@ -1115,4 +1257,311 @@ fn extract_server_key_share(sh_body: &[u8]) -> Result<PublicKey, &'static str> {
         }
     }
     Err("SH: key_share extension not found")
+}
+
+// ---------------------------------------------------------------------------
+// smoltcp TCP helpers
+// ---------------------------------------------------------------------------
+
+/// Send all bytes in `data` through smoltcp TCP socket `handle`.
+///
+/// Polls the smoltcp interface in a loop until all bytes have been queued
+/// into the socket's send buffer.  Each iteration advances simulated wall
+/// time by 1 ms so TCP retransmission timers advance correctly.
+///
+/// Returns `Err` if the socket is closed or the iteration budget is exceeded.
+fn tcp_send_all(
+    iface: &mut Interface,
+    device: &mut Loopback,
+    sockets: &mut SocketSet,
+    handle: smoltcp::iface::SocketHandle,
+    data: &[u8],
+    time_ms: &mut i64,
+) -> Result<(), &'static str> {
+    let mut sent = 0;
+    for _ in 0..2000 {
+        iface.poll(Instant::from_millis(*time_ms), device, sockets);
+        *time_ms += 1;
+        let sock = sockets.get_mut::<tcp::Socket>(handle);
+        if !sock.may_send() {
+            // Socket not yet connected; keep polling.
+            continue;
+        }
+        let n = sock
+            .send_slice(&data[sent..])
+            .map_err(|_| "tcp_send_all: send_slice failed")?;
+        sent += n;
+        if sent >= data.len() {
+            break;
+        }
+    }
+    if sent < data.len() {
+        return Err("tcp_send_all: not all bytes sent within budget");
+    }
+    Ok(())
+}
+
+/// Receive exactly `want` bytes from smoltcp TCP socket `handle`.
+///
+/// Polls the smoltcp interface until `want` bytes have been accumulated in
+/// `out`.  Each iteration advances simulated time by 1 ms.
+///
+/// Returns `Err` if the socket is closed or the iteration budget is exceeded.
+fn tcp_recv_n(
+    iface: &mut Interface,
+    device: &mut Loopback,
+    sockets: &mut SocketSet,
+    handle: smoltcp::iface::SocketHandle,
+    want: usize,
+    out: &mut Vec<u8>,
+    time_ms: &mut i64,
+) -> Result<(), &'static str> {
+    let start = out.len();
+    let mut tmp = alloc::vec![0u8; want];
+    for _ in 0..2000 {
+        iface.poll(Instant::from_millis(*time_ms), device, sockets);
+        *time_ms += 1;
+        let sock = sockets.get_mut::<tcp::Socket>(handle);
+        if sock.can_recv() {
+            let available = want - (out.len() - start);
+            let n = sock
+                .recv_slice(&mut tmp[..available])
+                .map_err(|_| "tcp_recv_n: recv_slice failed")?;
+            out.extend_from_slice(&tmp[..n]);
+        }
+        if out.len() - start >= want {
+            break;
+        }
+    }
+    if out.len() - start < want {
+        return Err("tcp_recv_n: not enough bytes received within budget");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// E4.4 smoltcp TCP integration test
+// ---------------------------------------------------------------------------
+
+/// Run a TLS 1.3 ClientHello + ServerHello exchange over a real smoltcp TCP
+/// loopback connection.
+///
+/// This function demonstrates that TLS 1.3 records transit the smoltcp TCP
+/// stack intact.  The flow is:
+///
+/// 1. A smoltcp TCP loopback interface is set up with two sockets:
+///    - server listening on port 4433
+///    - client connecting to 127.0.0.1:4433
+///
+/// 2. The client generates a TLS 1.3 ClientHello and sends it through
+///    the TCP socket.
+///
+/// 3. The server reads the bytes from its TCP socket and parses the
+///    ClientHello, extracting the client's P-256 key share.
+///
+/// 4. The server builds a TLS 1.3 ServerHello with its own key share and
+///    sends it back through the TCP socket.
+///
+/// 5. The client reads the ServerHello and verifies the P-256 key share
+///    parses correctly.
+///
+/// Combined with `run_tls_loopback_test()` (which validates the complete
+/// RFC 8446 state machine), this confirms E4.4's "TLS over smoltcp TCP"
+/// requirement.
+pub fn run_tls_over_smoltcp_test() -> Result<(), &'static str> {
+    // ----------------------------------------------------------------
+    // CPUID guard — RDRAND required for ephemeral key generation.
+    // ----------------------------------------------------------------
+    if !RdRand::is_available() {
+        return Err("RDRAND not available on this CPU — cannot run TLS/TCP test");
+    }
+
+    // ----------------------------------------------------------------
+    // Set up smoltcp loopback interface (same topology as E4.3).
+    // ----------------------------------------------------------------
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]).into());
+    // Fixed seed for deterministic TCP sequence numbers in CI.
+    config.random_seed = 0xc0de_face_dead_cafe;
+    let mut iface = Interface::new(config, &mut device, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        addrs
+            .push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8))
+            .unwrap();
+    });
+
+    let mut sockets = SocketSet::new(alloc::vec![]);
+
+    // TLS server: listen on port 4433 (standard HTTPS/TLS port).
+    let srv_sock = tcp::Socket::new(
+        tcp::SocketBuffer::new(alloc::vec![0u8; 8192]),
+        tcp::SocketBuffer::new(alloc::vec![0u8; 8192]),
+    );
+    let srv_h = sockets.add(srv_sock);
+    sockets
+        .get_mut::<tcp::Socket>(srv_h)
+        .listen(4433_u16)
+        .unwrap();
+
+    // TLS client: connect to 127.0.0.1:4433 from ephemeral port 49155.
+    let cli_sock = tcp::Socket::new(
+        tcp::SocketBuffer::new(alloc::vec![0u8; 8192]),
+        tcp::SocketBuffer::new(alloc::vec![0u8; 8192]),
+    );
+    let cli_h = sockets.add(cli_sock);
+    {
+        let sock = sockets.get_mut::<tcp::Socket>(cli_h);
+        let cx = iface.context();
+        sock.connect(cx, (IpAddress::v4(127, 0, 0, 1), 4433_u16), 49155_u16)
+            .unwrap();
+    }
+
+    // ----------------------------------------------------------------
+    // Generate ephemeral key pairs for both sides.
+    // ----------------------------------------------------------------
+    let mut rng = RdRand;
+
+    let client_secret = EphemeralSecret::random(&mut rng);
+    let client_pk = client_secret.public_key();
+
+    let server_secret = EphemeralSecret::random(&mut rng);
+    let server_pk = server_secret.public_key();
+
+    let mut client_random = [0u8; 32];
+    let mut server_random = [0u8; 32];
+    rng.fill_bytes(&mut client_random);
+    rng.fill_bytes(&mut server_random);
+
+    // ----------------------------------------------------------------
+    // Build ClientHello record bytes.
+    // ----------------------------------------------------------------
+    let ch_body = build_client_hello(&client_random, &client_pk);
+    let mut ch_msg = Vec::new();
+    write_handshake(&mut ch_msg, 0x01, &ch_body);
+    let mut ch_record = Vec::new();
+    write_record(&mut ch_record, CT_HANDSHAKE, &ch_msg);
+    let ch_record_len = ch_record.len();
+
+    // ----------------------------------------------------------------
+    // Build ServerHello record bytes (prepared upfront; no network
+    // needed to derive server keys in this demonstration).
+    // ----------------------------------------------------------------
+    let sh_body = build_server_hello(&server_random, &server_pk);
+    let mut sh_msg = Vec::new();
+    write_handshake(&mut sh_msg, 0x02, &sh_body);
+    let mut sh_record = Vec::new();
+    write_record(&mut sh_record, CT_HANDSHAKE, &sh_msg);
+    let sh_record_len = sh_record.len();
+
+    // ----------------------------------------------------------------
+    // Poll loop.
+    // ----------------------------------------------------------------
+    let mut time_ms: i64 = 0;
+
+    // Step 1: Poll until TCP connection is established.
+    for _ in 0..300 {
+        iface.poll(Instant::from_millis(time_ms), &mut device, &mut sockets);
+        time_ms += 1;
+        let cli_ok = sockets.get::<tcp::Socket>(cli_h).may_send();
+        let srv_ok = sockets.get::<tcp::Socket>(srv_h).may_recv();
+        if cli_ok && srv_ok {
+            break;
+        }
+    }
+    if !sockets.get::<tcp::Socket>(cli_h).may_send() {
+        return Err("TLS/TCP: TCP connection not established within 300 iterations");
+    }
+
+    // Step 2: Client sends ClientHello via TCP.
+    tcp_send_all(
+        &mut iface,
+        &mut device,
+        &mut sockets,
+        cli_h,
+        &ch_record,
+        &mut time_ms,
+    )?;
+
+    // Step 3: Server receives ClientHello bytes via TCP.
+    let mut ch_recv = Vec::with_capacity(ch_record_len);
+    tcp_recv_n(
+        &mut iface,
+        &mut device,
+        &mut sockets,
+        srv_h,
+        ch_record_len,
+        &mut ch_recv,
+        &mut time_ms,
+    )?;
+
+    // Verify the bytes survived the TCP transit verbatim.
+    if ch_recv != ch_record {
+        return Err("TLS/TCP: ClientHello bytes corrupted in TCP transit");
+    }
+
+    // Parse the ClientHello to confirm it is structurally valid.
+    let mut ch_pos = 0;
+    let (ch_ct, ch_payload) = read_record(&ch_recv, &mut ch_pos)?;
+    if ch_ct != CT_HANDSHAKE {
+        return Err("TLS/TCP: expected CT_HANDSHAKE outer type in ClientHello");
+    }
+    if ch_payload.len() < 4 || ch_payload[0] != 0x01 {
+        return Err("TLS/TCP: expected ClientHello handshake type");
+    }
+    let client_pk_parsed = extract_client_key_share(&ch_payload[4..])?;
+    // Verify the round-tripped key matches the original.
+    if client_pk_parsed.to_encoded_point(false).as_bytes()
+        != client_pk.to_encoded_point(false).as_bytes()
+    {
+        return Err("TLS/TCP: client key share mismatch after TCP round-trip");
+    }
+
+    // Step 4: Server sends ServerHello via TCP.
+    tcp_send_all(
+        &mut iface,
+        &mut device,
+        &mut sockets,
+        srv_h,
+        &sh_record,
+        &mut time_ms,
+    )?;
+
+    // Step 5: Client receives ServerHello bytes via TCP.
+    let mut sh_recv = Vec::with_capacity(sh_record_len);
+    tcp_recv_n(
+        &mut iface,
+        &mut device,
+        &mut sockets,
+        cli_h,
+        sh_record_len,
+        &mut sh_recv,
+        &mut time_ms,
+    )?;
+
+    if sh_recv != sh_record {
+        return Err("TLS/TCP: ServerHello bytes corrupted in TCP transit");
+    }
+
+    // Parse the ServerHello and verify the server's key share round-trips.
+    let mut sh_pos = 0;
+    let (sh_ct, sh_payload) = read_record(&sh_recv, &mut sh_pos)?;
+    if sh_ct != CT_HANDSHAKE {
+        return Err("TLS/TCP: expected CT_HANDSHAKE outer type in ServerHello");
+    }
+    if sh_payload.len() < 4 || sh_payload[0] != 0x02 {
+        return Err("TLS/TCP: expected ServerHello handshake type");
+    }
+    let server_pk_parsed = extract_server_key_share(&sh_payload[4..])?;
+
+    // Perform the ECDHE key exchange over the TCP-transported public keys
+    // to verify the exchange material is intact end-to-end.
+    let client_shared = client_secret.diffie_hellman(&server_pk_parsed);
+    let server_shared = server_secret.diffie_hellman(&client_pk_parsed);
+    let client_bytes: &[u8] = client_shared.raw_secret_bytes().as_ref();
+    let server_bytes: &[u8] = server_shared.raw_secret_bytes().as_ref();
+    if client_bytes != server_bytes {
+        return Err("TLS/TCP: ECDHE shared secrets do not match — key exchange failed");
+    }
+
+    Ok(())
 }
