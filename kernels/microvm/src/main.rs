@@ -39,7 +39,7 @@
 //!    no real hardware is required.  After the TCP handshake completes and the
 //!    client sends `b"HELLO"` to the server, `E4.3_TCP_DONE` is written to COM1.
 //!
-//! ## E4.4 deliverables (new)
+//! ## E4.4 deliverables (carried forward)
 //!
 //! 7. **S4.4 — TLS 1.3 loopback**: a complete TLS 1.3 handshake and
 //!    application-data exchange runs entirely in-process using two `Vec<u8>`
@@ -48,6 +48,17 @@
 //!    at build time by `build.rs` via `rcgen` and embedded as DER bytes.
 //!    RDRAND provides hardware entropy.  After the handshake and PING exchange
 //!    succeed, `E4.4_TLS_DONE` is written to COM1.
+//!
+//! ## E4.5 deliverables (new)
+//!
+//! 8. **S4.5 — Higher crates ported to microVM**: the `scheduler`, `memory`,
+//!    and `interoception` crates are rebuilt with `default-features = false`
+//!    (no_std + alloc) and exercised inside the kernel via `sleep_soak`.
+//!    The soak runs five phases: context-pressure detection (VirtualContextManager),
+//!    MLFQ task scheduling (TaskAgenda + IterationAwareMlfq), L1 pruning decay
+//!    (L1PruningStore), homeostatic monitoring (HomeostaticMonitor), and an
+//!    associative dream walk (run_dream_walk_no_std).  On success, `E4.5_SOAK_DONE`
+//!    is written to COM1.
 //!
 //! # Serial output strategy
 //!
@@ -61,9 +72,10 @@
 //! - E4.2: `E4.2_TASK_DONE` — Embassy async task completed and signalled.
 //! - E4.3: `E4.3_TCP_DONE` — first TCP connection over smoltcp loopback.
 //! - E4.4: `E4.4_TLS_DONE` — TLS 1.3 handshake and app data exchange complete.
+//! - E4.5: `E4.5_SOAK_DONE` — sleep-cycle soak with no_std higher crates complete.
 //! - `ANIMA_PANIC` — panic handler reached (carried forward from E4.1).
 //!
-//! The CI job (`microvm-boot`) asserts all four.
+//! The CI job (`microvm-boot`) asserts all five.
 // ---------------------------------------------------------------------------
 // Nightly feature gates
 // ---------------------------------------------------------------------------
@@ -75,6 +87,7 @@
 
 extern crate alloc;
 
+mod sleep_soak;
 mod tls;
 
 use alloc::vec::Vec;
@@ -213,8 +226,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
         serial_init();
     }
     serial_write("\r\n");
-    serial_write("ANIMA_PANIC: E4.4 — all exit criteria met, panic handler reached\r\n");
-    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ E4.4 ✅ — kernel boot task complete.\r\n");
+    serial_write("ANIMA_PANIC: E4.5 — all exit criteria met, panic handler reached\r\n");
+    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ E4.4 ✅ E4.5 ✅ — kernel boot task complete.\r\n");
     loop {
         core::hint::spin_loop();
     }
@@ -359,9 +372,24 @@ async fn kernel_boot_task() {
     tls::run_tls_loopback_test().expect("TLS loopback test failed");
     serial_write("E4.4_TLS_DONE: TLS 1.3 handshake and app data exchange complete\n");
 
+    // ------------------------------------------------------------------
+    // Phase 7 — Sleep-cycle soak with no_std higher crates (E4.5 exit criterion)
+    //
+    // Exercises `scheduler`, `memory`, and `interoception` in no_std mode:
+    //   - VirtualContextManager pressure events (Normal / HighWater / Critical)
+    //   - TaskAgenda MLFQ task selection and IterationAwareMlfq boost
+    //   - L1PruningStore decay pass with node eviction
+    //   - HomeostaticMonitor systemic stress index
+    //   - run_dream_walk_no_std associative edge generation
+    // ------------------------------------------------------------------
+    serial_write("\n[E4.5] kernel_boot_task: Phase 7 — sleep-cycle soak\n");
+    embassy_futures::yield_now().await;
+
+    sleep_soak::run_sleep_soak(serial_write).expect("E4.5 sleep-cycle soak failed");
+
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.
-    panic!("ANIMA_PANIC: deliberate panic — E4.1/E4.2/E4.3/E4.4 exit criteria all met");
+    panic!("ANIMA_PANIC: deliberate panic — E4.1/E4.2/E4.3/E4.4/E4.5 exit criteria all met");
 }
 
 // ---------------------------------------------------------------------------

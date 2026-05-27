@@ -1,7 +1,22 @@
 //! Provider-agnostic LLM backend abstraction.
 
-use std::future::Future;
-use std::pin::Pin;
+// `core::future`, `core::pin`, and `core::task` are available in both std and
+// no_std environments; they are the canonical home of Future/Pin/Waker since
+// Rust 1.36.  We use them directly so this module compiles without std.
+use core::future::Future;
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+// In no_std+alloc mode, Vec/String/Box live in the `alloc` crate.
+// In std mode they come from the prelude — no explicit import needed.
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String, vec::Vec};
+
+// Arc lives in alloc::sync in no_std+alloc; std::sync in hosted builds.
+#[cfg(feature = "std")]
+use std::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
 
 /// Streaming completion item: a single emitted token or signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,9 +86,13 @@ pub trait LlmBackend: Send + Sync {
 }
 
 /// Cooperative cancellation flag for streaming requests.
+///
+/// Backed by an `Arc<AtomicBool>` so the token is `Clone`able and can be
+/// shared between the producer and any number of consumers without requiring
+/// `std::sync::Mutex`.  The `Arc` comes from `alloc` in no_std builds.
 #[derive(Debug, Default, Clone)]
 pub struct CancellationToken {
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl CancellationToken {
@@ -84,12 +103,11 @@ impl CancellationToken {
 
     /// Trips the token.
     pub fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 
     /// Returns true if the token has been tripped.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst)
     }
 }

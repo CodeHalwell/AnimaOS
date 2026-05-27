@@ -5,18 +5,28 @@
 //! # Structure
 //!
 //! - [`circuit`] — Closed/Open/HalfOpen circuit breaker per tool pathway.
-//! - [`compute`] — Wasmtime sandbox for untrusted tool execution (E2.5).
+//! - [`compute`] — Wasmtime sandbox for untrusted tool execution (E2.5) — std only.
 //! - [`envelope`] — [`ToolEnvelope`] type carrying calls across MCP/A2A buses.
 //! - [`registry`] — [`ToolRegistry`]: registration, discovery, and dispatch.
 //! - [`routing`] — [`length_robust_filter`]: relative-score tool selection.
+//!
+//! # `no_std` note (E4.5)
+//!
+//! `praxis` requires `std` because the Wasmtime sandbox is not `no_std`-compatible.
+//! The `std` feature (default = true) must be enabled for all current functionality.
+//! A future micro-wasm interpreter could unlock a genuine `no_std` compute layer.
 
 pub mod circuit;
-pub mod compute;
 pub mod envelope;
 pub mod registry;
 pub mod routing;
 
+// Wasmtime sandbox is std-only.
+#[cfg(feature = "std")]
+pub mod compute;
+
 pub use circuit::{BreakerState, CircuitBreaker};
+#[cfg(feature = "std")]
 pub use compute::{
     SandboxCapabilities, SandboxConfig, SandboxError, SandboxResult, SandboxedMathEvaluator,
     WasmSandbox,

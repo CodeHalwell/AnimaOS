@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# ---------------------------------------------------------------------------
+# E4.5 — no_std feature gate
+#
+# default = ["std"]: hosted builds and workspace tests use std as usual.
+# Selecting `default-features = false` (as the microVM kernel does) gives a
+# no_std + alloc build: TaskAgenda, BoundedTokenPipe, Task, MlfqTier, and the
+# full LlmBackend trait are still available; only the MockLlmBackend (which
+# needs std test infrastructure) is excluded.
+# ---------------------------------------------------------------------------
+[features]
+default = ["std"]
+std = []
+
 [dev-dependencies]
 criterion.workspace = true
 

@@ -939,6 +939,7 @@ name = "memory"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "libm",
  "scc",
  "scheduler",
  "serde",

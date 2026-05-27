@@ -1364,7 +1364,7 @@ Security fixes applied vs. initial implementation (addressing code review):
   Finished records, CT_APP_DATA for application-data records.
 Static heap enlarged to 2 MiB; QEMU memory raised to 512M; timeout to 120s.
 
-### Epic E4.5 — Higher Crates Ported to MicroVM ⬜
+### Epic E4.5 — Higher Crates Ported to MicroVM ✅
 
 **Scope.** Port `vita`, `scheduler`, `memory`, `praxis`, `anima-self`,
 `interoception`, and `senses` to the microVM target. Promote the
@@ -1373,7 +1373,25 @@ microVM target to production status; retain hosted for development.
 **Dependencies.** E4.4.
 
 **Exit criteria.**
-1. The Stage 3 sleep-cycle soak passes inside the microVM target.
+1. ✅ The Stage 3 sleep-cycle soak passes inside the microVM target.
+
+**Completed work (branch `claude/intelligent-cannon-ROLFb`).**
+- Added `#![cfg_attr(not(feature = "std"), no_std)]` + `[features] default = ["std"]` to:
+  `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses`, `vita`.
+- `scheduler`: converted `std::future`/`std::pin` imports to `core::`, gated `MockLlmBackend`
+  behind `#[cfg(feature = "std")]`, propagated `alloc` in no_std mode.
+- `memory`: made `scc`, `serde`, `serde_json` optional (std-only); gated `archival`,
+  `compilation`, `l2_cache`, `replay`, `turboquant` modules behind `#[cfg(feature = "std")]`;
+  added `run_dream_walk_no_std` with `InMemoryEntry`; added `libm` feature for no_std float math
+  (`f32::exp`, `f32::sqrt`); propagated `scheduler/std` via feature dependency.
+- `praxis`: made `wasmtime`/`anyhow` optional; gated `compute` module behind std.
+- `interoception`: gated `budget`/`power` modules and `SensoryBridge` behind std;
+  `HomeostaticMonitor` always available.
+- `kernels/microvm`: added `scheduler`, `memory` (with `libm` feature), `interoception`
+  as no_std dependencies; created `sleep_soak.rs` with 5-phase soak:
+  (1) VirtualContextManager pressure, (2) MLFQ TaskAgenda + boost, (3) L1PruningStore decay,
+  (4) HomeostaticMonitor stress index, (5) `run_dream_walk_no_std` associative edges.
+  Writes `E4.5_SOAK_DONE` to COM1 on success.
 
 ### Epic E4.6 — Formal Verification Rollout ⬜
 

@@ -1,5 +1,10 @@
 //! Emotionally modulated exponential decay model for episodic memory nodes.
 
+// In no_std mode, f32::exp() is provided by the `libm` crate (expf).
+// In std mode, f32::exp() resolves via libc's libm — no import needed.
+#[cfg(feature = "libm")]
+use libm::expf;
+
 /// Absolute semantic floor below which a node's activation cannot decay.
 pub const SEMANTIC_FLOOR: f32 = 0.3;
 
@@ -54,7 +59,11 @@ impl MemoryNode {
     pub fn activation_at(&self, t: f32) -> f32 {
         let modulator =
             1.0 + self.alpha * self.emotion.arousal + self.sigma * self.emotion.surprise;
-        let raw = self.initial_activation * (-self.lambda * t).exp() * modulator;
+        #[cfg(not(feature = "libm"))]
+        let exponent = (-self.lambda * t).exp();
+        #[cfg(feature = "libm")]
+        let exponent = expf(-self.lambda * t);
+        let raw = self.initial_activation * exponent * modulator;
         raw.max(SEMANTIC_FLOOR)
     }
 

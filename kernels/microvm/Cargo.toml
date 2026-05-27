@@ -3,7 +3,7 @@ name = "anima-microvm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy → E4.3 smoltcp → E4.4 TLS)"
+description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy → E4.3 smoltcp → E4.4 TLS → E4.5 sleep-soak)"
 # This package is intentionally NOT a member of the workspace root Cargo.toml.
 # It targets a bare-metal UEFI environment (x86_64-unknown-uefi) and requires
 # the nightly toolchain with build-std.  Its own rust-toolchain.toml pins the
@@ -22,6 +22,27 @@ path = "src/main.rs"
 [dependencies]
 # corpus: shared no_std substrate — FrameAllocator + BumpAllocator.
 corpus = { path = "../../crates/corpus" }
+
+# -------------------------------------------------------------------------
+# Epic E4.5 — Higher crates ported to microVM (no_std, default-features = false)
+# -------------------------------------------------------------------------
+# scheduler: MLFQ task scheduling — Task, TaskAgenda, BoundedTokenPipe.
+#   All public types are available in no_std mode.  MockLlmBackend is gated
+#   behind std and is therefore not compiled into the microVM kernel.
+scheduler = { path = "../../crates/scheduler", default-features = false }
+
+# memory: Synaptic memory layer — VirtualContextManager, L1PruningStore,
+#   MemoryNode, run_dream_walk_no_std.  std-only modules (l2_cache, archival,
+#   compilation, replay, turboquant) are gated behind the std feature and are
+#   excluded when default-features = false.
+# libm: activates the libm float-math backend for no_std builds (f32::exp,
+#   f32::sqrt etc. are not available from libc in bare-metal UEFI environments).
+memory = { path = "../../crates/memory", default-features = false, features = ["libm"] }
+
+# interoception: Homeostatic monitoring — HomeostaticMonitor,
+#   InteroceptiveSignals, SignalPublisher.  The SensoryBridge and budget/power
+#   modules require std and are excluded.
+interoception = { path = "../../crates/interoception", default-features = false }
 
 # uefi: UEFI application framework.
 # Features used:

@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// anima-self is fully no_std-clean: it uses only core::marker::PhantomData.
+#![cfg_attr(not(feature = "std"), no_std)]
 
 //! Self/Non-Self barrier: typestate-encoded object-capability tokens.
 //!

@@ -4,9 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# E4.5: wasmtime requires std; praxis is std-only until a no_std compute
+# substrate (e.g. micro-wasm interpreter) replaces wasmtime.
+[features]
+default = ["std"]
+std = ["dep:anyhow", "dep:wasmtime"]
+
 [dependencies]
-anyhow.workspace = true
-wasmtime.workspace = true
+anyhow = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

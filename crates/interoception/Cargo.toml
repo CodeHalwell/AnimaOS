@@ -3,3 +3,19 @@ name = "interoception"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+# ---------------------------------------------------------------------------
+# E4.5 — no_std feature gate
+#
+# In no_std mode (default-features = false), the following subset is
+# available:
+#   - InteroceptiveSignals (pure f32 struct, zero deps)
+#   - HomeostaticMonitor (needs alloc::collections::VecDeque)
+#   - NullPublisher / FnPublisher traits
+#
+# The financial-budget sensor (HashMap), power sensor (std::fs), and
+# InteroceptiveSensorBundle aggregator are std-only.
+# ---------------------------------------------------------------------------
+[features]
+default = ["std"]
+std = []
