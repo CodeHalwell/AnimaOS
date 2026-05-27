@@ -68,7 +68,8 @@ pub use controller::{
     KvGateDecision, LinearGate, NoQuantizer, Quantizer,
 };
 pub use eval::{
-    run_controller_benchmark, run_lru_benchmark, NeedleBenchmarkConfig, NeedleRecallResult,
+    run_controller_benchmark, run_controller_benchmark_on_features, run_lru_benchmark,
+    run_lru_benchmark_on_features, NeedleBenchmarkConfig, NeedleRecallResult,
 };
 pub use features::{BlockFeatures, BlockRole};
 pub use trace::{

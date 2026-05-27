@@ -68,6 +68,82 @@ jobs:
   # Both jobs use pre-built binaries from GitHub Marketplace actions to keep
   # CI fast (avoids compiling the tools from source on every run).
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Epic E5.8 — Kill-Shot Demonstrations
+  # -------------------------------------------------------------------------
+  # The xtask crate lives in its own Cargo workspace (xtask/Cargo.toml) so
+  # the root workspace jobs (fmt, build-and-test, clippy) do not cover it.
+  # These dedicated jobs replicate the same quality gates for xtask so that
+  # formatting, lints, tests, and supply-chain policy cannot regress silently.
+  # The actual demo run (which writes to artifacts/) is not executed in CI
+  # because the artefact bundle is intentionally not version-controlled.
+  # -------------------------------------------------------------------------
+  xtask-fmt:
+    name: xtask rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+      - name: Check xtask formatting
+        run: cargo fmt --manifest-path xtask/Cargo.toml -- --check
+
+  xtask-build:
+    name: xtask build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-cargo-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-cargo-
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml --all-targets
+
+  xtask-clippy:
+    name: xtask clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clippy
+        run: rustup component add clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-cargo-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-cargo-
+      - name: Run clippy on xtask
+        run: cargo clippy --manifest-path xtask/Cargo.toml --all-targets -- -D warnings
+
+  xtask-test:
+    name: xtask test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-cargo-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-cargo-
+      - name: Run xtask tests
+        run: cargo test --manifest-path xtask/Cargo.toml --all-targets
+
   security-audit:
     name: security audit (cargo-audit)
     runs-on: ubuntu-latest
