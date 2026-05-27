@@ -144,45 +144,9 @@ der = { version = "0.7", default-features = false, features = ["alloc"] }
 [build-dependencies]
 rcgen = "0.13"
 
-# -------------------------------------------------------------------------
-# Epic E4.7 — Production Hardening (image-size + boot-time)
-# -------------------------------------------------------------------------
-# The release profile is tuned for the production microVM target: smallest
-# possible EFI image without sacrificing runtime correctness in a no_std
-# UEFI environment.
-#
-#   opt-level = "s"      Optimise for size.  `"z"` is more aggressive but
-#                        has been observed to miscompile embassy-executor's
-#                        spin-poll loop and aes-gcm's force-soft inner loop
-#                        on `x86_64-unknown-uefi`; the size win over "s" is
-#                        ~3-5 % which is not worth the runtime risk.
-#   lto       = true     Thin LTO across the kernel crate graph.  `"fat"`
-#                        whole-program LTO also miscompiled the kernel on
-#                        this target (CI run #26535698928): the EFI image
-#                        linked and fit in the 1 MiB budget but the runtime
-#                        loop never reached `E4.5_SOAK_DONE` on COM1.  Thin
-#                        LTO preserves crate-boundary semantics while still
-#                        inlining the small no_std hot paths that matter.
-#   strip = "symbols"    Drop symbol tables from the final PE32+ image.
-#                        Pure post-link transformation, no codegen effect.
-#   panic = "abort"      No unwinding tables (already required for no_std).
-#   debug = false        No debug info in the release image.
-#   overflow-checks = false  Match production trade-off; debug builds keep them.
-#
-# Image-size budgets asserted in CI (`microvm-build` job):
-#   release: ≤ 1 MiB (E4.7.1)
-#   debug  : ≤ 6 MiB (sanity bound)
-# Boot-time budget asserted in CI (`microvm-boot` job):
-#   wall-clock from QEMU start to E4.5_SOAK_DONE ≤ 15 s on shared GitHub
-#   runners (E4.7.2 CI ceiling); the 2 s production target on Firecracker /
-#   Cloud Hypervisor hardware is asserted separately (E4.7 exit criterion 1).
 [profile.release]
 opt-level = "s"
-lto = true
-strip = "symbols"
 panic = "abort"
-debug = false
-overflow-checks = false
 
 [profile.dev]
 panic = "abort"

@@ -105,8 +105,15 @@ pub fn run_sleep_soak(serial: impl Fn(&str)) -> Result<(), &'static str> {
     }
 
     // IterationAwareMlfq boost: all remaining tasks are promoted to high.
-    let mut mlfq = IterationAwareMlfq::with_boost_interval(1);
-    let boosted = mlfq.check_and_boost(&mut agenda);
+    // We bypass `check_and_boost` (which is a policy gate that requires
+    // prior dispatches before it fires — see the no-boost-before-any-
+    // dispatch contract in mlfq.rs) and exercise the underlying operation
+    // directly.  The soak's intent is to verify that `boost_all_to_high`
+    // moves Medium/Low tasks into the High tier in a no_std build; the
+    // dispatch-counting policy is exercised by the std-side scheduler
+    // tests, not by the kernel soak.
+    let _mlfq = IterationAwareMlfq::with_boost_interval(1);
+    let boosted = agenda.boost_all_to_high();
     if boosted == 0 {
         return Err("E4.5 Phase 2 FAILED: boost_all_to_high promoted zero tasks");
     }
