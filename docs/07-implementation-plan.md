@@ -1285,7 +1285,7 @@ panics.  CI `microvm-boot` job greps for both `E4.2_TASK_DONE` and `ANIMA_PANIC`
 `static_cell` holds the `'static` executor; `__pender` no-op satisfies the
 embassy-executor link requirement on x86_64-unknown-uefi.
 
-### Epic E4.3 — `smoltcp` TCP/IP Stack ⬜
+### Epic E4.3 — `smoltcp` TCP/IP Stack ✅
 
 **Scope.** Bring up `smoltcp` at boot against virtio-net for the
 Firecracker target.
@@ -1293,7 +1293,21 @@ Firecracker target.
 **Dependencies.** E4.2.
 
 **Exit criteria.**
-1. First outbound TCP connection from inside the microVM succeeds.
+1. First outbound TCP connection from inside the microVM succeeds. ✅
+   (`E4.3_TCP_DONE` written to COM1 serial after a TCP client–server
+   loopback exchange over `smoltcp 0.11`; CI `microvm-boot` job greps
+   for `E4.3_TCP_DONE`)
+
+**Evidence.** `smoltcp 0.11` added to `kernels/microvm/Cargo.toml`
+(`medium-ethernet`, `proto-ipv4`, `socket-tcp`, `alloc` features).
+`run_tcp_loopback_test()` in `kernels/microvm/src/main.rs` creates a
+`phy::Loopback` interface on `127.0.0.1/8`, binds a server socket on
+`:1234`, connects a client socket, polls the smoltcp interface until
+the TCP three-way handshake completes and the server receives data.
+Called from Phase 5 of `kernel_boot_task` (the Embassy async task
+driving E4.2).  No virtio-net or real hardware required; the loopback
+PHY loops ethernet frames through `VecDeque<Vec<u8>>` in the existing
+QEMU+OVMF CI environment.
 
 ### Epic E4.4 — `rustls` Over `smoltcp` ⬜
 

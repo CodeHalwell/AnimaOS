@@ -3,7 +3,7 @@ name = "anima-microvm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy executor)"
+description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy → E4.3 smoltcp)"
 # This package is intentionally NOT a member of the workspace root Cargo.toml.
 # It targets a bare-metal UEFI environment (x86_64-unknown-uefi) and requires
 # the nightly toolchain with build-std.  Its own rust-toolchain.toml pins the
@@ -59,6 +59,36 @@ log = { version = "0.4", default-features = false }
 embassy-executor = { version = "0.7", features = ["nightly"] }
 embassy-futures = "0.1"
 static_cell = "2"
+
+# -------------------------------------------------------------------------
+# Epic E4.3 — smoltcp TCP/IP stack
+# -------------------------------------------------------------------------
+# smoltcp: no_std, alloc-enabled TCP/IP implementation.
+#
+# Features selected (minimal set for a loopback TCP demonstration):
+#   proto-ipv4    — IPv4 protocol support (address handling, routing).
+#   socket-tcp    — TCP socket implementation (connect/listen/send/recv).
+#   medium-ethernet — Enables the Loopback PHY device which operates at
+#                  the ethernet frame level.  Required by phy::Loopback.
+#   alloc         — Use alloc::Vec/VecDeque for socket buffers and the
+#                  Loopback packet queue.  Requires a global allocator
+#                  (supplied by corpus::BumpAllocator / S4.1.2).
+#
+# Features deliberately excluded:
+#   std, log      — We write all output directly to COM1.
+#   proto-ipv6    — Out of scope for this epic.
+#   medium-ip     — We use medium-ethernet so the Loopback PHY compiles.
+#
+# The loopback PHY (phy::Loopback) is used to demonstrate the first TCP
+# connection without real hardware.  Packets are looped through an in-
+# memory VecDeque<Vec<u8>> so both sides of the connection run in the same
+# poll loop — no virtio-net device is required in the CI QEMU invocation.
+smoltcp = { version = "0.11", default-features = false, features = [
+    "proto-ipv4",
+    "socket-tcp",
+    "medium-ethernet",
+    "alloc",
+] }
 
 [profile.release]
 opt-level = "s"
