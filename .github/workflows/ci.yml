@@ -202,6 +202,20 @@ jobs:
   microvm-build:
     name: microVM UEFI build (S4.1.1–S4.1.3, S4.2.1–S4.2.2, S4.3, S4.4)
     runs-on: ubuntu-latest
+    env:
+      # The global RUSTFLAGS: "-D warnings" overrides (and silently drops) any
+      # [target.x86_64-unknown-uefi].rustflags entries in .cargo/config.toml.
+      # This is documented Cargo behaviour: env RUSTFLAGS takes priority over
+      # config-file rustflags.  The TLS crypto crates (polyval, aes) require
+      # force-soft CFG flags to suppress CLMUL/AES-NI intrinsics that LLVM
+      # cannot lower for the x86_64-unknown-uefi target.  We merge -D warnings
+      # with the three force-soft flags here so the config entries are not
+      # needed at build time.
+      RUSTFLAGS: >-
+        -D warnings
+        --cfg aes_force_soft
+        --cfg polyval_force_soft
+        --cfg sha2_force_soft
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly toolchain + rust-src
