@@ -322,7 +322,7 @@ jobs:
           echo "Using OVMF: $OVMF_CODE"
 
           # Run QEMU.  The boot task runs all phases (Embassy + smoltcp TCP +
-          # TLS 1.3 + sleep-cycle soak) then panics.  120 s is ample.
+          # TLS 1.3 + sleep-cycle soak) then panics.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
           # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
           #   QEMU's default qemu64 CPU model does not include RDRAND; without
@@ -336,11 +336,14 @@ jobs:
           # the soak completes and the panic loop is bounded only by
           # `timeout`, which would dominate the elapsed total.
           #
-          # Strategy: start QEMU in the background, poll the serial log for
-          # `E4.5_SOAK_DONE`, record the elapsed nanoseconds, then kill the
-          # QEMU process.  If the marker never appears within 60 s we let
-          # the wait fall through and the per-marker grep gates below catch
-          # the actual failure mode.
+          # Strategy: start QEMU in the background and poll the serial log
+          # until `E4.5_SOAK_DONE` appears (max 180 s).  As soon as the
+          # marker is seen, record the elapsed milliseconds and SIGKILL
+          # QEMU so the panic-spin loop is bounded.  The previous design
+          # used a 60 s poll + 30 s drain which gave the kernel only ~90 s
+          # of wall-clock — that timed out on shared GitHub runners where
+          # OVMF init + the TLS handshake alone can consume 60-90 s.
+          POLL_BUDGET_S=180
           : > /tmp/qemu-serial.txt
           BOOT_START_NS=$(date +%s%N)
           qemu-system-x86_64 \
@@ -353,34 +356,46 @@ jobs:
             -no-reboot \
             2>/tmp/qemu-stderr.txt &
           QEMU_PID=$!
-          # Poll the serial log every 50 ms for up to 60 s.
           BOOT_MS=""
-          for _ in $(seq 1 1200); do
+          # 20 polls/sec → POLL_BUDGET_S * 20 iterations.
+          for _ in $(seq 1 $((POLL_BUDGET_S * 20))); do
             if grep -q "E4.5_SOAK_DONE" /tmp/qemu-serial.txt 2>/dev/null; then
               BOOT_END_NS=$(date +%s%N)
               BOOT_MS=$(( (BOOT_END_NS - BOOT_START_NS) / 1000000 ))
               break
             fi
-            # Short-circuit on early panic — the kernel writes ANIMA_PANIC
-            # before any DONE marker only if something blew up.
             if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              # QEMU exited (panic-spin will hold it open normally — this
+              # branch fires only if QEMU crashed before reaching the
+              # panic handler).  Break and let per-marker gates diagnose.
               break
             fi
             sleep 0.05
           done
-          # Give QEMU 30 s to drain remaining markers, then kill it so the
-          # job doesn't hang on the post-soak panic loop.
-          ( sleep 30 && kill "$QEMU_PID" 2>/dev/null || true ) &
+          # Kill QEMU now — either the soak completed (marker observed) or
+          # we hit the poll budget.  Either way, the panic-spin loop must
+          # not pin the runner.
+          kill "$QEMU_PID" 2>/dev/null || true
           wait "$QEMU_PID" 2>/dev/null || true
+
+          # ----------------------------------------------------------
+          # Diagnostic output — always print, regardless of success.
+          # ----------------------------------------------------------
+          SERIAL_BYTES=$(wc -c < /tmp/qemu-serial.txt 2>/dev/null || echo 0)
+          SERIAL_LINES=$(wc -l < /tmp/qemu-serial.txt 2>/dev/null || echo 0)
+          echo "=== QEMU serial log: ${SERIAL_BYTES} bytes, ${SERIAL_LINES} lines ==="
+          cat /tmp/qemu-serial.txt || true
+          echo "=== last 5 serial lines (quick marker check) ==="
+          tail -n 5 /tmp/qemu-serial.txt 2>/dev/null || true
+          echo "=== QEMU stderr ==="
+          cat /tmp/qemu-stderr.txt || true
+
           if [ -n "$BOOT_MS" ]; then
             echo "$BOOT_MS" > /tmp/qemu-boot-time.txt
-            echo "Boot-to-soak-complete: ${BOOT_MS} ms (E4.7.2 budget ≤ 2000 ms)"
+            echo "Boot-to-soak-complete: ${BOOT_MS} ms"
           else
-            echo "Boot-to-soak-complete: marker not seen within 60 s — boot-time gate will be skipped; per-marker gates below will surface the real failure."
+            echo "Boot-to-soak-complete: E4.5_SOAK_DONE not seen within ${POLL_BUDGET_S} s — per-marker gates below will identify the failing phase."
           fi
-
-          echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
-          echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
 
           # E4.2 exit criterion: Embassy async task completed and signalled.
           grep -q "E4.2_TASK_DONE" /tmp/qemu-serial.txt && \
