@@ -170,7 +170,7 @@ pub fn run_sleep_soak(serial: impl Fn(&str)) -> Result<(), &'static str> {
 
     // With 50 % of the context window occupied the stress index should be > 0.
     let stress = monitor.compute_systemic_stress_index(512, 1024);
-    if stress < 0.0 || stress > 1.0 {
+    if !(0.0..=1.0).contains(&stress) {
         return Err("E4.5 Phase 4 FAILED: systemic stress index out of [0,1] range");
     }
     serial("[E4.5]   systemic stress index in [0,1] ✓\n");
