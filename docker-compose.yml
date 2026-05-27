@@ -1,0 +1,48 @@
+# AnimaOS hosted-kernel — local deployment with GPU passthrough.
+#
+# Prereqs on the host:
+#   - Docker 23+ (BuildKit is the default)
+#   - NVIDIA driver (any recent driver that supports the 3090; CUDA 12.4
+#     requires driver >= 550.54)
+#   - nvidia-container-toolkit installed and configured:
+#       https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+#
+# Bring it up:
+#   docker compose up --build
+#
+# Run a subcommand once and exit:
+#   docker compose run --rm hosted why
+#   docker compose run --rm hosted identity show
+#
+# Verify the GPU is visible from inside:
+#   docker compose run --rm --entrypoint nvidia-smi hosted
+
+services:
+  hosted:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: animaos/hosted:dev
+    container_name: anima-hosted
+    environment:
+      # Pick a backend: mock | anthropic | openai
+      ANIMA_BACKEND: ${ANIMA_BACKEND:-mock}
+      # Pass live keys through from the host if set; otherwise empty.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      # Persist the identity store across runs (~/.anima inside the container).
+      - anima-data:/home/anima/.anima
+    # GPU passthrough. Requires nvidia-container-toolkit on the host.
+    # Remove this block if you just want to run the mock backend on a
+    # CPU-only machine.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  anima-data:

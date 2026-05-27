@@ -1,0 +1,14 @@
+.git
+.github
+target
+**/target
+kernels/microvm/target
+web/node_modules
+web/dist
+docs
+*.log
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store

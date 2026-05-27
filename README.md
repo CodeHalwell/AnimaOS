@@ -80,3 +80,15 @@ cargo run -p hosted --bin anima-hosted
 ```
 
 CI runs `cargo fmt --check`, build, test, and `cargo clippy -- -D warnings`.
+
+## Docker (GPU-ready local deployment)
+
+A spike for running `anima-hosted` in a container with NVIDIA GPU
+passthrough lives under [`docker/`](./docker/README.md). Quick start:
+
+```sh
+docker compose up --build
+```
+
+See [`docker/README.md`](./docker/README.md) for prerequisites
+(nvidia-container-toolkit), live-backend env vars, and known limitations.
