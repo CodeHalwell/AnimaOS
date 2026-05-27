@@ -77,7 +77,9 @@ pub use turboquant::{
 
 // Always-available re-exports (no_std + std)
 pub use decay::{EmotionalContext, MemoryNode};
-pub use dreaming::{AssociativeEdge, DreamConfig, DreamReport, InMemoryEntry, run_dream_walk_no_std};
+pub use dreaming::{
+    run_dream_walk_no_std, AssociativeEdge, DreamConfig, DreamReport, InMemoryEntry,
+};
 pub use pressure::MemoryPressureEvent;
 pub use pruning::{L1PruningStore, PruningReport};
 

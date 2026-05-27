@@ -13,10 +13,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 // Arc lives in alloc::sync in no_std+alloc; std::sync in hosted builds.
-#[cfg(feature = "std")]
-use std::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 /// Streaming completion item: a single emitted token or signal.
 #[derive(Debug, Clone, PartialEq, Eq)]

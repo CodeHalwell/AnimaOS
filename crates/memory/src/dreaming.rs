@@ -482,10 +482,7 @@ mod tests {
         };
         let (_, candidates) = run_dream_walk(&l3, &config);
         for edge in &candidates {
-            assert!(
-                edge.similarity >= 0.99,
-                "edge {edge:?} is below threshold"
-            );
+            assert!(edge.similarity >= 0.99, "edge {edge:?} is below threshold");
         }
     }
 
@@ -493,8 +490,7 @@ mod tests {
 
     #[test]
     fn no_std_variant_empty_slice_yields_no_candidates() {
-        let (report, candidates) =
-            run_dream_walk_no_std(&[], &DreamConfig::default());
+        let (report, candidates) = run_dream_walk_no_std(&[], &DreamConfig::default());
         assert_eq!(report.walks_run, 0);
         assert!(candidates.is_empty());
     }
@@ -534,7 +530,10 @@ mod tests {
                 embedding: vec![i as f32, (i + 1) as f32, 0.0, 1.0],
             })
             .collect();
-        let config = DreamConfig { seed: 7, ..DreamConfig::default() };
+        let config = DreamConfig {
+            seed: 7,
+            ..DreamConfig::default()
+        };
         let (_, c1) = run_dream_walk_no_std(&entries, &config);
         let (_, c2) = run_dream_walk_no_std(&entries, &config);
         assert_eq!(c1, c2, "same seed must produce identical candidates");

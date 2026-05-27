@@ -32,8 +32,8 @@
 
 use interoception::HomeostaticMonitor;
 use memory::{
-    DreamConfig, InMemoryEntry, L1PruningStore, MemoryNode, MemoryPressureEvent,
-    VirtualContextManager, run_dream_walk_no_std,
+    run_dream_walk_no_std, DreamConfig, InMemoryEntry, L1PruningStore, MemoryNode,
+    MemoryPressureEvent, VirtualContextManager,
 };
 use scheduler::{IterationAwareMlfq, Task, TaskAgenda};
 

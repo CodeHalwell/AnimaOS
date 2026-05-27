@@ -13,10 +13,10 @@
 //! unit tests that exercise a single priority tier).
 
 // VecDeque lives in std::collections under std, alloc::collections under no_std.
-#[cfg(feature = "std")]
-use std::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::collections::VecDeque;
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 
 // alloc types needed by IterationAwareMlfq and TaskOutcome in no_std mode.
 #[cfg(not(feature = "std"))]

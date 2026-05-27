@@ -24,10 +24,10 @@
 extern crate alloc;
 
 // VecDeque lives in std::collections under std, alloc::collections under no_std.
-#[cfg(feature = "std")]
-use std::collections::VecDeque;
 #[cfg(not(feature = "std"))]
 use alloc::collections::VecDeque;
+#[cfg(feature = "std")]
+use std::collections::VecDeque;
 
 // std-only sensor modules (financial budget uses HashMap, power uses std::fs)
 #[cfg(feature = "std")]

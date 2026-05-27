@@ -26,10 +26,10 @@
 
 // In no_std+alloc mode we alias BTreeMap as HashMap so all existing code
 // continues to compile unchanged.
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap as HashMap;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 // Vec and String need explicit imports in no_std+alloc mode.
 #[cfg(not(feature = "std"))]
@@ -282,7 +282,9 @@ mod tests {
             store.insert(
                 {
                     #[cfg(feature = "std")]
-                    { format!("node-{i}") }
+                    {
+                        format!("node-{i}")
+                    }
                     #[cfg(not(feature = "std"))]
                     {
                         use alloc::format;
@@ -320,7 +322,9 @@ mod tests {
             store.insert(
                 {
                     #[cfg(feature = "std")]
-                    { format!("fast-{i}") }
+                    {
+                        format!("fast-{i}")
+                    }
                     #[cfg(not(feature = "std"))]
                     {
                         use alloc::format;
@@ -334,7 +338,9 @@ mod tests {
             store.insert(
                 {
                     #[cfg(feature = "std")]
-                    { format!("stable-{i}") }
+                    {
+                        format!("stable-{i}")
+                    }
                     #[cfg(not(feature = "std"))]
                     {
                         use alloc::format;
