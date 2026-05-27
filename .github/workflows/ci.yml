@@ -172,13 +172,26 @@ jobs:
           cp kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
              esp/EFI/BOOT/BOOTX64.EFI
       - name: Boot in QEMU and verify panic output
-        # Run QEMU with OVMF; redirect UEFI console to serial; capture output.
-        # We expect the binary to print "ANIMA_PANIC" then halt (the uefi
-        # panic_handler loops forever, so we rely on `timeout` to stop QEMU).
-        # Exit code from `timeout` is 124 on timeout — that is expected.
+        # Strategy: the UEFI binary writes "ANIMA_PANIC" directly to COM1
+        # (port 0x3F8) via x86 port I/O, bypassing OVMF's EFI console routing.
+        # QEMU emulates a 16550A UART at 0x3F8 and forwards all bytes to the
+        # device specified by -serial (here: a file).
+        #
+        # The binary panics and loops — we use timeout to stop QEMU and grep
+        # the captured file.  timeout exit code 124 (timed out) is expected.
         run: |
-          OVMF_CODE=/usr/share/OVMF/OVMF_CODE.fd
-          timeout 60 qemu-system-x86_64 \
+          # Locate OVMF_CODE.fd — the path varies across Ubuntu versions.
+          OVMF_CODE=$(find /usr/share/OVMF /usr/share/ovmf -name "OVMF_CODE*.fd" 2>/dev/null \
+                      | sort | head -1)
+          if [ -z "$OVMF_CODE" ]; then
+            echo "❌ Could not find OVMF_CODE.fd — is ovmf installed?"
+            exit 1
+          fi
+          echo "Using OVMF: $OVMF_CODE"
+
+          # Run QEMU.  The trampoline panics quickly, so 30 s is ample.
+          # -serial file: captures all bytes written to COM1 (port 0x3F8).
+          timeout 30 qemu-system-x86_64 \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive format=raw,file=fat:rw:esp \
             -serial file:/tmp/qemu-serial.txt \
@@ -186,8 +199,10 @@ jobs:
             -m 128M \
             -no-reboot \
             2>/tmp/qemu-stderr.txt || true
+
           echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
           echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
+
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }

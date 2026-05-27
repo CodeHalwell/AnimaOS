@@ -25,14 +25,16 @@ corpus = { path = "../../crates/corpus" }
 
 # uefi: UEFI application framework.
 # Features used:
-#   logger       — wires `log` crate to the UEFI console (SimpleTextOutputProtocol).
-#   panic_handler — installs a panic handler that writes the panic message to
-#                  the UEFI console and spins.  The panic message is what the
-#                  CI QEMU grep looks for ("ANIMA_PANIC").
+#   logger — wires `log` crate to the UEFI console (SimpleTextOutputProtocol).
+#            Good for human-readable on-screen output during development.
 # Deliberately excluded:
+#   panic_handler   — we define our own #[panic_handler] that writes directly
+#                     to COM1 (port 0x3F8) via x86 port I/O, bypassing the
+#                     UEFI console.  QEMU captures COM1 via -serial file:…,
+#                     so the "ANIMA_PANIC" string appears in the CI serial log.
 #   global_allocator — we supply corpus::BumpAllocator as our own
 #                      #[global_allocator] to demonstrate S4.1.2.
-uefi = { version = "0.37", features = ["logger", "panic_handler"] }
+uefi = { version = "0.37", features = ["logger"] }
 
 log = { version = "0.4", default-features = false }
 
