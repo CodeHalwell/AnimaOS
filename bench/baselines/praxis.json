@@ -1,0 +1,72 @@
+{
+  "crate_name": "praxis",
+  "captured_at": "2026-05-27T19:44:47.468943810+00:00",
+  "regression_threshold_pct": 20.0,
+  "noise_floor_ns": 100,
+  "measurements": {
+    "circuit_breaker/record_failure_below_threshold": {
+      "ns_per_iter": 108,
+      "noise": 0
+    },
+    "circuit_breaker/record_success_closed": {
+      "ns_per_iter": 0,
+      "noise": 0
+    },
+    "routing/filter_10_candidates": {
+      "ns_per_iter": 94,
+      "noise": 1
+    },
+    "routing/filter_all_equal/1000": {
+      "ns_per_iter": 55024,
+      "noise": 809
+    },
+    "routing/filter_all_equal/200": {
+      "ns_per_iter": 7690,
+      "noise": 176
+    },
+    "routing/filter_all_equal/50": {
+      "ns_per_iter": 1999,
+      "noise": 36
+    },
+    "routing/filter_candidates/1000": {
+      "ns_per_iter": 16804,
+      "noise": 456
+    },
+    "routing/filter_candidates/200": {
+      "ns_per_iter": 2503,
+      "noise": 83
+    },
+    "routing/filter_candidates/50": {
+      "ns_per_iter": 693,
+      "noise": 16
+    },
+    "tool_registry/dispatch_clock": {
+      "ns_per_iter": 75,
+      "noise": 1
+    },
+    "tool_registry/dispatch_echo": {
+      "ns_per_iter": 43,
+      "noise": 1
+    },
+    "tool_registry/list_after_n_registrations/10": {
+      "ns_per_iter": 452,
+      "noise": 17
+    },
+    "tool_registry/list_after_n_registrations/100": {
+      "ns_per_iter": 7398,
+      "noise": 227
+    },
+    "tool_registry/list_after_n_registrations/1000": {
+      "ns_per_iter": 85928,
+      "noise": 3925
+    },
+    "tool_registry/lookup_echo": {
+      "ns_per_iter": 33,
+      "noise": 0
+    },
+    "tool_registry/lookup_miss": {
+      "ns_per_iter": 22,
+      "noise": 0
+    }
+  }
+}

@@ -244,6 +244,32 @@ jobs:
       - name: Build UEFI image (release)
         working-directory: kernels/microvm
         run: cargo +nightly build --release
+      # ----------------------------------------------------------------
+      # Epic E4.7.1 — image-size budget
+      # ----------------------------------------------------------------
+      # The production microVM target must fit in a small EFI image so
+      # Firecracker/Cloud Hypervisor can mmap it without page-cache churn
+      # at boot.  Budget is 1 MiB for the release image; debug builds get
+      # a 6 MiB sanity bound to catch accidental dependency bloat.
+      - name: Enforce EFI image-size budget (E4.7.1)
+        run: |
+          REL="kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi"
+          DBG="kernels/microvm/target/x86_64-unknown-uefi/debug/anima-microvm.efi"
+          REL_BYTES=$(stat -c%s "$REL")
+          DBG_BYTES=$(stat -c%s "$DBG")
+          REL_BUDGET=$((1 * 1024 * 1024))   # 1 MiB
+          DBG_BUDGET=$((6 * 1024 * 1024))   # 6 MiB
+          printf 'release EFI: %s bytes  (budget %s)\n' "$REL_BYTES" "$REL_BUDGET"
+          printf 'debug   EFI: %s bytes  (budget %s)\n' "$DBG_BYTES" "$DBG_BUDGET"
+          if [ "$REL_BYTES" -gt "$REL_BUDGET" ]; then
+            echo "::error::release EFI exceeds E4.7.1 budget ($REL_BYTES > $REL_BUDGET)"
+            exit 1
+          fi
+          if [ "$DBG_BYTES" -gt "$DBG_BUDGET" ]; then
+            echo "::error::debug EFI exceeds sanity bound ($DBG_BYTES > $DBG_BUDGET)"
+            exit 1
+          fi
+          echo "✅ E4.7.1 image-size budget met"
       - name: Upload EFI artifact
         uses: actions/upload-artifact@v4
         with:
@@ -296,15 +322,28 @@ jobs:
           echo "Using OVMF: $OVMF_CODE"
 
           # Run QEMU.  The boot task runs all phases (Embassy + smoltcp TCP +
-          # TLS 1.3) then panics.  120 s is ample — TLS loopback completes
-          # in ms on hardware.
+          # TLS 1.3 + sleep-cycle soak) then panics.  120 s is ample.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
           # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
           #   QEMU's default qemu64 CPU model does not include RDRAND; without
           #   this flag the CPUID feature check in RdRand::is_available()
           #   returns false and run_tls_loopback_test() returns an error before
           #   writing E4.4_TLS_DONE to COM1.
-          timeout 120 qemu-system-x86_64 \
+          #
+          # E4.7.2 — boot-time measurement.
+          # We measure time-to-completion (QEMU start → last DONE marker on
+          # COM1), not the full QEMU wall-clock — the kernel panics after
+          # the soak completes and the panic loop is bounded only by
+          # `timeout`, which would dominate the elapsed total.
+          #
+          # Strategy: start QEMU in the background, poll the serial log for
+          # `E4.5_SOAK_DONE`, record the elapsed nanoseconds, then kill the
+          # QEMU process.  If the marker never appears within 60 s we let
+          # the wait fall through and the per-marker grep gates below catch
+          # the actual failure mode.
+          : > /tmp/qemu-serial.txt
+          BOOT_START_NS=$(date +%s%N)
+          qemu-system-x86_64 \
             -cpu qemu64,+rdrand \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive format=raw,file=fat:rw:esp \
@@ -312,7 +351,33 @@ jobs:
             -display none \
             -m 512M \
             -no-reboot \
-            2>/tmp/qemu-stderr.txt || true
+            2>/tmp/qemu-stderr.txt &
+          QEMU_PID=$!
+          # Poll the serial log every 50 ms for up to 60 s.
+          BOOT_MS=""
+          for _ in $(seq 1 1200); do
+            if grep -q "E4.5_SOAK_DONE" /tmp/qemu-serial.txt 2>/dev/null; then
+              BOOT_END_NS=$(date +%s%N)
+              BOOT_MS=$(( (BOOT_END_NS - BOOT_START_NS) / 1000000 ))
+              break
+            fi
+            # Short-circuit on early panic — the kernel writes ANIMA_PANIC
+            # before any DONE marker only if something blew up.
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              break
+            fi
+            sleep 0.05
+          done
+          # Give QEMU 30 s to drain remaining markers, then kill it so the
+          # job doesn't hang on the post-soak panic loop.
+          ( sleep 30 && kill "$QEMU_PID" 2>/dev/null || true ) &
+          wait "$QEMU_PID" 2>/dev/null || true
+          if [ -n "$BOOT_MS" ]; then
+            echo "$BOOT_MS" > /tmp/qemu-boot-time.txt
+            echo "Boot-to-soak-complete: ${BOOT_MS} ms (E4.7.2 budget ≤ 2000 ms)"
+          else
+            echo "Boot-to-soak-complete: marker not seen within 60 s — boot-time gate will be skipped; per-marker gates below will surface the real failure."
+          fi
 
           echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
           echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
@@ -332,10 +397,32 @@ jobs:
             echo "✅ E4.4 exit criterion met: TLS 1.3 handshake and application-data exchange complete" || \
             { echo "❌ E4.4_TLS_DONE not found in serial output"; exit 1; }
 
+          # E4.5 exit criterion: sleep-cycle soak (5 phases) complete.
+          grep -q "E4.5_SOAK_DONE" /tmp/qemu-serial.txt && \
+            echo "✅ E4.5 exit criterion met: sleep-cycle soak completed" || \
+            { echo "❌ E4.5_SOAK_DONE not found in serial output"; exit 1; }
+
           # E4.1 exit criterion (carried forward): panic handler reached.
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }
+
+          # ----------------------------------------------------------
+          # E4.7.2 exit criterion: boot-to-soak-complete ≤ 2000 ms.
+          # ----------------------------------------------------------
+          if [ -f /tmp/qemu-boot-time.txt ]; then
+            BOOT_MS=$(cat /tmp/qemu-boot-time.txt)
+            BUDGET_MS=2000
+            if [ "$BOOT_MS" -le "$BUDGET_MS" ]; then
+              echo "✅ E4.7.2 exit criterion met: boot-to-soak-complete ${BOOT_MS} ms ≤ ${BUDGET_MS} ms"
+            else
+              echo "::error::E4.7.2 boot-time budget exceeded: ${BOOT_MS} ms > ${BUDGET_MS} ms"
+              exit 1
+            fi
+          else
+            echo "::error::E4.7.2 boot-time was not captured (E4.5_SOAK_DONE never appeared)"
+            exit 1
+          fi
       - name: Upload QEMU serial log
         if: always()
         uses: actions/upload-artifact@v4

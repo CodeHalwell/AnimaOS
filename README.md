@@ -10,7 +10,10 @@ See [`docs/`](./docs/README.md) for the full design suite.
 
 ```
 anima-os/
-├── .github/workflows/ci.yml   # fmt + build + test + clippy
+├── .github/workflows/ci.yml   # fmt + build + test + clippy + microvm-{build,boot}
+├── .github/workflows/bench.yml    # criterion benches + E4.7 regression gate
+├── .github/workflows/soak.yml     # E4.7 microVM soak harness (manual)
+├── .github/workflows/nightly.yml  # E4.6 Kani + Miri
 ├── Cargo.toml
 ├── crates/
 │   ├── corpus/                # The body (TCB): frame allocator, PCB, syscall enum
@@ -22,8 +25,8 @@ anima-os/
 │   ├── interoception/         # Stress index, TTFT window
 │   └── senses/                # Afferent input: text / PCM packetization
 └── kernels/
-    ├── hosted/                # Linux process emulation binary (`anima-hosted`)
-    └── microvm/               # Firecracker / Cloud Hypervisor unikernel (TBD)
+    ├── hosted/                # Linux process emulation binary (`anima-hosted`) — development only
+    └── microvm/               # x86_64-unknown-uefi framekernel — production target
 ```
 
 > The `self` directory contains the package `anima-self` (Rust import: `anima_self`).
@@ -74,12 +77,37 @@ The non-TCB crates explicitly enforce `#![forbid(unsafe_code)]`.
 ## Building & Running
 
 ```sh
+# Workspace (hosted/dev target) — fmt + clippy + tests on stable Rust.
 cargo build --workspace
 cargo test --workspace
-cargo run -p hosted --bin anima-hosted
+cargo run -p hosted --bin anima-hosted   # development convenience binary
+
+# Production target — bare-metal UEFI framekernel.
+# Requires nightly Rust + the x86_64-unknown-uefi target.
+cd kernels/microvm && cargo +nightly build --release
+
+# microVM soak driver (Epic E4.7).
+cargo xtask soak --hours 1 --efi kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi
 ```
 
-CI runs `cargo fmt --check`, build, test, and `cargo clippy -- -D warnings`.
+CI runs the following gates:
+
+| Workflow      | What it gates                                              |
+|---------------|------------------------------------------------------------|
+| `ci.yml`      | fmt + build + test + clippy, supply-chain audit, microVM UEFI build (E4.7.1 image-size budget) and QEMU boot (E4.7.2 boot-time ≤ 2 s) |
+| `bench.yml`   | Criterion benches with the E4.7.3 regression gate against `bench/baselines/<crate>.json` |
+| `nightly.yml` | Kani bounded model checking (15 proofs) + Miri (E4.6)      |
+| `soak.yml`    | E4.7 soak harness smoke test (manual dispatch)             |
+
+## Targets
+
+| Target                     | Status            | Toolchain | Purpose                                                                 |
+|----------------------------|-------------------|-----------|-------------------------------------------------------------------------|
+| `kernels/microvm`          | **Production**    | nightly + `x86_64-unknown-uefi` | Bare-metal framekernel under Firecracker / Cloud Hypervisor. |
+| `kernels/hosted`           | Development only  | stable    | Linux-process emulation for local experimentation and CI workspace tests. |
+
+The hosted target is retained for development convenience; new subsystem
+features must build for both targets before they can land on `main`.
 
 ## Deployment
 
@@ -87,11 +115,24 @@ Two parallel surfaces share the same workspace code — see
 [`docs/10-deployment-pathways.md`](./docs/10-deployment-pathways.md) for the
 full rationale.
 
-### Containerised (now)
+### Bare-metal microVM (primary)
+
+The UEFI framekernel at `kernels/microvm` boots under Firecracker or Cloud
+Hypervisor.  Per Epic E4.7 production hardening:
+
+- Release image budget: **≤ 1 MiB EFI** (enforced in `ci.yml`).
+- Boot-to-soak-complete budget: **≤ 2 s** under QEMU/OVMF
+  (enforced in `ci.yml`).
+- Continuous 30-day soak driven by `cargo xtask soak --hours 720`; the
+  resulting manifest is committed under `artifacts/soak/` as a durable
+  record of stability.
+
+### Containerised (development)
 
 `anima-hosted` + Ollama (llama.cpp inference) + Unsloth trainer
 (profile-gated, for sleep-phase QLoRA), all wired through
-docker-compose with NVIDIA GPU passthrough:
+docker-compose with NVIDIA GPU passthrough.  Useful for local development
+when iterating on cognition without rebuilding the UEFI kernel each time:
 
 ```sh
 docker compose up --build                       # inference stack
@@ -100,11 +141,3 @@ docker compose --profile training up --build    # also build the trainer
 
 Operational details — model defaults, env vars, VRAM budget on a 3090,
 known limitations — live in [`docker/README.md`](./docker/README.md).
-
-### Bare-metal native (target)
-
-Three flavours (host-native sidecar → in-process Rust inference →
-microVM framekernel) documented in
-[`docs/10-deployment-pathways.md`](./docs/10-deployment-pathways.md).
-Each step preserves the `LlmBackend` trait surface so cognitive code
-never needs rewriting.

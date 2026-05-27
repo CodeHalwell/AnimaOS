@@ -13,6 +13,8 @@ on:
       - 'crates/scheduler/**'
       - 'crates/memory/**'
       - 'crates/praxis/**'
+      - 'xtask/**'
+      - 'bench/baselines/**'
       - '.github/workflows/bench.yml'
 
 env:
@@ -22,6 +24,30 @@ env:
 
 permissions:
   contents: read
+
+# Epic E4.7.3 — Regression Benchmark Suite
+#
+# Every bench step now runs the criterion harness *by name* (`--bench <name>`)
+# so the `--output-format bencher` argument is only fed to the harness that
+# understands it.  The previous form (`cargo bench -p <crate>`) also ran the
+# library's unit-test runner, which rejected `--output-format` on stable.
+# Combined with the missing `pipefail`, that made the bench job silently
+# capture partial output without failing.
+#
+# We then run `xtask bench-baseline check` against the checked-in baseline
+# at `bench/baselines/<crate>.json`.  Any per-bench regression beyond the
+# baseline's `regression_threshold_pct` (and exceeding `noise_floor_ns`)
+# fails the job before the artefacts are uploaded.
+#
+# To refresh a baseline after a deliberate perf change, run locally:
+#   cargo bench -p scheduler --bench scheduler -- --output-format bencher \
+#     | tee bench-scheduler.txt
+#   cargo xtask bench-baseline update --crate scheduler \
+#     --input bench-scheduler.txt --output bench/baselines/scheduler.json
+# then commit the updated baseline JSON.
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
 
 jobs:
   bench:
@@ -46,19 +72,43 @@ jobs:
       # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
-        run: cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+        run: |
+          cargo bench -p scheduler --bench scheduler -- --output-format bencher \
+            | tee bench-scheduler.txt
+      - name: Regression check — scheduler (E4.7.3)
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate scheduler \
+            --input bench-scheduler.txt \
+            --baseline bench/baselines/scheduler.json
 
       # ------------------------------------------------------------------
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
       # ------------------------------------------------------------------
       - name: Benchmark memory
-        run: cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+        run: |
+          cargo bench -p memory --bench memory -- --output-format bencher \
+            | tee bench-memory.txt
+      - name: Regression check — memory (E4.7.3)
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate memory \
+            --input bench-memory.txt \
+            --baseline bench/baselines/memory.json
 
       # ------------------------------------------------------------------
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
       - name: Benchmark praxis
-        run: cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+        run: |
+          cargo bench -p praxis --bench praxis -- --output-format bencher \
+            | tee bench-praxis.txt
+      - name: Regression check — praxis (E4.7.3)
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate praxis \
+            --input bench-praxis.txt \
+            --baseline bench/baselines/praxis.json
 
       # ------------------------------------------------------------------
       # Upload HTML reports as artifacts (available for 30 days)
