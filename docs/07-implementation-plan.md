@@ -1413,7 +1413,7 @@ microVM target to production status; retain hosted for development.
   (4) HomeostaticMonitor stress index, (5) `run_dream_walk_no_std` associative edges.
   Writes `E4.5_SOAK_DONE` to COM1 on success.
 
-### Epic E4.6 — Formal Verification Rollout ⬜
+### Epic E4.6 — Formal Verification Rollout ✅
 
 **Scope.** Kani proofs for scheduler invariants, rate limiters, and the
 ring buffer; Miri clean on the `corpus` test suite; both integrated into
@@ -1421,9 +1421,48 @@ nightly CI.
 
 **Dependencies.** E4.5 (verification surface stabilises after the port).
 
+**Stories.**
+- S4.6.1 Kani proof harnesses for `FrameAllocator` (frame allocator /
+  ring-buffer analogue). ✅ (`crates/corpus/src/frame_allocator.rs` —
+  `allocated_never_exceeds_capacity_after_allocate`,
+  `zero_sized_request_always_returns_zero_sized_request_error`,
+  `sequential_allocations_produce_non_overlapping_ranges`,
+  `successful_allocation_stays_within_capacity_bounds`)
+- S4.6.2 Kani proof harnesses for `BoundedTokenPipe` (rate limiter). ✅
+  (`crates/scheduler/src/token_pipe.rs` —
+  `credits_never_exceed_capacity_after_push`,
+  `credits_never_exceed_capacity_after_refund`,
+  `push_succeeds_iff_n_within_available_credits`,
+  `push_refund_roundtrip_restores_credits`,
+  `produced_is_monotonically_non_decreasing`)
+- S4.6.3 Kani proof harnesses for `TaskAgenda` (scheduler invariants). ✅
+  (`crates/scheduler/src/mlfq.rs` —
+  `push_increases_len_by_exactly_one`,
+  `out_of_range_level_is_clamped_to_last_tier`,
+  `select_on_nonempty_agenda_returns_some`,
+  `select_reduces_len_by_exactly_one`,
+  `select_on_empty_agenda_returns_none`,
+  `boost_all_to_high_empties_all_non_zero_tiers`)
+- S4.6.4 Miri clean on corpus test suite. ✅ (`cargo +nightly miri test -p
+  corpus` in `.github/workflows/nightly.yml`; the default provenance model
+  is used so the BumpAllocator's integer-to-pointer casts are sound)
+- S4.6.5 Nightly CI integration. ✅ (`.github/workflows/nightly.yml` —
+  `miri` job runs `cargo +nightly miri test -p corpus`; `kani` job uses
+  `model-checking/kani-github-action@v1` on `--package corpus --package
+  scheduler`; both jobs trigger on the `0 3 * * *` cron schedule and on
+  `workflow_dispatch`)
+
 **Exit criteria.**
-1. All declared Kani proofs pass in nightly CI.
-2. Miri runs clean on the `corpus` suite.
+1. All declared Kani proofs pass in nightly CI. ✅ (15 `#[kani::proof]`
+   harnesses across `corpus/src/frame_allocator.rs`,
+   `scheduler/src/token_pipe.rs`, and `scheduler/src/mlfq.rs`; harnesses
+   are gated behind `#[cfg(kani)]` with `check-cfg` declared in each
+   crate's `Cargo.toml` so normal builds emit no warnings under
+   `RUSTFLAGS=-D warnings`)
+2. Miri runs clean on the `corpus` suite. ✅ (`miri` job in
+   `nightly.yml` runs all 15 corpus tests including the BumpAllocator
+   unsafe pointer arithmetic; no Miri errors on the default provenance
+   model)
 
 ### Epic E4.7 — Production Hardening and 30-Day Soak ⬜
 

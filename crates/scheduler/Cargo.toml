@@ -17,6 +17,11 @@ license.workspace = true
 default = ["std"]
 std = []
 
+# Declare `kani` as a known cfg so that `#[cfg(kani)]` proof harnesses
+# (Epic E4.6) do not trigger the `unexpected_cfgs` lint in normal builds.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dev-dependencies]
 criterion.workspace = true
 
