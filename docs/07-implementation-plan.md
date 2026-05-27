@@ -1268,7 +1268,7 @@ UEFI boot trampoline that reaches a panic-handler-only state in QEMU.
    then `grep -q "ANIMA_PANIC"` on the captured serial log; `microvm-build`
    job verifies fmt + clippy + debug/release builds independently)
 
-### Epic E4.2 — Embassy Runtime Inside `corpus` ⬜
+### Epic E4.2 — Embassy Runtime Inside `corpus` ✅
 
 **Scope.** Embed Embassy's async executor in the kernel and run the
 first kernel-level task to completion.
@@ -1277,6 +1277,13 @@ first kernel-level task to completion.
 
 **Exit criteria.**
 1. A scheduled async task completes and signals via the audit channel.
+
+**Evidence.** PR feat(E4.2): `embassy-executor` (raw, no arch) + spin-poll loop
+added to `kernels/microvm`.  `kernel_boot_task` (#[embassy_executor::task])
+traverses four `yield_now().await` phases, writes `E4.2_TASK_DONE` to COM1, and
+panics.  CI `microvm-boot` job greps for both `E4.2_TASK_DONE` and `ANIMA_PANIC`.
+`static_cell` holds the `'static` executor; `__pender` no-op satisfies the
+embassy-executor link requirement on x86_64-unknown-uefi.
 
 ### Epic E4.3 — `smoltcp` TCP/IP Stack ⬜
 

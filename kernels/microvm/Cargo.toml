@@ -3,7 +3,7 @@ name = "anima-microvm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "AnimaOS Stage 4 — microVM UEFI boot trampoline"
+description = "AnimaOS Stage 4 — microVM UEFI kernel (E4.1 trampoline → E4.2 Embassy executor)"
 # This package is intentionally NOT a member of the workspace root Cargo.toml.
 # It targets a bare-metal UEFI environment (x86_64-unknown-uefi) and requires
 # the nightly toolchain with build-std.  Its own rust-toolchain.toml pins the
@@ -37,6 +37,28 @@ corpus = { path = "../../crates/corpus" }
 uefi = { version = "0.37", features = ["logger"] }
 
 log = { version = "0.4", default-features = false }
+
+# -------------------------------------------------------------------------
+# Epic E4.2 — Embassy async executor
+# -------------------------------------------------------------------------
+# embassy-executor: bare-metal cooperative async scheduler.
+#   nightly — enables nightly-only optimisations (we're already on nightly).
+#   No arch-* feature is selected: on x86_64 the executor falls back to a
+#   portable spin-poll loop, which is exactly what we need under UEFI where
+#   there is no OS scheduler and interrupts are not wired to a wake-up
+#   mechanism.
+#
+# embassy-futures: no_std future combinators.
+#   yield_now() — single cooperative yield point, used to demonstrate that
+#   the executor round-trips through its poll loop between await points.
+#
+# static-cell: once-initialisation wrapper that turns a static variable into
+#   an &'static T at run time without unsafe code at the call site.  Used
+#   to store the Embassy Executor in a static slot so it can satisfy the
+#   'static lifetime requirement that executor.run() imposes.
+embassy-executor = { version = "0.7", features = ["nightly"] }
+embassy-futures = "0.1"
+static_cell = "2"
 
 [profile.release]
 opt-level = "s"

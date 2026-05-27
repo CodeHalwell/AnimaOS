@@ -171,7 +171,8 @@ jobs:
           arguments: --all-features
 
   # -------------------------------------------------------------------------
-  # Epic E4.1 — corpus no_std Port + UEFI Boot Trampoline
+  # Epic E4.1 — corpus no_std Port + UEFI Boot Trampoline  ✅
+  # Epic E4.2 — Embassy Runtime inside corpus               ✅
   # -------------------------------------------------------------------------
   # microvm-build: compiles the Stage 4 UEFI kernel (kernels/microvm) for the
   #   x86_64-unknown-uefi target using nightly Rust + build-std.  This job
@@ -180,15 +181,17 @@ jobs:
   #     S4.1.2 — corpus::BumpAllocator compiles as a GlobalAlloc in a bare-metal
   #              context.
   #     S4.1.3 — The UEFI binary links and emits a valid PE32+ EFI image.
+  #     S4.2.1 — embassy-executor compiles on x86_64-unknown-uefi (no arch-* feature).
+  #     S4.2.2 — kernel_boot_task (async) is compiled with #[embassy_executor::task].
   #
-  # microvm-boot: boots the EFI image in QEMU+OVMF and asserts that the
-  #   deliberate panic message "ANIMA_PANIC" appears on the serial console.
-  #   This satisfies the E4.1 exit criterion:
-  #     "QEMU boots the trampoline image and reaches the panic handler under
-  #      a deliberate panic."
+  # microvm-boot: boots the EFI image in QEMU+OVMF and asserts both E4.1 and
+  #   E4.2 exit criteria:
+  #     E4.1: "ANIMA_PANIC" — panic handler reached.
+  #     E4.2: "E4.2_TASK_DONE" — Embassy async task completed and signalled via
+  #           the audit channel (COM1 serial).
   # -------------------------------------------------------------------------
   microvm-build:
-    name: microVM UEFI build (S4.1.1–S4.1.3)
+    name: microVM UEFI build (S4.1.1–S4.1.3, S4.2.1–S4.2.2)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -226,7 +229,7 @@ jobs:
           retention-days: 14
 
   microvm-boot:
-    name: microVM UEFI boot in QEMU (E4.1 exit criterion)
+    name: microVM UEFI boot in QEMU (E4.1 + E4.2 exit criteria)
     runs-on: ubuntu-latest
     needs: microvm-build
     steps:
@@ -247,14 +250,15 @@ jobs:
           mkdir -p esp/EFI/BOOT
           cp kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
              esp/EFI/BOOT/BOOTX64.EFI
-      - name: Boot in QEMU and verify panic output
-        # Strategy: the UEFI binary writes "ANIMA_PANIC" directly to COM1
-        # (port 0x3F8) via x86 port I/O, bypassing OVMF's EFI console routing.
-        # QEMU emulates a 16550A UART at 0x3F8 and forwards all bytes to the
-        # device specified by -serial (here: a file).
+      - name: Boot in QEMU and verify E4.1 + E4.2 output
+        # Strategy: the UEFI binary writes to COM1 (port 0x3F8) via x86
+        # port I/O, bypassing OVMF's EFI console routing.  QEMU emulates a
+        # 16550A UART at 0x3F8 and forwards all bytes to the device given
+        # by -serial (here: a file).
         #
-        # The binary panics and loops — we use timeout to stop QEMU and grep
-        # the captured file.  timeout exit code 124 (timed out) is expected.
+        # The Embassy task completes and then panics — we use timeout to
+        # stop QEMU after it spins in the panic handler.
+        # timeout exit code 124 (timed out) is expected.
         run: |
           # Locate OVMF_CODE.fd — the path varies across Ubuntu versions.
           OVMF_CODE=$(find /usr/share/OVMF /usr/share/ovmf -name "OVMF_CODE*.fd" 2>/dev/null \
@@ -265,9 +269,10 @@ jobs:
           fi
           echo "Using OVMF: $OVMF_CODE"
 
-          # Run QEMU.  The trampoline panics quickly, so 30 s is ample.
+          # Run QEMU.  The Embassy task runs all four phases then panics;
+          # 60 s is ample for any platform (spin executor has no waits).
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
-          timeout 30 qemu-system-x86_64 \
+          timeout 60 qemu-system-x86_64 \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive format=raw,file=fat:rw:esp \
             -serial file:/tmp/qemu-serial.txt \
@@ -279,6 +284,12 @@ jobs:
           echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
           echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
 
+          # E4.2 exit criterion: Embassy async task completed and signalled.
+          grep -q "E4.2_TASK_DONE" /tmp/qemu-serial.txt && \
+            echo "✅ E4.2 exit criterion met: Embassy async task completed and signalled audit channel" || \
+            { echo "❌ E4.2_TASK_DONE not found in serial output"; exit 1; }
+
+          # E4.1 exit criterion (carried forward): panic handler reached.
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }
