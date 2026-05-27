@@ -12,11 +12,13 @@ the runtime environment is correctly wired.
 
 from __future__ import annotations
 
+import os
 import sys
 
 
 def main() -> int:
     print("anima-trainer: environment check")
+    print(f"  base model             : {os.environ.get('TRAINER_BASE_MODEL', '<unset>')}")
 
     try:
         import torch

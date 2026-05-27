@@ -67,7 +67,7 @@ WORKDIR /home/anima
 # `ollama:11434`.  Override with `-e ANIMA_BACKEND=mock` to bypass.
 ENV ANIMA_BACKEND=ollama \
     ANIMA_OLLAMA_URL=http://ollama:11434 \
-    ANIMA_OLLAMA_MODEL=llama3.2:3b \
+    ANIMA_OLLAMA_MODEL=hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M \
     ANIMA_OLLAMA_CTX=8192
 
 ENTRYPOINT ["anima-hosted"]

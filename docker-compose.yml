@@ -38,7 +38,9 @@ services:
   ollama:
     # Pinned for reproducible builds; bump deliberately when validating a
     # newer Ollama release.  Overridable via `OLLAMA_VERSION` in `.env`.
-    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
+    # 0.30.0 has the llama.cpp engine support needed for the gemma4
+    # (instinct) + qwen3_5 (workhorse) architectures used below.
+    image: ollama/ollama:${OLLAMA_VERSION:-0.30.0}
     container_name: anima-ollama
     restart: unless-stopped
     ports:
@@ -71,7 +73,7 @@ services:
 
   # ── Model pre-pull (runs once, exits) ───────────────────────────────────
   ollama-init:
-    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
+    image: ollama/ollama:${OLLAMA_VERSION:-0.30.0}
     container_name: anima-ollama-init
     depends_on:
       ollama:
@@ -80,11 +82,13 @@ services:
       - ollama-models:/root/.ollama
     environment:
       OLLAMA_HOST: ollama:11434
-      # Two-model architecture: 1B instinct + 3B workhorse.  Override to
-      # bigger models (e.g. llama3.1:8b for workhorse) once you've confirmed
-      # they fit alongside the instinct on your card.
-      ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-llama3.2:1b}
-      ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-llama3.2:3b}
+      # Two-model architecture: Gemma 4 E2B instinct (~3.5 GB at Q4_K_M,
+      # 2B effective params via the MatFormer activation pattern) +
+      # Qwen 3.5 9B MTP workhorse (~5.5 GB at Q4_K_M, with Multi-Token
+      # Prediction draft heads for speculative decoding).  Pulled straight
+      # from Hugging Face via Ollama's `hf.co/...` resolver.
+      ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-hf.co/unsloth/gemma-4-E2B-it-GGUF:Q4_K_M}
+      ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M}
     # Literal block scalar (|) preserves newlines and avoids any outer
     # quoting that `/bin/sh -c` would misinterpret as a command name.
     entrypoint: ["/bin/sh", "-c"]
@@ -115,7 +119,7 @@ services:
       # `ollama` (default) / `mock` / `anthropic` / `openai`.
       ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
       ANIMA_OLLAMA_URL: http://ollama:11434
-      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-llama3.2:3b}
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M}
       ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-8192}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -141,6 +145,12 @@ services:
       # Where Unsloth caches HF downloads / writes adapter checkpoints.
       HF_HOME: /models/hf-cache
       TRANSFORMERS_CACHE: /models/hf-cache
+      # Base model for sleep-phase QLoRA.  bnb-4bit variant is the right
+      # format for Unsloth's `FastLanguageModel.from_pretrained`; this is
+      # the *training* sibling of the GGUF instinct model the inference
+      # stack runs.  Once the sleep-phase loop exports the adapted weights
+      # as GGUF, they round-trip back into Ollama via the shared volume.
+      TRAINER_BASE_MODEL: ${TRAINER_BASE_MODEL:-unsloth/gemma-4-E2B-it-unsloth-bnb-4bit}
     deploy:
       resources:
         reservations:
