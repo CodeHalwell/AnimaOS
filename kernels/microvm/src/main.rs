@@ -1,6 +1,6 @@
-//! AnimaOS Stage 4 — microVM UEFI kernel (E4.1 → E4.2 → E4.3).
+//! AnimaOS Stage 4 — microVM UEFI kernel (E4.1 → E4.2 → E4.3 → E4.4).
 //!
-//! This binary demonstrates the deliverables of E4.1, E4.2, and E4.3.
+//! This binary demonstrates the deliverables of E4.1, E4.2, E4.3, and E4.4.
 //!
 //! ## E4.1 deliverables (carried forward)
 //!
@@ -30,7 +30,7 @@
 //!    round-trips through the poll loop), re-runs the E4.1 corpus assertions,
 //!    and finally writes `E4.2_TASK_DONE` to the COM1 audit channel.
 //!
-//! ## E4.3 deliverables (new)
+//! ## E4.3 deliverables (carried forward)
 //!
 //! 6. **S4.3 — smoltcp TCP/IP stack**: `smoltcp 0.11` is linked into the kernel
 //!    with a `phy::Loopback` device.  A TCP server socket listens on port 1234
@@ -38,6 +38,16 @@
 //!    device loops ethernet frames through an in-memory `VecDeque<Vec<u8>>` so
 //!    no real hardware is required.  After the TCP handshake completes and the
 //!    client sends `b"HELLO"` to the server, `E4.3_TCP_DONE` is written to COM1.
+//!
+//! ## E4.4 deliverables (new)
+//!
+//! 7. **S4.4 — TLS 1.3 loopback**: a complete TLS 1.3 handshake and
+//!    application-data exchange runs entirely in-process using two `Vec<u8>`
+//!    buffers as pipes.  Cipher suite `TLS_AES_128_GCM_SHA256` (0x1301) with
+//!    P-256 ECDHE key exchange.  A self-signed P-256 certificate is generated
+//!    at build time by `build.rs` via `rcgen` and embedded as DER bytes.
+//!    RDRAND provides hardware entropy.  After the handshake and PING exchange
+//!    succeed, `E4.4_TLS_DONE` is written to COM1.
 //!
 //! # Serial output strategy
 //!
@@ -50,9 +60,10 @@
 //!
 //! - E4.2: `E4.2_TASK_DONE` — Embassy async task completed and signalled.
 //! - E4.3: `E4.3_TCP_DONE` — first TCP connection over smoltcp loopback.
+//! - E4.4: `E4.4_TLS_DONE` — TLS 1.3 handshake and app data exchange complete.
 //! - `ANIMA_PANIC` — panic handler reached (carried forward from E4.1).
 //!
-//! The CI job (`microvm-boot`) asserts all three.
+//! The CI job (`microvm-boot`) asserts all four.
 // ---------------------------------------------------------------------------
 // Nightly feature gates
 // ---------------------------------------------------------------------------
@@ -63,6 +74,8 @@
 #![no_main]
 
 extern crate alloc;
+
+mod tls;
 
 use alloc::vec::Vec;
 use corpus::{BumpAllocator, FrameAllocator};
@@ -80,9 +93,13 @@ use uefi::prelude::*;
 // S4.1.2: corpus BumpAllocator as the global Rust heap.
 // ---------------------------------------------------------------------------
 
-/// Static heap for the microVM kernel — 512 KiB.
+/// Static heap for the microVM kernel — 2 MiB.
+///
+/// E4.4 (TLS 1.3) allocates `Vec<u8>` buffers for the handshake transcript,
+/// cipher state, and DER structures.  The 512 KiB heap from E4.1 is enlarged
+/// to 2 MiB to give the TLS key schedule and AEAD buffers ample headroom.
 // SAFETY: accessed exclusively via `ALLOCATOR.init()` before any allocation.
-static mut HEAP: [u8; 512 * 1024] = [0u8; 512 * 1024];
+static mut HEAP: [u8; 2 * 1024 * 1024] = [0u8; 2 * 1024 * 1024];
 
 #[global_allocator]
 static ALLOCATOR: BumpAllocator = BumpAllocator::new();
@@ -196,8 +213,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
         serial_init();
     }
     serial_write("\r\n");
-    serial_write("ANIMA_PANIC: E4.3 — all exit criteria met, panic handler reached\r\n");
-    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ — kernel boot task complete.\r\n");
+    serial_write("ANIMA_PANIC: E4.4 — all exit criteria met, panic handler reached\r\n");
+    serial_write("E4.1 ✅ E4.2 ✅ E4.3 ✅ E4.4 ✅ — kernel boot task complete.\r\n");
     loop {
         core::hint::spin_loop();
     }
@@ -326,9 +343,25 @@ async fn kernel_boot_task() {
         "E4.3_TCP_DONE: first TCP connection over smoltcp loopback established — exit criterion met\n",
     );
 
+    // ------------------------------------------------------------------
+    // Phase 6 — TLS 1.3 loopback (E4.4 exit criterion)
+    //
+    // "TLS 1.3 handshake and application-data exchange demonstrated
+    //  inside the microVM kernel."
+    //
+    // The TLS handshake and PING exchange run entirely in-process using
+    // two Vec<u8> buffers as the transport.  No smoltcp or real network
+    // hardware is involved — this is a pure TLS protocol-layer demo.
+    // ------------------------------------------------------------------
+    serial_write("\n[E4.4] kernel_boot_task: Phase 6 — TLS 1.3 loopback\n");
+    embassy_futures::yield_now().await;
+
+    tls::run_tls_loopback_test().expect("TLS loopback test failed");
+    serial_write("E4.4_TLS_DONE: TLS 1.3 handshake and app data exchange complete\n");
+
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.
-    panic!("ANIMA_PANIC: deliberate panic — E4.1/E4.2/E4.3 exit criteria all met");
+    panic!("ANIMA_PANIC: deliberate panic — E4.1/E4.2/E4.3/E4.4 exit criteria all met");
 }
 
 // ---------------------------------------------------------------------------
@@ -502,10 +535,10 @@ fn efi_main() -> Status {
     // without creating a reference, avoiding `static_mut_refs`.
     unsafe {
         let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        let heap_len = core::mem::size_of::<[u8; 512 * 1024]>();
+        let heap_len = core::mem::size_of::<[u8; 2 * 1024 * 1024]>();
         ALLOCATOR.init(heap_ptr, heap_len);
     }
-    serial_write("[E4.2] BumpAllocator initialised over 512 KiB static heap\n");
+    serial_write("[E4.2] BumpAllocator initialised over 2 MiB static heap\n");
 
     // -----------------------------------------------------------------
     // 2. Initialise uefi helpers (EFI console logger — nice to have for
