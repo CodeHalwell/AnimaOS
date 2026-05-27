@@ -1231,7 +1231,7 @@ degradation demo).
 Port to the microVM target, integrate `smoltcp` and `rustls`, complete
 the formal verification surface, and harden for production.
 
-### Epic E4.1 — `corpus` `no_std` Port ⬜
+### Epic E4.1 — `corpus` `no_std` Port ✅
 
 **Scope.** Compile `corpus` under `no_std` with a custom allocator and a
 UEFI boot trampoline that reaches a panic-handler-only state in QEMU.
@@ -1239,13 +1239,34 @@ UEFI boot trampoline that reaches a panic-handler-only state in QEMU.
 **Dependencies.** End of Stage 3.
 
 **Stories.**
-- S4.1.1 `no_std`-clean `corpus`.
-- S4.1.2 Custom allocator integration.
-- S4.1.3 UEFI boot trampoline.
+- S4.1.1 `no_std`-clean `corpus`. ✅ (`#![no_std]` added to `crates/corpus/src/lib.rs`;
+  all three source files use only `core` types — `core::sync::atomic`,
+  `core::mem`, no `std` imports anywhere; the 5 pre-existing corpus tests
+  continue to pass because the test binary links `std` via the test harness)
+- S4.1.2 Custom allocator integration. ✅ (`crates/corpus/src/heap_allocator.rs` —
+  `BumpAllocator` implements `core::alloc::GlobalAlloc`; lock-free
+  `AtomicUsize` cursor; alignment via power-of-two bit-mask;
+  `dealloc` is an intentional no-op (bump allocator);
+  registered as `#[global_allocator]` in `kernels/microvm/src/main.rs`;
+  10 unit tests covering alignment, exhaustion, overflow-safety, no-op
+  dealloc, non-overlapping sequential allocations, and the `align_up`
+  helper; total corpus test count rises from 5 to 15)
+- S4.1.3 UEFI boot trampoline. ✅ (`kernels/microvm/` — standalone Cargo
+  package (not workspace member), nightly toolchain via `rust-toolchain.toml`,
+  `x86_64-unknown-uefi` target via `.cargo/config.toml` with `build-std`;
+  `kernels/microvm/src/main.rs` — UEFI `#[entry]` point that initialises
+  corpus's `BumpAllocator`, calls `uefi::helpers::init`, exercises
+  `FrameAllocator` + `Vec<u32>` via the bump heap, then triggers a
+  deliberate `panic!("ANIMA_PANIC: …")` whose message appears on the
+  UEFI console; builds to a 21 KiB `.efi` PE32+ image)
 
 **Exit criteria.**
 1. QEMU boots the trampoline image and reaches the panic handler under a
-   deliberate panic.
+   deliberate panic. ✅ (CI job `microvm-boot` in `.github/workflows/ci.yml`
+   — installs `qemu-system-x86` + `ovmf`, builds the release `.efi`, places
+   it at `esp/EFI/BOOT/BOOTX64.EFI`, boots with OVMF and `-serial file:…`,
+   then `grep -q "ANIMA_PANIC"` on the captured serial log; `microvm-build`
+   job verifies fmt + clippy + debug/release builds independently)
 
 ### Epic E4.2 — Embassy Runtime Inside `corpus` ⬜
 

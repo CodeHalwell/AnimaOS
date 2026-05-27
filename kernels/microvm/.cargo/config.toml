@@ -1,0 +1,13 @@
+# Build configuration for the AnimaOS microVM UEFI kernel.
+#
+# x86_64-unknown-uefi is a Tier 2 bare-metal target; its std (core + alloc +
+# compiler_builtins) must be compiled from source with `-Z build-std`.
+# `compiler-builtins-mem` supplies the mem*/str* implementations so the binary
+# does not depend on a libc.
+
+[build]
+target = "x86_64-unknown-uefi"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
