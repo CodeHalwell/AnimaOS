@@ -287,18 +287,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
-      - name: Install nightly toolchain + rust-src
-        run: |
-          rustup toolchain install nightly --component rust-src
-          rustup target add --toolchain nightly x86_64-unknown-uefi
-      - name: Build UEFI image (release)
-        working-directory: kernels/microvm
-        run: cargo +nightly build --release
+      # Reuse the EFI image produced by the microvm-build job rather than
+      # cold-rebuilding it here.  A second cold build added ~50 s to every
+      # run and was a second failure surface — CI run #26538288288 failed
+      # in this step (exit 101) despite microvm-build's identical step
+      # succeeding on the same commit.  The image-size budget enforced by
+      # microvm-build means the artefact is exactly what we want to test.
+      - name: Download EFI artefact from microvm-build
+        uses: actions/download-artifact@v4
+        with:
+          name: anima-microvm-efi
+          path: efi-artifact
       - name: Prepare FAT ESP image
         run: |
           mkdir -p esp/EFI/BOOT
-          cp kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
-             esp/EFI/BOOT/BOOTX64.EFI
+          cp efi-artifact/anima-microvm.efi esp/EFI/BOOT/BOOTX64.EFI
+          ls -la esp/EFI/BOOT/
       - name: Boot in QEMU and verify E4.1 + E4.2 + E4.3 + E4.4 output
         # Strategy: the UEFI binary writes to COM1 (port 0x3F8) via x86
         # port I/O, bypassing OVMF's EFI console routing.  QEMU emulates a
