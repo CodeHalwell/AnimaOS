@@ -45,7 +45,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p hosted --bin anima-hosted \
+    cargo build --release --locked -p hosted --bin anima-hosted \
     && cp target/release/anima-hosted /usr/local/bin/anima-hosted
 
 # ---- Stage 2: runtime -------------------------------------------------------

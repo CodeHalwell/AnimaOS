@@ -26,17 +26,26 @@ pub struct OllamaBackend {
     base_url: String,
     model: String,
     max_ctx: u32,
+    /// Held for completeness / future tuning; the timeout is already baked
+    /// into [`OllamaBackend::agent`].
+    #[allow(dead_code)]
     request_timeout: Duration,
+    /// Long-lived HTTP agent.  Sharing it across calls gives us
+    /// connection pooling + keep-alive — important once the agenda starts
+    /// firing many short prompts at the workhorse.
+    agent: ureq::Agent,
 }
 
 impl OllamaBackend {
     /// Construct a backend pointed at an explicit Ollama URL + model tag.
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let request_timeout = Duration::from_secs(300);
         Self {
             base_url: base_url.into(),
             model: model.into(),
             max_ctx: 8_192,
-            request_timeout: Duration::from_secs(300),
+            request_timeout,
+            agent: Self::build_agent(request_timeout),
         }
     }
 
@@ -67,7 +76,12 @@ impl OllamaBackend {
             model,
             max_ctx,
             request_timeout,
+            agent: Self::build_agent(request_timeout),
         }
+    }
+
+    fn build_agent(timeout: Duration) -> ureq::Agent {
+        ureq::AgentBuilder::new().timeout(timeout).build()
     }
 
     fn endpoint(&self) -> String {
@@ -98,17 +112,20 @@ impl LlmBackend for OllamaBackend {
                 return Err(LlmBackendError::Cancelled);
             }
 
-            let agent = ureq::AgentBuilder::new()
-                .timeout(self.request_timeout)
-                .build();
-
+            // Ollama honours `options.num_ctx` per-request, so the
+            // `ANIMA_OLLAMA_CTX` env var actually shapes the model's
+            // context window instead of only decorating `max_context_tokens()`.
             let body = serde_json::json!({
-                "model": self.model,
+                "model": &self.model,
                 "prompt": prompt,
                 "stream": true,
+                "options": {
+                    "num_ctx": self.max_ctx,
+                },
             });
 
-            let response = agent
+            let response = self
+                .agent
                 .post(&self.endpoint())
                 .set("Content-Type", "application/json")
                 .send_string(&body.to_string())
@@ -129,6 +146,14 @@ impl LlmBackend for OllamaBackend {
                 let chunk: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
                     LlmBackendError::Provider(format!("ollama chunk parse: {e} ({line})"))
                 })?;
+                // Ollama can terminate a stream with `{"error": "..."}` (often
+                // with `done: true`).  Surface it so the caller doesn't see a
+                // successful empty completion.
+                if let Some(err) = chunk.get("error").and_then(|v| v.as_str()) {
+                    return Err(LlmBackendError::Provider(format!(
+                        "ollama stream error: {err}"
+                    )));
+                }
                 if let Some(token) = chunk.get("response").and_then(|v| v.as_str()) {
                     if !token.is_empty() {
                         events.push(StreamingCompletion::Token(token.to_owned()));
@@ -151,13 +176,20 @@ mod tests {
 
     #[test]
     fn defaults_to_compose_internal_url() {
-        // Ensure no env contamination from the test harness; only the variables
-        // we care about need to be cleared.
-        std::env::remove_var("ANIMA_OLLAMA_URL");
-        std::env::remove_var("ANIMA_OLLAMA_MODEL");
+        // Clear every variable `from_env` reads so a runner with any of
+        // these set in its environment can't make the test flaky.
+        for var in [
+            "ANIMA_OLLAMA_URL",
+            "ANIMA_OLLAMA_MODEL",
+            "ANIMA_OLLAMA_CTX",
+            "ANIMA_OLLAMA_TIMEOUT",
+        ] {
+            std::env::remove_var(var);
+        }
         let backend = OllamaBackend::from_env();
         assert_eq!(backend.endpoint(), "http://ollama:11434/api/generate");
         assert_eq!(backend.model_id(), "llama3.2:3b");
+        assert_eq!(backend.max_context_tokens(), 8_192);
     }
 
     #[test]

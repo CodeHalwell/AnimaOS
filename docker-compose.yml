@@ -36,7 +36,9 @@ services:
 
   # ── Inference engine ────────────────────────────────────────────────────
   ollama:
-    image: ollama/ollama:latest
+    # Pinned for reproducible builds; bump deliberately when validating a
+    # newer Ollama release.  Overridable via `OLLAMA_VERSION` in `.env`.
+    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
     container_name: anima-ollama
     restart: unless-stopped
     ports:
@@ -69,7 +71,7 @@ services:
 
   # ── Model pre-pull (runs once, exits) ───────────────────────────────────
   ollama-init:
-    image: ollama/ollama:latest
+    image: ollama/ollama:${OLLAMA_VERSION:-0.5.7}
     container_name: anima-ollama-init
     depends_on:
       ollama:
@@ -83,14 +85,16 @@ services:
       # they fit alongside the instinct on your card.
       ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-llama3.2:1b}
       ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-llama3.2:3b}
+    # Literal block scalar (|) preserves newlines and avoids any outer
+    # quoting that `/bin/sh -c` would misinterpret as a command name.
     entrypoint: ["/bin/sh", "-c"]
-    command: >-
-      'set -e;
-       echo "anima-ollama-init: pulling $$ANIMA_INSTINCT_MODEL";
-       ollama pull "$$ANIMA_INSTINCT_MODEL";
-       echo "anima-ollama-init: pulling $$ANIMA_WORKHORSE_MODEL";
-       ollama pull "$$ANIMA_WORKHORSE_MODEL";
-       echo "anima-ollama-init: models ready";'
+    command: |
+      set -e
+      echo "anima-ollama-init: pulling $$ANIMA_INSTINCT_MODEL"
+      ollama pull "$$ANIMA_INSTINCT_MODEL"
+      echo "anima-ollama-init: pulling $$ANIMA_WORKHORSE_MODEL"
+      ollama pull "$$ANIMA_WORKHORSE_MODEL"
+      echo "anima-ollama-init: models ready"
     restart: "no"
 
   # ── Agent runtime ───────────────────────────────────────────────────────
@@ -103,8 +107,12 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+      # Block startup until the one-shot model pull has finished — otherwise
+      # the agent's first /api/generate can race the download and 404.
+      ollama-init:
+        condition: service_completed_successfully
     environment:
-      # `mock` (default) / `anthropic` / `openai` / `ollama`.
+      # `ollama` (default) / `mock` / `anthropic` / `openai`.
       ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
       ANIMA_OLLAMA_URL: http://ollama:11434
       ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-llama3.2:3b}
