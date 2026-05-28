@@ -43,24 +43,29 @@ anima-os/
 │   ├── praxis/                 # Efferent actuator core (schema routing, MCP/A2A buses)
 │   ├── self/                   # Typestate capability tokens, identity tracking
 │   ├── interoception/          # Real-time stress metrics and telemetry
-│   └── senses/                 # Afferent sensory interfaces (voice/text stream parsers)
+│   ├── senses/                 # Afferent sensory interfaces (voice/text stream parsers)
+│   ├── kv-controller/          # Learned KV-cache semantic gate (Stage 5, E5.4)
+│   └── defence/                # Immune-analogue defence layer: injection, drift, veto (Stage 5, E5.6)
+├── cortex/                     # Python deliberative cortex MVP: plan/act/observe/revise (Stage 5, E5.1)
 └── kernels/
     ├── hosted/                 # Linux process emulation layer for local rapid CI
-    └── microvm/                # Firecracker / Cloud Hypervisor bare-metal unikernel
+    └── microvm/                # Firecracker / Cloud Hypervisor bare-metal unikernel (Stage 4)
 ```
 
 ### 2.1 Crate Matrix
 
 | Crate | Function | Core Mechanism | Verification Posture |
 |-------|----------|----------------|----------------------|
-| `corpus` | Autonomic nervous system | Virtual memory maps, context switching, boot allocations | Audited `unsafe` blocks |
-| `vita` | Self-preservation plane | Autonomous state machine, scheduling, memory pruning triggers | `#![forbid(unsafe_code)]` |
-| `scheduler` | Reflex loop control | Iteration-level continuous batching, three-tier MLFQ | `#![forbid(unsafe_code)]` |
-| `memory` | Synaptic memory layer | Complementary Learning Systems, LRU-K / ARC | `#![forbid(unsafe_code)]` |
-| `praxis` | Efferent actuator core | Length-robust relative filtering, MCP/A2A routing | `#![forbid(unsafe_code)]` |
+| `corpus` | Autonomic nervous system | Virtual memory maps, context switching, boot allocations; `BumpAllocator` global allocator for `no_std` | Audited `unsafe` blocks; Kani proofs + Miri |
+| `vita` | Self-preservation plane | Autonomous state machine, scheduling, memory pruning triggers; Striatal Gate, Thalamic Router, cortex bridge | `#![forbid(unsafe_code)]` |
+| `scheduler` | Reflex loop control | Iteration-level continuous batching, three-tier MLFQ, `BoundedTokenPipe` | `#![forbid(unsafe_code)]`; Kani proofs |
+| `memory` | Synaptic memory layer | Complementary Learning Systems, ARC (L2), L3Archive cosine-similarity store, TurboQuant quantisation | `#![forbid(unsafe_code)]` |
+| `praxis` | Efferent actuator core | Length-robust relative filtering, MCP/A2A routing, Wasmtime capability-gated sandbox | `#![forbid(unsafe_code)]` |
 | `self` | Self/non-self barrier | Typestate-pattern capabilities, object-capability tokens | `#![forbid(unsafe_code)]` |
-| `interoception` | Interoceptive feedback | Real-time telemetry, stress index computation | `#![forbid(unsafe_code)]` |
-| `senses` | Afferent input vector | Streamed PCM audio parsing, text buffer packetisation | `#![forbid(unsafe_code)]` |
+| `interoception` | Interoceptive feedback | Real-time telemetry, stress index computation; six-signal sensor bundle with financial, power, attention sensors | `#![forbid(unsafe_code)]` |
+| `senses` | Afferent input vector | Streamed PCM audio parsing, text buffer packetisation, `HumanGuidance` policy bounds | `#![forbid(unsafe_code)]` |
+| `kv-controller` | Learned KV-cache gate | `LinearGate` (7-element `BlockFeatures`), `BlockGate` trait, trace capture, training corpus, needle-recall eval | `#![forbid(unsafe_code)]` |
+| `defence` | Immune-analogue defence | Prompt-injection detector (49 patterns), goal-drift monitor, reward-hacking detector, motor-action gate, veto escalation | `#![forbid(unsafe_code)]` |
 
 The verification posture column is not aspirational. It is enforced at the crate level via `lib.rs` attributes and checked in CI. A PR that introduces `unsafe` outside `corpus` fails to compile.
 
@@ -110,10 +115,20 @@ Anima uses an open-source, performant, and verifiable stack. External dependenci
 
 ### 3.7 Verification
 
-- **`kani`** for bounded model checking of rate limiters, memory rings, and concurrent data structures.
-- **`miri`** for runtime validation of unsafe boundaries in the core allocation stack.
+- **`kani`** for bounded model checking of rate limiters, memory rings, and concurrent data structures. 15 proof harnesses across `corpus` (frame allocator) and `scheduler` (token pipe, MLFQ).
+- **`miri`** for runtime validation of unsafe boundaries in the core allocation stack. Runs clean on the full `corpus` test suite in nightly CI.
 
 See [`04-verification.md`](./04-verification.md) for the full verification strategy.
+
+### 3.8 Cognitive Layer
+
+The deliberative cortex runs outside the workspace as a Python service:
+
+- **`cortex/`** — LangGraph-style plan / act / observe / revise loop, invoked per-task over a length-prefixed JSON UDS socket. Lifecycle is invocation-scoped: the cortex is spun up per task and torn down when the invocation terminates.
+- **`langchain` / `langgraph`** — agent-loop orchestration (Python side).
+- **`vita::cortex_bridge`** — Rust side of the IPC bridge; manages socket lifecycle, tool dispatch, episode archival, and fault isolation.
+
+The cortex depends on the somatic substrate (Stage 1–3) for its scheduling, memory, and audit surfaces. The cognitive spec is documented in [`08-cognitive-architecture.md`](./08-cognitive-architecture.md).
 
 ## 4. Compilation Targets
 

@@ -1575,10 +1575,24 @@ These epics run continuously across stages rather than belonging to a
 single stage. They are tracked separately so that their progress does
 not block stage closure.
 
-### Epic EX.1 — Documentation in Lockstep 🟡
+### Epic EX.1 — Documentation in Lockstep ✅
 
 Keep the `docs/` suite synchronised with the code. Every PR that
 changes a public interface updates the relevant section here.
+
+**Delivered.**
+- `README.md` "Implemented Core Interfaces" section updated to cover all
+  Stages 1–5: Striatal Gate, Thalamic Router, cortex bridge, episodic and
+  identity memory, full KV-cache controller, defence layer (all five
+  detectors), interoceptive sensor bundle (six signals), Wasmtime sandbox,
+  TurboQuant, L3Archive, sleep-phase routines, microVM kernel (UEFI,
+  Embassy, smoltcp, TLS 1.3, no_std port), kill-shot demo harness.
+- `docs/01-architecture.md` workspace layout and crate matrix extended
+  with `kv-controller` (E5.4), `defence` (E5.6), and `cortex/` (E5.1);
+  §3.7 Verification evidence added (15 Kani proofs, Miri clean); new §3.8
+  Cognitive Layer describes the Python cortex and IPC bridge.
+- `docs/README.md` Status paragraph already reflects Stages 1–5 closed
+  and E4.7 as the sole remaining open epic.
 
 ### Epic EX.2 — Audit Log and Telemetry Pipeline ✅
 
