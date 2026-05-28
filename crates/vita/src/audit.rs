@@ -23,7 +23,9 @@
 //! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
 
 use serde::Serialize;
+#[cfg(feature = "std")]
 use std::io::Write;
+#[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 
 /// A single observable lifecycle event.
@@ -387,19 +389,26 @@ pub struct AuditLog {
     entries: Vec<AuditEntry>,
     /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
     /// (all clones of a manager write to the same audit file).
+    #[cfg(feature = "std")]
     file_sink: Option<Arc<Mutex<std::fs::File>>>,
-    /// Set to `true` after the first write failure; subsequent pushes skip
-    /// the file entirely so a broken sink does not stall callers.
-    sink_failed: bool,
+    /// Shared failure flag — `Arc<AtomicBool>` so all clones see the same
+    /// failure state.  Once a write fails, every clone skips the file to
+    /// prevent performance degradation from repeatedly locking a broken sink.
+    #[cfg(feature = "std")]
+    sink_failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for AuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditLog")
-            .field("entries", &self.entries.len())
-            .field("has_file_sink", &self.file_sink.is_some())
-            .field("sink_failed", &self.sink_failed)
-            .finish()
+        let mut d = f.debug_struct("AuditLog");
+        d.field("entries", &self.entries.len());
+        #[cfg(feature = "std")]
+        {
+            use std::sync::atomic::Ordering;
+            d.field("has_file_sink", &self.file_sink.is_some())
+                .field("sink_failed", &self.sink_failed.load(Ordering::Relaxed));
+        }
+        d.finish()
     }
 }
 
@@ -407,8 +416,12 @@ impl Clone for AuditLog {
     fn clone(&self) -> Self {
         Self {
             entries: self.entries.clone(),
+            #[cfg(feature = "std")]
             file_sink: self.file_sink.clone(),
-            sink_failed: self.sink_failed,
+            // Clone shares the same AtomicBool so failure on one clone disables
+            // all clones — no broken-fd thundering herd.
+            #[cfg(feature = "std")]
+            sink_failed: self.sink_failed.clone(),
         }
     }
 }
@@ -424,13 +437,16 @@ impl AuditLog {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            #[cfg(feature = "std")]
             file_sink: None,
-            sink_failed: false,
+            #[cfg(feature = "std")]
+            sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     /// Opens an append-only JSONL file at `path` and attaches it as the durable
     /// sink.  Each write is flushed immediately for durability.
+    #[cfg(feature = "std")]
     pub fn with_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -439,14 +455,27 @@ impl AuditLog {
         Ok(Self {
             entries: Vec::new(),
             file_sink: Some(Arc::new(Mutex::new(file))),
-            sink_failed: false,
+            sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
     /// Creates a log that writes to `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` when
     /// the environment variable is set.  Emits a warning to stderr when the
     /// variable is set but the file cannot be opened; falls back to in-memory-only.
+    ///
+    /// # Path safety
+    ///
+    /// `agent_id` is used as a filename component.  IDs containing `/` or `..`
+    /// are rejected to prevent path-traversal writes outside `ANIMA_AUDIT_DIR`.
+    #[cfg(feature = "std")]
     pub fn from_env(agent_id: &str) -> Self {
+        // Reject IDs that could escape the configured audit directory.
+        if agent_id.is_empty() || agent_id.contains('/') || agent_id.contains("..") {
+            eprintln!(
+                "anima-audit: rejected unsafe agent_id '{agent_id}' — falling back to in-memory"
+            );
+            return Self::new();
+        }
         if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
             let path = std::path::PathBuf::from(&dir).join(format!("{}.jsonl", agent_id));
             if let Some(parent) = path.parent() {
@@ -470,8 +499,10 @@ impl AuditLog {
 
     /// Returns `true` if the file sink has failed and further disk writes are
     /// being skipped.
+    #[cfg(feature = "std")]
     pub fn sink_failed(&self) -> bool {
-        self.sink_failed
+        use std::sync::atomic::Ordering;
+        self.sink_failed.load(Ordering::Relaxed)
     }
 
     /// Appends an entry to both the in-memory store and the file sink (if any).
@@ -479,22 +510,28 @@ impl AuditLog {
     /// Each write is followed by a `flush()` to honour the durability guarantee.
     /// If the write or flush fails the failure is recorded in `sink_failed` and a
     /// warning is emitted to stderr; subsequent pushes skip the file entirely.
+    /// The failure flag is shared across all clones via `Arc<AtomicBool>` so a
+    /// failure on any clone permanently disables all clones.
     pub fn push(&mut self, entry: AuditEntry) {
-        if let (false, Some(sink)) = (self.sink_failed, &self.file_sink) {
-            if let Ok(line) = serde_json::to_string(&entry) {
-                match sink.lock() {
-                    Ok(mut f) => {
-                        let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
-                        if !write_ok {
-                            eprintln!(
-                                "anima-audit: write/flush to file sink failed — sink disabled"
-                            );
-                            self.sink_failed = true;
+        #[cfg(feature = "std")]
+        {
+            use std::sync::atomic::Ordering;
+            if !self.sink_failed.load(Ordering::Relaxed) {
+                if let Some(sink) = &self.file_sink {
+                    if let Ok(line) = serde_json::to_string(&entry) {
+                        match sink.lock() {
+                            Ok(mut f) => {
+                                let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
+                                if !write_ok {
+                                    eprintln!("anima-audit: write/flush to file sink failed — sink disabled");
+                                    self.sink_failed.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            Err(_) => {
+                                eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
+                                self.sink_failed.store(true, Ordering::Relaxed);
+                            }
                         }
-                    }
-                    Err(_) => {
-                        eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
-                        self.sink_failed = true;
                     }
                 }
             }

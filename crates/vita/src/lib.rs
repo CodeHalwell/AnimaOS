@@ -3,6 +3,7 @@
 //! Self-preservation plane: autonomous lifecycle director.
 
 pub mod audit;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
@@ -16,8 +17,7 @@ pub mod sensors;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
-pub use defence_bridge::push_defence_outcome;
-pub use sensors::AuditSignalPublisher;
+#[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
@@ -50,10 +50,20 @@ pub use router::{
 pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use core::time::Duration;
+#[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "std")]
 use std::time::Duration;
 
-use interoception::{HomeostaticMonitor, InteroceptiveSensorBundle, NullPublisher};
+use interoception::HomeostaticMonitor;
+#[cfg(feature = "std")]
+use interoception::{InteroceptiveSensorBundle, NullPublisher};
 use memory::{
     AuditTraceEntry, CompilationConfig, DreamConfig, L1PruningStore, VirtualContextManager,
 };
@@ -204,7 +214,10 @@ impl LifecycleManager {
         max_iterations: Option<u32>,
     ) -> Self {
         let agent_id: String = agent_id.into();
+        #[cfg(feature = "std")]
         let audit = AuditLog::from_env(&agent_id);
+        #[cfg(not(feature = "std"))]
+        let audit = AuditLog::new();
         Self {
             agent_id,
             senses,
@@ -599,9 +612,13 @@ pub async fn somatic_execution_loop(
             if pressure.is_elevated() {
                 let agent_id = lifecycle.agent_id.clone();
                 let max_context = lifecycle.config.max_context;
+                #[cfg(feature = "std")]
+                let level = format!("{pressure:?}");
+                #[cfg(not(feature = "std"))]
+                let level = alloc::format!("{pressure:?}");
                 lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
                     agent_id,
-                    level: format!("{pressure:?}"),
+                    level,
                     active_tokens,
                     max_context,
                 });

@@ -58,6 +58,13 @@ pub struct SoakArgs {
     /// Dry-run mode: skip QEMU, report a synthetic success.
     #[arg(long, default_value = "false")]
     pub dry_run: bool,
+
+    /// Pause between boot iterations in seconds.
+    ///
+    /// The documented 30-day production soak runs 8 640 iterations at a 5-minute
+    /// (300 s) cycle.  CI smoke-tests use 0 (no pause).  Ignored in dry-run mode.
+    #[arg(long, default_value = "0")]
+    pub interval_secs: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +342,10 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
             .filter(|r| matches!(r.outcome, IterationOutcome::Ok | IterationOutcome::DryRun))
             .map(|r| r.boot_latency_ms)
             .collect();
+        // Append each JSONL record individually (correctness: one line per
+        // iteration), but defer stats computation to after the loop (O(N log N)
+        // once vs O(N² log N) if called each iteration) and write manifest.json
+        // only once at the end (avoids N redundant full-manifest rewrites).
         for i in start_i..=manifest.total_iterations {
             let record = IterationRecord {
                 iteration: i,
@@ -347,11 +358,33 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
             manifest.iterations.push(record);
             manifest.completed_iterations += 1;
             manifest.successful_iterations += 1;
-            manifest.last_updated = Utc::now();
-            let (mean, p95) = compute_stats(&latencies);
-            manifest.mean_boot_latency_ms = mean;
-            manifest.p95_boot_latency_ms = p95;
-            save_manifest(&manifest, &output)?;
+            // Append this iteration's record to the JSONL log immediately so
+            // the file stays consistent even if the process is interrupted.
+            let jsonl_path = output.join("iterations.jsonl");
+            if let Some(last) = manifest.iterations.last() {
+                use std::io::Write;
+                let line = serde_json::to_string(last).context("serialising dry-run iteration")?;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&jsonl_path)
+                    .context("opening JSONL log")?;
+                writeln!(f, "{}", line).context("writing JSONL line")?;
+            }
+        }
+        manifest.last_updated = Utc::now();
+        let (mean, p95) = compute_stats(&latencies);
+        manifest.mean_boot_latency_ms = mean;
+        manifest.p95_boot_latency_ms = p95;
+        // Write manifest.json once at the end (deferred from per-iteration writes).
+        let manifest_path = output.join("manifest.json");
+        let tmp_path = output.join("manifest.json.tmp");
+        let json = serde_json::to_string_pretty(&manifest).context("serialising manifest")?;
+        fs::write(&tmp_path, &json).context("writing manifest to tmp")?;
+        if let Err(e) = fs::rename(&tmp_path, &manifest_path) {
+            let _ = fs::remove_file(&manifest_path);
+            fs::rename(&tmp_path, &manifest_path)
+                .with_context(|| format!("renaming manifest: {e}"))?;
         }
         print_summary(&manifest);
         return Ok(());
@@ -442,8 +475,11 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
 
         save_manifest(&manifest, &output)?;
 
-        // Brief pause between iterations to avoid thermal buildup in CI.
-        std::thread::sleep(Duration::from_millis(200));
+        // Inter-iteration pause.  Full 30-day soak uses 300 s; CI smoke-tests
+        // use 0.  Hard-coded 200 ms is replaced by the caller-supplied value.
+        if args.interval_secs > 0 {
+            std::thread::sleep(Duration::from_secs(args.interval_secs));
+        }
     }
 
     println!();
@@ -516,6 +552,7 @@ mod tests {
             timeout_secs: 30,
             output: tmp.path().to_path_buf(),
             dry_run: true,
+            interval_secs: 0,
         };
         run_soak(args).expect("dry-run should succeed");
 
@@ -549,6 +586,7 @@ mod tests {
             timeout_secs: 30,
             output: tmp.path().to_path_buf(),
             dry_run: true,
+            interval_secs: 0,
         };
         run_soak(args).unwrap();
 

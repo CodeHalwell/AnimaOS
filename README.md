@@ -116,7 +116,7 @@ anima-os/
 - Embassy async executor (raw, no-arch, `__pender` no-op) + spin-poll loop
 - `smoltcp` 0.11 TCP/IP loopback — three-way handshake, client/server exchange
 - TLS 1.3 in bare-metal: P-256 ECDHE, AES-128-GCM, SHA-256/HKDF, ECDSA CertificateVerify (RustCrypto), smoltcp transport
-- No-std port of `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses`, `vita`
+- No-std port of `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses` (`vita` requires std — future work)
 - Sleep-cycle soak: VCM pressure, MLFQ boost, L1 pruning, stress index, `run_dream_walk_no_std`
 - CI: `microvm-boot` greps COM1 serial for `E4.1_*` … `E4.5_SOAK_DONE`; Miri + Kani in nightly CI
 
