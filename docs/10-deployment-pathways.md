@@ -159,6 +159,55 @@ Recommended sequence (each step is independently shippable):
 Each step preserves the trait surface, so the cognitive code never gets
 rewritten.
 
+## Image-size audit (E4.7)
+
+A condition of [Epic E4.7 — Production Hardening](./07-implementation-plan.md)
+is that the microVM image is small enough to load off the ESP and into
+memory inside the 2-second boot budget. The release profile in
+`kernels/microvm/Cargo.toml` is therefore tuned for size first, cold-boot
+speed second.
+
+| Setting              | Effect on `.efi` size                              |
+| -------------------- | --------------------------------------------------- |
+| `opt-level = "s"`    | Baseline. Optimise for size, not speed.             |
+| `lto = "fat"`        | Cross-crate LTO collapses the force-soft AES /      |
+|                      | PolyVal / SHA-256 paths into a single inlined unit. |
+| `codegen-units = 1`  | One CU gives LLVM full inlining headroom.           |
+| `strip = "symbols"`  | Drops the `.debug_*` sections that `-Z build-std`   |
+|                      | pulls in from `rust-src`.                           |
+| `panic = "abort"`    | Removes unwinding tables.                           |
+
+Measured on the Stage-4.5 tree (`x86_64-unknown-uefi`, all four E4.x
+phases linked):
+
+| Profile                              | `.efi` bytes | Δ vs baseline |
+| ------------------------------------ | ------------ | ------------- |
+| Pre-E4.7 release (`opt-s` + `abort`) | 247 296      | —             |
+| E4.7 release (LTO + CU=1 + strip)    | 166 400      | **−32.7 %**   |
+
+The `microvm-build` CI job records the size of the EFI artefact on every
+run, so any regression past the 2 s boot budget can be caught at the PR
+boundary.
+
+## Doc-flip readiness checklist (E4.7)
+
+Today this document presents containerised as the primary surface and
+microVM as a target. The E4.7 exit criteria flip that framing — but only
+after the following are demonstrably true:
+
+- [ ] Cold-boot under Firecracker ≤ 2 s, measured.
+- [ ] Cold-boot under Cloud Hypervisor ≤ 2 s, measured.
+- [ ] 30-day continuous-uptime soak completes with stable memory and
+      audit-log integrity.
+- [ ] Per-PR regression benchmark suite is wired to the `microvm-build`
+      job (image size + boot time), with thresholds.
+- [x] Release profile tuned for image size (this section).
+
+Once those bullets are closed, this section migrates to the top of the
+document, the headings invert (microVM first, hosted as "development
+loop"), and the migration order in the next section becomes a historical
+artefact.
+
 ## Risks to track
 
 - **GGUF availability for the 270 M instinct tier.** Ollama's catalogue

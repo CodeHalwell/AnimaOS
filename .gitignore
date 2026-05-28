@@ -1,3 +1,9 @@
 target/
 xtask/target/
 __pycache__/
+
+# CycloneDX SBOM artefacts produced by `cargo cyclonedx` (CI generates these
+# per-crate; local runs should not commit the output).
+bom.cdx.json
+bom.cdx.xml
+sbom-out/
