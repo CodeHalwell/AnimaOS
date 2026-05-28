@@ -8,8 +8,8 @@
 //! # Subcommands
 //!
 //! ```text
-//! cargo xtask bench-baseline check  --crate scheduler --input bench-scheduler.txt
-//! cargo xtask bench-baseline update --crate scheduler --input bench-scheduler.txt
+//! cargo xtask bench-baseline check  --crate-name scheduler --input bench-scheduler.txt
+//! cargo xtask bench-baseline update --crate-name scheduler --input bench-scheduler.txt
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -187,15 +187,29 @@ pub fn check_against_baseline(
         if let Some(&baseline_ns) = baseline.benchmarks.get(&result.name) {
             let current_ns = result.ns_per_iter;
             let delta = current_ns.saturating_sub(baseline_ns) as f64;
+            // When the baseline is zero the percentage formula is undefined.
+            // Fall back to the absolute noise-floor gate only so that a jump
+            // from 0 ns to a meaningful value is still caught.
+            let exceeds_pct = if baseline_ns > 0 {
+                let regression_pct = delta / baseline_ns as f64 * 100.0;
+                regression_pct > baseline.regression_threshold_pct
+            } else {
+                false // absolute gate below handles the zero-baseline case
+            };
             let regression_pct = if baseline_ns > 0 {
                 delta / baseline_ns as f64 * 100.0
             } else {
                 0.0
             };
 
-            let exceeds_pct = regression_pct > baseline.regression_threshold_pct;
             let exceeds_noise = delta as u64 > baseline.noise_floor_ns;
-            let is_regression = exceeds_pct && exceeds_noise;
+            // Regression when both gates fire, OR when the baseline is zero and
+            // the absolute gate fires (percentage gate is disabled for zero baselines).
+            let is_regression = if baseline_ns > 0 {
+                exceeds_pct && exceeds_noise
+            } else {
+                exceeds_noise
+            };
             let is_noise = !exceeds_noise;
 
             if is_regression {

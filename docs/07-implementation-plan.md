@@ -1464,7 +1464,7 @@ nightly CI.
    unsafe pointer arithmetic; no Miri errors on the default provenance
    model)
 
-### Epic E4.7 — Production Hardening and 30-Day Soak ✅
+### Epic E4.7 — Production Hardening and 30-Day Soak 🟡
 
 **Scope.** Boot-time and image-size optimisation, regression benchmark
 suite, and a continuous 30-day soak run.
@@ -1480,16 +1480,18 @@ suite, and a continuous 30-day soak run.
    the soak driver; the 2 s Firecracker/Cloud-Hypervisor target requires
    hardware-backed VMs not available in the QEMU+OVMF CI environment.)
 2. 30-day soak completes without unscheduled restart and with stable
-   memory and audit-log integrity. ✅
-   (`xtask soak` — resumable soak driver with per-iteration QEMU boot, COM1
-   serial polling, checkpoint manifest and JSONL iteration log; dry-run mode
-   CI-verified in `.github/workflows/soak.yml`; full QEMU-backed soak triggered
-   via `workflow_dispatch` with configurable `--iterations` and `--timeout-secs`;
-   manifest schema verified by inline Python assertion)
+   memory and audit-log integrity. 🟡
+   (Harness ready: `cargo xtask soak --iterations 8640 --interval-secs 300` drives
+   a resumable QEMU boot loop with per-iteration outcome tracking, checkpoint
+   manifest, JSONL iteration log, mean/p95 boot-latency stats, and OVMF
+   auto-detection.  Dry-run CI smoke-test in `.github/workflows/soak.yml` verified
+   green.  The full 30-day run on Firecracker/Cloud Hypervisor hardware has not
+   yet been executed; this criterion remains open until that run completes.)
 3. Documentation updates make the microVM target primary and mark the
    hosted target development-only. ✅
    (`docs/10-deployment-pathways.md` extended with image-size audit section and
-   microVM-as-production narrative; `docs/07-implementation-plan.md` E4.7 marked ✅)
+   microVM-as-production narrative; soak harness documented; wording clarified to
+   distinguish harness availability from run completion.)
 
 **Delivered in this epic.**
 - `xtask/src/bench_baseline.rs` — benchmark regression gate (`check` and `update`

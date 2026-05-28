@@ -54,6 +54,44 @@ use serde::{Deserialize, Serialize};
 use crate::{push_defence_outcome, AuditEntry, AuditLog};
 use defence::{ActionKind, CortexProposal, DefenceLayer};
 
+// ── ChildGuard ────────────────────────────────────────────────────────────────
+
+/// RAII guard that kills and reaps a child process on drop.
+///
+/// On error paths simply `return Err(…)` — the guard's `Drop` impl kills and
+/// waits the process automatically.  On the normal success/veto paths call
+/// [`ChildGuard::into_inner`] to take ownership of the child and socket path,
+/// then perform `wait()` + cleanup explicitly so the process exits cleanly
+/// instead of being killed.
+struct ChildGuard {
+    inner: Option<(Child, PathBuf)>,
+}
+
+impl ChildGuard {
+    fn new(child: Child, socket_path: PathBuf) -> Self {
+        Self {
+            inner: Some((child, socket_path)),
+        }
+    }
+
+    /// Consume the guard and return the child + socket path for explicit cleanup.
+    /// Returns `None` if the guard was already consumed (should not happen).
+    fn into_inner(mut self) -> Option<(Child, PathBuf)> {
+        self.inner.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some((mut child, socket_path)) = self.inner.take() {
+            // Error mid-loop: kill the process so it doesn't become a zombie.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&socket_path);
+        }
+    }
+}
+
 // ── IPC types (shared between the real and mock bridges) ─────────────────────
 
 /// Description of a tool exposed to the cortex.
@@ -358,7 +396,11 @@ impl CortexBackend for PythonCortexBridge {
 
         let start = Instant::now();
 
-        let mut child = self.spawn_python(&socket_path_str)?;
+        let child = self.spawn_python(&socket_path_str)?;
+        // Wrap in a guard so the process is killed and reaped on any error path
+        // (IPC errors, panics, early returns).  Call into_inner() on the success
+        // and veto paths to consume the guard and do an explicit wait() instead.
+        let guard = ChildGuard::new(child, socket_path.clone());
 
         // Accept the cortex connection (blocking).
         let (mut stream, _) = listener
@@ -378,6 +420,10 @@ impl CortexBackend for PythonCortexBridge {
         // Message loop.
         let mut first_action_latency = Duration::ZERO;
         let mut tool_calls_made = 0usize;
+        // Accumulate tool call results as observable evidence for the reward-
+        // hacking detector: a non-empty list proves the cortex exercised tools
+        // rather than simply claiming work is done.
+        let mut observable_evidence: Vec<String> = Vec::new();
         let result = loop {
             let msg = recv_ipc(&mut stream)?;
             let msg = msg.ok_or(CortexError::UnexpectedEof)?;
@@ -399,6 +445,11 @@ impl CortexBackend for PythonCortexBridge {
                             Ok(r) => (r, serde_json::Value::Null),
                             Err(e) => (String::new(), serde_json::Value::String(e)),
                         };
+
+                    // Record successful tool results as observable evidence.
+                    if !result_str.is_empty() {
+                        observable_evidence.push(format!("{tool_name}: {result_str}"));
+                    }
 
                     send_ipc(
                         &mut stream,
@@ -429,8 +480,7 @@ impl CortexBackend for PythonCortexBridge {
                         task_id: task_id.clone(),
                         error: msg_str.clone(),
                     });
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&socket_path);
+                    // guard.drop() will kill + wait + cleanup automatically.
                     return Err(CortexError::CortexFault(msg_str));
                 }
 
@@ -463,7 +513,9 @@ impl CortexBackend for PythonCortexBridge {
                     summary: result.output.clone(),
                 },
                 tool_calls_completed: result.tool_calls_made,
-                observable_evidence: Vec::new(),
+                // Pass the accumulated tool results so the reward-hacking
+                // detector can verify that real work was done.
+                observable_evidence,
             };
             let outcome = layer.screen(&proposal);
             let vetoed = outcome.is_vetoed();
@@ -477,14 +529,20 @@ impl CortexBackend for PythonCortexBridge {
                 layer.config.veto_window_secs,
             );
             if vetoed {
-                let _ = child.wait();
-                let _ = std::fs::remove_file(&socket_path);
+                // Consume the guard and reap cleanly (veto is a controlled exit).
+                if let Some((mut child, sp)) = guard.into_inner() {
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&sp);
+                }
                 return Err(CortexError::CortexFault(veto_reason));
             }
         }
 
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&socket_path);
+        // Normal success path: consume the guard and reap the child cleanly.
+        if let Some((mut child, sp)) = guard.into_inner() {
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&sp);
+        }
 
         Ok(result)
     }
