@@ -363,8 +363,7 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
             let jsonl_path = output.join("iterations.jsonl");
             if let Some(last) = manifest.iterations.last() {
                 use std::io::Write;
-                let line =
-                    serde_json::to_string(last).context("serialising dry-run iteration")?;
+                let line = serde_json::to_string(last).context("serialising dry-run iteration")?;
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
