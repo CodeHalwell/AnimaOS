@@ -190,17 +190,12 @@ pub fn check_against_baseline(
             // When the baseline is zero the percentage formula is undefined.
             // Fall back to the absolute noise-floor gate only so that a jump
             // from 0 ns to a meaningful value is still caught.
-            let exceeds_pct = if baseline_ns > 0 {
-                let regression_pct = delta / baseline_ns as f64 * 100.0;
-                regression_pct > baseline.regression_threshold_pct
-            } else {
-                false // absolute gate below handles the zero-baseline case
-            };
             let regression_pct = if baseline_ns > 0 {
                 delta / baseline_ns as f64 * 100.0
             } else {
                 0.0
             };
+            let exceeds_pct = baseline_ns > 0 && regression_pct > baseline.regression_threshold_pct;
 
             let exceeds_noise = delta as u64 > baseline.noise_floor_ns;
             // Regression when both gates fire, OR when the baseline is zero and
@@ -296,7 +291,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     if regression_count > 0 {
         bail!(
             "{} regression(s) detected for crate '{}'. \
-             Run `cargo xtask bench-baseline update --crate {}` to accept new baselines.",
+             Run `cargo xtask bench-baseline update --crate-name {}` to accept new baselines.",
             regression_count,
             args.crate_name,
             args.crate_name,

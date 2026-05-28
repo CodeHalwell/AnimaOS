@@ -51,9 +51,14 @@ impl SignalPublisher for AuditSignalPublisher {
             aggregate_stress: signals.aggregate_stress(),
         };
 
-        if let Ok(mut log) = self.log.lock() {
-            log.push(entry);
-        }
+        let mut log = match self.log.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                eprintln!("anima-audit: InteroceptiveSnapshot mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        };
+        log.push(entry);
     }
 }
 

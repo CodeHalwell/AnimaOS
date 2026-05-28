@@ -24,6 +24,10 @@ on:
         description: 'Per-iteration timeout in seconds (default 30)'
         required: false
         default: '30'
+      interval_secs:
+        description: 'Seconds to wait between iterations (default 300 = 5 min, gives 30-day cadence at 8640 iterations)'
+        required: false
+        default: '300'
   pull_request:
     branches: [main]
     paths:
@@ -129,6 +133,7 @@ jobs:
             --efi kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
             --iterations ${{ github.event.inputs.iterations }} \
             --timeout-secs ${{ github.event.inputs.timeout_secs }} \
+            --interval-secs ${{ github.event.inputs.interval_secs }} \
             --output artifacts/soak-full
 
       - name: Verify soak success

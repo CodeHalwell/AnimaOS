@@ -841,6 +841,7 @@ pub fn record_router_decision(
 /// - Applies the route's [`PromptScaffold`] to the `description`.
 pub fn build_routed_request(
     task_id: impl Into<String>,
+    agent_id: impl Into<String>,
     description: impl Into<String>,
     route: &Route,
     all_tools: &[ToolSpec],
@@ -851,6 +852,7 @@ pub fn build_routed_request(
 
     InvokeRequest {
         task_id: task_id.into(),
+        agent_id: agent_id.into(),
         description: scaffolded_description,
         tools: permitted_tools,
         identity,
@@ -959,6 +961,7 @@ mod tests {
         let route = router.cheap_local_route();
         let request = build_routed_request(
             "task-cl",
+            "",
             "Test cheap-local tool scoping",
             route,
             &all_builtin_tools(),
@@ -992,6 +995,7 @@ mod tests {
         let route = router.mid_tier_route();
         let request = build_routed_request(
             "task-mt",
+            "",
             "Test mid-tier tool scoping",
             route,
             &all_builtin_tools(),
@@ -1019,6 +1023,7 @@ mod tests {
         let route = router.frontier_route();
         let request = build_routed_request(
             "task-fr",
+            "",
             "Test frontier tool scoping",
             route,
             &all_builtin_tools(),
@@ -1044,6 +1049,7 @@ mod tests {
         let route = router.cheap_local_route();
         let request = build_routed_request(
             "task-strip",
+            "",
             "Test tool stripping",
             route,
             &extended_tools(), // includes "search" which is not in scope
@@ -1067,6 +1073,7 @@ mod tests {
         let route = router.cheap_local_route();
         let request = build_routed_request(
             "task-ms-cl",
+            "",
             "Memory scope test",
             route,
             &all_builtin_tools(),
@@ -1087,6 +1094,7 @@ mod tests {
         let route = router.mid_tier_route();
         let request = build_routed_request(
             "task-ms-mt",
+            "",
             "Memory scope test",
             route,
             &all_builtin_tools(),
@@ -1107,6 +1115,7 @@ mod tests {
         let route = router.frontier_route();
         let request = build_routed_request(
             "task-ms-fr",
+            "",
             "Memory scope test",
             route,
             &all_builtin_tools(),
@@ -1134,6 +1143,7 @@ mod tests {
         ] {
             let request = build_routed_request(
                 format!("task-id-{label}"),
+                "",
                 "Identity test",
                 route,
                 &all_builtin_tools(),
@@ -1161,6 +1171,7 @@ mod tests {
         let route = router.cheap_local_route();
         let request = build_routed_request(
             "task-tp-cl",
+            "",
             "Termination policy test",
             route,
             &all_builtin_tools(),
@@ -1177,6 +1188,7 @@ mod tests {
         let route = router.frontier_route();
         let request = build_routed_request(
             "task-tp-fr",
+            "",
             "Termination policy test",
             route,
             &all_builtin_tools(),
@@ -1356,6 +1368,7 @@ mod tests {
         let route = router.cheap_local_route();
         let request = build_routed_request(
             "task-scaffold",
+            "",
             "hello world",
             route,
             &all_builtin_tools(),
@@ -1385,6 +1398,7 @@ mod tests {
             let route = router.resolve(SemanticClass::UserQuery, cost_class);
             let request = build_routed_request(
                 "task-id-check",
+                "",
                 "route id check",
                 route,
                 &all_builtin_tools(),

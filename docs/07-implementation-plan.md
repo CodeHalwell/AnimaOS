@@ -1520,6 +1520,18 @@ suite, and a continuous 30-day soak run.
   wall-clock time (QEMU+OVMF firmware POST dominates; 2 s Firecracker target
   requires hardware VMs).
 
+**Security and correctness hardening (second pass, addressing automated review feedback).**
+- `bench_baseline.rs`: `regression_pct` calculation deduplicated (single source of
+  truth); error message corrected from `--crate` → `--crate-name` so operators can
+  copy-paste the fix command directly from CI output.
+- `soak.rs`: dry-run JSONL file opened once before the loop (was opened and closed
+  on every iteration — O(N) unnecessary syscalls); `--interval-secs` flag wired into
+  the full-soak GitHub Actions workflow input (default 300 s = 5-min cadence for
+  the 8 640-iteration / 30-day run; was previously hardcoded to 0).
+- `soak.yml`: `interval_secs` workflow input added with default 300; passed to
+  `xtask soak` via `--interval-secs` so the full-soak artefact matches the E4.7
+  30-day criterion (5-min inter-iteration cadence).
+
 ---
 
 ## Open Decisions
@@ -1665,7 +1677,7 @@ And one parallel stream is **intentionally not folded in**:
    `push()` calls `flush()` after each `writeln!` to match the documented
    per-write durability guarantee.
 
-**Additional hardening (security and correctness fixes).**
+**Additional hardening (security and correctness fixes — first pass).**
 - `cortex_bridge.rs`: defence-layer `Mutex::lock` is now fail-secure — poisoning
   propagates as `CortexError::CortexFault` rather than silently bypassing screening.
 - `cortex_bridge.rs`: vetoed `CompletionClaim` proposals return an error to the
@@ -1678,6 +1690,25 @@ And one parallel stream is **intentionally not folded in**:
 - Baselines recaptured from real benchmark runs (threshold 50 %, noise floor 500 ns).
 - Soak driver: `UnscheduledExit` now produced via `child.try_wait()` in polling
   loop; dry-run accumulates latency stats; `fs::rename` fallback for Windows portability.
+
+**Additional hardening (security and correctness fixes — second pass, automated review feedback).**
+- `audit.rs` (`from_env`): path-traversal validation upgraded from `contains('/')`
+  to `Path::new(agent_id).components()` — rejects any `agent_id` that is not a
+  single `Normal` component, blocking both POSIX (`/`) and Windows (`\`) separators
+  plus `.` and `..` on all platforms.
+- `audit.rs` (`push`): serialisation failure in `serde_json::to_string` now marks
+  `sink_failed = true` and emits a warning rather than silently dropping the entry
+  from the durable log while still appending it to the in-memory store.
+- `cortex_bridge.rs`: `CortexCompleted` audit entry moved to **after** the defence
+  screening pass — vetoed completions no longer produce a successful-completion
+  entry in the audit trail, eliminating a misleading signal for downstream consumers.
+- `cortex_bridge.rs` / `InvokeRequest`: `agent_id: String` field added (serde
+  default `""`) so `push_defence_outcome` receives the agent's stable identifier
+  rather than the per-invocation `task_id`; `build_routed_request` updated to
+  accept `agent_id` and thread it into the request.
+- `sensors.rs` (`AuditSignalPublisher::publish`): mutex poison error recovered via
+  `into_inner()` with a warning log rather than silently discarding the snapshot,
+  ensuring snapshot loss is visible in the audit stream.
 
 ### Epic EX.3 — Performance Regression Benchmark Suite ✅
 

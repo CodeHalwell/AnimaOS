@@ -465,12 +465,21 @@ impl AuditLog {
     ///
     /// # Path safety
     ///
-    /// `agent_id` is used as a filename component.  IDs containing `/` or `..`
-    /// are rejected to prevent path-traversal writes outside `ANIMA_AUDIT_DIR`.
+    /// `agent_id` is used as a filename component.  It must be a single normal
+    /// path component (no separators, no `.`, no `..`, no root prefix) to prevent
+    /// path-traversal writes outside `ANIMA_AUDIT_DIR` on all platforms including
+    /// Windows (where `\` is also a valid separator).
     #[cfg(feature = "std")]
     pub fn from_env(agent_id: &str) -> Self {
-        // Reject IDs that could escape the configured audit directory.
-        if agent_id.is_empty() || agent_id.contains('/') || agent_id.contains("..") {
+        // Reject IDs that are not a single, plain path component.
+        // `Path::components()` normalises both `/` and `\` on all platforms so
+        // the check is safe even on Windows where `\` is also a separator.
+        let is_safe = {
+            use std::path::{Component, Path};
+            let mut comps = Path::new(agent_id).components();
+            matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
+        };
+        if !is_safe {
             eprintln!(
                 "anima-audit: rejected unsafe agent_id '{agent_id}' — falling back to in-memory"
             );
@@ -518,8 +527,8 @@ impl AuditLog {
             use std::sync::atomic::Ordering;
             if !self.sink_failed.load(Ordering::Relaxed) {
                 if let Some(sink) = &self.file_sink {
-                    if let Ok(line) = serde_json::to_string(&entry) {
-                        match sink.lock() {
+                    match serde_json::to_string(&entry) {
+                        Ok(line) => match sink.lock() {
                             Ok(mut f) => {
                                 let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
                                 if !write_ok {
@@ -531,6 +540,10 @@ impl AuditLog {
                                 eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
                                 self.sink_failed.store(true, Ordering::Relaxed);
                             }
+                        },
+                        Err(e) => {
+                            eprintln!("anima-audit: serialisation failure for audit entry — sink disabled: {e}");
+                            self.sink_failed.store(true, Ordering::Relaxed);
                         }
                     }
                 }
