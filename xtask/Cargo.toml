@@ -20,3 +20,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 vita = { path = "../crates/vita" }
 kv-controller = { path = "../crates/kv-controller" }
+
+[dev-dependencies]
+tempfile = "3"
