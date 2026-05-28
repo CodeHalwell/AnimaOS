@@ -205,10 +205,17 @@ pub fn check_against_baseline(
                 let abs_exceeded = delta_ns > baseline.noise_floor_ns as i128;
                 if pct_exceeded && abs_exceeded {
                     failed = true;
+                    // Guard against baseline=0 producing f64::INFINITY.
+                    // Use i64::MAX as a sentinel rendered as "(from 0 ns/iter)".
+                    let delta_pct_i64 = if delta_pct.is_finite() {
+                        delta_pct.round() as i64
+                    } else {
+                        i64::MAX
+                    };
                     outcomes.push((
                         m.name.clone(),
                         CheckOutcome::Regressed {
-                            delta_pct: delta_pct.round() as i64,
+                            delta_pct: delta_pct_i64,
                         },
                     ));
                 } else {
@@ -252,7 +259,11 @@ pub fn render_outcomes(crate_name: &str, outcomes: &[(String, CheckOutcome)]) ->
             }
             CheckOutcome::Regressed { delta_pct } => {
                 regressed += 1;
-                let _ = writeln!(buf, "  ❌  {name}  regressed +{delta_pct}%");
+                if *delta_pct == i64::MAX {
+                    let _ = writeln!(buf, "  ❌  {name}  regressed (baseline=0 ns/iter)");
+                } else {
+                    let _ = writeln!(buf, "  ❌  {name}  regressed +{delta_pct}%");
+                }
             }
             CheckOutcome::New => {
                 new += 1;
@@ -475,6 +486,49 @@ unrelated garbage line that should be ignored
             "1→2 ns should be absorbed by the 100 ns noise floor"
         );
         assert_eq!(outcomes[0].1, CheckOutcome::Ok);
+    }
+
+    #[test]
+    fn zero_baseline_regression_renders_without_panic() {
+        // Baseline = 0 ns/iter, current = 500 ns/iter.
+        // delta_pct would be f64::INFINITY; guard must prevent cast to i64::MAX
+        // and render a human-readable message instead of a nonsensical value.
+        let measurements = vec![BencherMeasurement {
+            name: "zero_base".into(),
+            ns_per_iter: 500,
+            noise: 0,
+        }];
+        let mut baseline = Baseline {
+            crate_name: "demo".into(),
+            captured_at: "now".into(),
+            regression_threshold_pct: 20.0,
+            noise_floor_ns: 100, // 500 ns > 100 ns noise floor → should fail
+            measurements: BTreeMap::new(),
+        };
+        baseline.measurements.insert(
+            "zero_base".into(),
+            BaselineEntry {
+                ns_per_iter: 0,
+                noise: 0,
+            },
+        );
+        let (outcomes, failed) = check_against_baseline(&measurements, &baseline);
+        assert!(failed, "regression from 0 baseline should fail the gate");
+        let outcome = &outcomes.iter().find(|(n, _)| n == "zero_base").unwrap().1;
+        assert!(
+            matches!(outcome, CheckOutcome::Regressed { delta_pct } if *delta_pct == i64::MAX),
+            "zero-baseline regression sentinel should be i64::MAX"
+        );
+        // Ensure the renderer does not produce the raw i64::MAX value.
+        let rendered = render_outcomes("demo", &outcomes);
+        assert!(
+            !rendered.contains(&i64::MAX.to_string()),
+            "renderer must not print raw i64::MAX"
+        );
+        assert!(
+            rendered.contains("baseline=0 ns/iter"),
+            "renderer should note zero baseline"
+        );
     }
 
     #[test]

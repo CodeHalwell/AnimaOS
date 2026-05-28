@@ -116,8 +116,9 @@ struct SoakArgs {
     #[arg(long, default_value = "artifacts/soak")]
     output: PathBuf,
 
-    /// Maximum seconds to allow a single boot+soak iteration before considering
-    /// it an unscheduled exit.  Default: 60 s.
+    /// Maximum seconds to allow a single boot+soak iteration before classifying
+    /// the outcome as `Timeout`.  An early QEMU exit (crash / panic) is always
+    /// classified as `UnscheduledExit` regardless of this value.  Default: 60 s.
     #[arg(long, default_value_t = 60)]
     iteration_timeout_s: u64,
 
