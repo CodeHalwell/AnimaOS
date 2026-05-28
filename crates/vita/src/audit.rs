@@ -441,8 +441,7 @@ impl AuditLog {
     /// variable is absent or the file cannot be opened.
     pub fn from_env(agent_id: &str) -> Self {
         if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
-            let path =
-                std::path::PathBuf::from(dir).join(format!("{}.jsonl", agent_id));
+            let path = std::path::PathBuf::from(dir).join(format!("{}.jsonl", agent_id));
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

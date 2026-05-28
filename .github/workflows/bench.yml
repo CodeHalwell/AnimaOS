@@ -98,6 +98,13 @@ jobs:
             --crate-name scheduler \
             --input bench-scheduler.txt
 
+      # E4.7: Check scheduler benchmarks against baseline.
+      - name: Regression check — scheduler
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name scheduler \
+            --input bench-scheduler.txt
+
       # ------------------------------------------------------------------
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
       # ------------------------------------------------------------------
@@ -120,6 +127,13 @@ jobs:
             --crate-name memory \
             --input bench-memory.txt
 
+      # E4.7: Check memory benchmarks against baseline.
+      - name: Regression check — memory
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name memory \
+            --input bench-memory.txt
+
       # ------------------------------------------------------------------
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
@@ -134,6 +148,13 @@ jobs:
             --input bench-praxis.txt \
             --baseline bench/baselines/praxis.json \
             --warn-only
+
+      # E4.7: Check praxis benchmarks against baseline.
+      - name: Regression check — praxis
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name praxis \
+            --input bench-praxis.txt
 
       # E4.7: Check praxis benchmarks against baseline.
       - name: Regression check — praxis

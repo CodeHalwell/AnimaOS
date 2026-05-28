@@ -82,7 +82,14 @@ mod tests {
     #[test]
     fn allow_outcome_pushes_no_entries() {
         let mut audit = AuditLog::new();
-        push_defence_outcome(&mut audit, &allow_outcome(), "agent", "inv-1", "some action", 300);
+        push_defence_outcome(
+            &mut audit,
+            &allow_outcome(),
+            "agent",
+            "inv-1",
+            "some action",
+            300,
+        );
         assert!(audit.is_empty());
     }
 
@@ -120,10 +127,17 @@ mod tests {
         push_defence_outcome(&mut audit, &outcome, "agent-b", "inv-99", "delete op", 300);
 
         assert_eq!(audit.len(), 2);
-        assert!(matches!(&audit.entries()[0], AuditEntry::DefenceVeto { .. }));
+        assert!(matches!(
+            &audit.entries()[0],
+            AuditEntry::DefenceVeto { .. }
+        ));
         assert!(matches!(
             &audit.entries()[1],
-            AuditEntry::AttentionDemandEscalated { veto_count: 3, window_secs: 300, .. }
+            AuditEntry::AttentionDemandEscalated {
+                veto_count: 3,
+                window_secs: 300,
+                ..
+            }
         ));
     }
 

@@ -1642,7 +1642,7 @@ changes a public interface updates the relevant section here.
 - `docs/README.md` Status paragraph already reflects Stages 1–5 closed
   and E4.7 as the sole remaining open epic.
 
-### Epic EX.2 — Audit Log and Telemetry Pipeline 🟡
+### Epic EX.2 — Audit Log and Telemetry Pipeline ✅
 
 A single durable audit log and a telemetry export that is consumed by
 both development tooling and the homeostatic monitor. Owners change as

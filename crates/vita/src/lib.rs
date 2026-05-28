@@ -21,6 +21,7 @@ pub use cortex_bridge::{
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
     PythonCortexBridge, ToolDispatcher, ToolSpec,
 };
+pub use defence_bridge::push_defence_outcome;
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
     unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
@@ -42,6 +43,7 @@ pub use router::{
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
     RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
 };
+pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
 use std::sync::{Arc, Mutex};
