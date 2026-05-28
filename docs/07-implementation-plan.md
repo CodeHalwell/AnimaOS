@@ -1532,6 +1532,28 @@ suite, and a continuous 30-day soak run.
   `xtask soak` via `--interval-secs` so the full-soak artefact matches the E4.7
   30-day criterion (5-min inter-iteration cadence).
 
+**Security and correctness hardening (third pass, addressing PR #58 automated review feedback).**
+- `audit.rs` `from_env`: explicit `!agent_id.contains('\\')` guard added alongside
+  `Path::components()` check — on Unix `\` is a valid filename character so the
+  component iterator does not reject it; the new guard closes the cross-platform
+  path-traversal window.
+- `audit.rs` `push()`: serialisation failures (entry-specific, e.g. NaN/Inf in a
+  float field) now log to stderr and skip only the affected entry.  Previously they
+  permanently disabled the durable sink, compromising durability of all subsequent
+  valid writes.
+- `lib.rs` `somatic_execution_loop`: `AuditEntry::MemoryPressureEvent` is now emitted
+  on every level transition, including the return to Normal.  Previously the
+  Normal-return transition was silently dropped, leaving audit-log consumers unable
+  to determine when pressure had subsided.
+- `soak.rs` `save_manifest`: Windows rename now uses a three-step backup strategy
+  (rename existing → `.bak`, rename tmp → final, delete `.bak`) so the original
+  manifest is preserved if the final rename fails.  The previous remove-then-rename
+  approach created a data-loss window.
+- `soak.yml` `soak-full`: `runs-on` changed from the hardcoded `ubuntu-latest` to
+  `${{ github.event.inputs.runner || 'self-hosted' }}` with a new `runner` dispatch
+  input.  GitHub-hosted runners are capped at 6 hours and cannot complete a 30-day
+  soak; the workflow comment block documents this constraint and the resume capability.
+
 ---
 
 ## Open Decisions
