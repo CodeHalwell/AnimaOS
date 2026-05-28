@@ -343,9 +343,16 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
             .map(|r| r.boot_latency_ms)
             .collect();
         // Append each JSONL record individually (correctness: one line per
-        // iteration), but defer stats computation to after the loop (O(N log N)
-        // once vs O(N² log N) if called each iteration) and write manifest.json
-        // only once at the end (avoids N redundant full-manifest rewrites).
+        // iteration), but open the file once before the loop rather than
+        // per-iteration to avoid O(N) open/close syscalls for large iteration
+        // counts.  Stats computation and manifest.json write are deferred to
+        // after the loop (O(N log N) once vs O(N² log N) if called each iteration).
+        let jsonl_path = output.join("iterations.jsonl");
+        let mut jsonl_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&jsonl_path)
+            .context("opening JSONL log")?;
         for i in start_i..=manifest.total_iterations {
             let record = IterationRecord {
                 iteration: i,
@@ -355,22 +362,14 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
                 outcome: IterationOutcome::DryRun,
             };
             latencies.push(record.boot_latency_ms);
+            // Append this iteration's record to the JSONL log immediately so
+            // the file stays consistent even if the process is interrupted.
+            let line = serde_json::to_string(&record).context("serialising dry-run iteration")?;
+            use std::io::Write as _;
+            writeln!(jsonl_file, "{}", line).context("writing JSONL line")?;
             manifest.iterations.push(record);
             manifest.completed_iterations += 1;
             manifest.successful_iterations += 1;
-            // Append this iteration's record to the JSONL log immediately so
-            // the file stays consistent even if the process is interrupted.
-            let jsonl_path = output.join("iterations.jsonl");
-            if let Some(last) = manifest.iterations.last() {
-                use std::io::Write;
-                let line = serde_json::to_string(last).context("serialising dry-run iteration")?;
-                let mut f = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&jsonl_path)
-                    .context("opening JSONL log")?;
-                writeln!(f, "{}", line).context("writing JSONL line")?;
-            }
         }
         manifest.last_updated = Utc::now();
         let (mean, p95) = compute_stats(&latencies);

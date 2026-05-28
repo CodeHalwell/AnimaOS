@@ -157,6 +157,12 @@ impl InvokeMemoryScope {
 pub struct InvokeRequest {
     /// Stable per-invocation identifier (used for audit correlation).
     pub task_id: String,
+    /// Identifier of the agent issuing this request (used in defence audit entries).
+    ///
+    /// Defaults to an empty string for backward compatibility with pre-E5.6 callers
+    /// that do not supply an agent identity.
+    #[serde(default)]
+    pub agent_id: String,
     /// Natural-language description of the task to be performed.
     pub description: String,
     /// Tool subset the cortex is permitted to call during this invocation.
@@ -495,13 +501,10 @@ impl CortexBackend for PythonCortexBridge {
             task_id: task_id.clone(),
             latency_to_first_action_ms: result.latency_to_first_action.as_millis() as u64,
         });
-        audit.push(AuditEntry::CortexCompleted {
-            task_id: task_id.clone(),
-            tool_calls: result.tool_calls_made,
-            summary_len: result.episode_summary.len(),
-        });
 
-        // Screen the completed output through the defence layer (S5.6.5).
+        // Screen the completed output through the defence layer BEFORE pushing
+        // CortexCompleted so the audit trail only records successful completions —
+        // vetoed attempts are recorded exclusively via DefenceVeto entries.
         if let Some(ref dl) = self.defence {
             let mut layer = dl
                 .lock()
@@ -523,7 +526,7 @@ impl CortexBackend for PythonCortexBridge {
             push_defence_outcome(
                 audit,
                 &outcome,
-                &request.task_id,
+                &request.agent_id,
                 &task_id,
                 "cortex InvokeComplete output",
                 layer.config.veto_window_secs,
@@ -537,6 +540,12 @@ impl CortexBackend for PythonCortexBridge {
                 return Err(CortexError::CortexFault(veto_reason));
             }
         }
+
+        audit.push(AuditEntry::CortexCompleted {
+            task_id: task_id.clone(),
+            tool_calls: result.tool_calls_made,
+            summary_len: result.episode_summary.len(),
+        });
 
         // Normal success path: consume the guard and reap the child cleanly.
         if let Some((mut child, sp)) = guard.into_inner() {
@@ -663,13 +672,10 @@ impl CortexBackend for MockCortexBridge {
             task_id: task_id.clone(),
             latency_to_first_action_ms: first_action_latency.as_millis() as u64,
         });
-        audit.push(AuditEntry::CortexCompleted {
-            task_id: task_id.clone(),
-            tool_calls: tool_calls_made,
-            summary_len: episode_summary.len(),
-        });
 
-        // Screen the completed output through the defence layer (S5.6.5).
+        // Screen the completed output through the defence layer BEFORE pushing
+        // CortexCompleted so the audit trail only records successful completions —
+        // vetoed attempts are recorded exclusively via DefenceVeto entries.
         if let Some(ref dl) = self.defence {
             let mut layer = dl
                 .lock()
@@ -689,7 +695,7 @@ impl CortexBackend for MockCortexBridge {
             push_defence_outcome(
                 audit,
                 &outcome,
-                &request.task_id,
+                &request.agent_id,
                 &task_id,
                 "cortex InvokeComplete output",
                 layer.config.veto_window_secs,
@@ -698,6 +704,12 @@ impl CortexBackend for MockCortexBridge {
                 return Err(CortexError::CortexFault(veto_reason));
             }
         }
+
+        audit.push(AuditEntry::CortexCompleted {
+            task_id: task_id.clone(),
+            tool_calls: tool_calls_made,
+            summary_len: episode_summary.len(),
+        });
 
         Ok(CortexInvocationResult {
             task_id,
@@ -798,6 +810,7 @@ mod tests {
     fn two_tool_request() -> InvokeRequest {
         InvokeRequest {
             task_id: "test-task-1".to_string(),
+            agent_id: "test-agent".to_string(),
             description: "Test the mock cortex".to_string(),
             tools: vec![
                 ToolSpec {
@@ -1003,6 +1016,7 @@ mod tests {
 
         let req = InvokeRequest {
             task_id: "single-tool".to_string(),
+            agent_id: "test-agent".to_string(),
             description: "Single tool task".to_string(),
             tools: vec![ToolSpec {
                 name: "clock".to_string(),
