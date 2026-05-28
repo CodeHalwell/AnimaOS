@@ -52,7 +52,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
         shell: bash
-        run: set -o pipefail && cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+        run: set -o pipefail && cargo bench -p scheduler --bench scheduler -- --output-format bencher | tee bench-scheduler.txt
 
       # E4.7: Check scheduler benchmarks against baseline.
       - name: Regression check — scheduler
@@ -66,7 +66,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark memory
         shell: bash
-        run: set -o pipefail && cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+        run: set -o pipefail && cargo bench -p memory --bench memory -- --output-format bencher | tee bench-memory.txt
 
       # E4.7: Check memory benchmarks against baseline.
       - name: Regression check — memory
@@ -80,7 +80,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark praxis
         shell: bash
-        run: set -o pipefail && cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+        run: set -o pipefail && cargo bench -p praxis --bench praxis -- --output-format bencher | tee bench-praxis.txt
 
       # E4.7: Check praxis benchmarks against baseline.
       - name: Regression check — praxis

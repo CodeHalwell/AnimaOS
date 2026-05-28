@@ -476,15 +476,19 @@ impl AuditLog {
 
     /// Appends an entry to both the in-memory store and the file sink (if any).
     ///
-    /// If the file write fails the failure is recorded in `sink_failed` and a
+    /// Each write is followed by a `flush()` to honour the durability guarantee.
+    /// If the write or flush fails the failure is recorded in `sink_failed` and a
     /// warning is emitted to stderr; subsequent pushes skip the file entirely.
     pub fn push(&mut self, entry: AuditEntry) {
         if let (false, Some(sink)) = (self.sink_failed, &self.file_sink) {
             if let Ok(line) = serde_json::to_string(&entry) {
                 match sink.lock() {
                     Ok(mut f) => {
-                        if writeln!(f, "{line}").is_err() {
-                            eprintln!("anima-audit: write to file sink failed — sink disabled");
+                        let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
+                        if !write_ok {
+                            eprintln!(
+                                "anima-audit: write/flush to file sink failed — sink disabled"
+                            );
                             self.sink_failed = true;
                         }
                     }

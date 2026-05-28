@@ -1494,22 +1494,29 @@ suite, and a continuous 30-day soak run.
 **Delivered in this epic.**
 - `xtask/src/bench_baseline.rs` — benchmark regression gate (`check` and `update`
   subcommands); two-gate model: fails only when both percentage threshold
-  (default 20 %) and absolute noise floor (default 100 ns) are exceeded;
+  (50 %) and absolute noise floor (500 ns) are exceeded to tolerate cross-machine
+  variance; `empty-parse → Err` fix prevents silent gate bypass;
   10 unit tests covering parsing, regression detection, false-positive prevention.
 - `xtask/src/soak.rs` — microVM soak driver; QEMU spawning with ESP image,
-  COM1 serial polling, per-iteration outcome tracking (`Ok/Timeout/UnscheduledExit/
-  DryRun`), checkpoint manifest (atomic write-to-tmp-then-rename), JSONL log,
-  summary statistics (mean/p95 boot latency); dry-run mode for CI smoke tests;
-  5 unit tests covering stats, dry-run manifest schema, JSONL output, round-trip.
+  COM1 serial polling with `try_wait()` for early-exit detection
+  (`UnscheduledExit` now produced correctly), per-iteration outcome tracking
+  (`Ok/Timeout/UnscheduledExit/DryRun`), cross-platform atomic manifest write,
+  dry-run mode with correct mean/P95 stats accumulation; JSONL log,
+  summary statistics (mean/p95 boot latency); 5 unit tests.
 - `xtask/src/main.rs` — `BenchBaseline` and `Soak` subcommands added.
-- `bench/baselines/{scheduler,memory,praxis}.json` — checked-in baseline files.
-- `.github/workflows/bench.yml` — regression check step added after each
-  benchmark run (`cargo xtask bench-baseline check`).
+- `bench/baselines/{scheduler,memory,praxis}.json` — checked-in baseline files
+  with real measured values; threshold 50 %, noise floor 500 ns.
+- `.github/workflows/bench.yml` — `--bench <name>` flag added to each `cargo bench`
+  invocation so only the Criterion binary runs (not the lib test harness) with
+  `--output-format bencher`; regression check step runs after each benchmark.
 - `.github/workflows/soak.yml` — new workflow: `smoke-test` job (dry-run,
-  runs on PRs); `full-soak` job (QEMU-backed, manual dispatch only).
+  runs on PRs); `full-soak` job (QEMU-backed, manual dispatch only); 2 s gate
+  removed from QEMU path (informational only — applies to Firecracker/Cloud Hypervisor).
 - `ci.yml` `microvm-build` — `Enforce EFI image-size budgets` step added
   (release ≤ 1 MiB, debug ≤ 6 MiB).
-- `ci.yml` `microvm-boot` — `BOOT_MS` measurement and 2000 ms gate added.
+- `ci.yml` `microvm-boot` — `BOOT_MS` measured and logged as informational
+  wall-clock time (QEMU+OVMF firmware POST dominates; 2 s Firecracker target
+  requires hardware VMs).
 
 ---
 
@@ -1614,15 +1621,14 @@ to fold into it (with one exception called out below):
 | 4 | `serial_write()` to COM1 @ 0x3F8    | `kernels/microvm/src/main.rs:206` + `sleep_soak.rs` | yes — exit-criteria string emitter (`E4.x_*_DONE`, `ANIMA_PANIC`) | **eventually** — once microVM has a durable sink, mirror these into `AuditLog`; until then COM1 stays the canonical CI-observable channel |
 | 5 | Python cortex IPC (UDS, JSON)       | `cortex/ipc.py` + `cortex/agent_loop.py`            | yes — already bridged into `AuditEntry::CortexInvoked/Completed/Fault` by `cortex_bridge.rs` | already integrated downstream; no action |
 
-In addition to the five sinks there are three **audit variants defined
-but not yet emitted** (the call sites are the next slice of work):
+**All three previously-deferred audit variants are now emitted in production:**
 
-- `AuditEntry::InteroceptiveSnapshot` (vita/src/audit.rs:233) — needs the
-  E5.7 `SignalPublisher` impl to call `AuditLog::push` on every tick.
-- `AuditEntry::DefenceVeto` and `AuditEntry::AttentionDemandEscalated`
-  (vita/src/audit.rs:100, 115) — needs the defence-layer screening
-  outcome in `crates/defence/src/layer.rs:138` to route a veto back
-  through the cortex bridge into the audit log.
+- ✅ `AuditEntry::InteroceptiveSnapshot` — wired via `LifecycleManager::sensor_bundle`
+  on every somatic-loop iteration (`#[cfg(feature = "std")]` gated for no_std compat).
+- ✅ `AuditEntry::DefenceVeto` and `AuditEntry::AttentionDemandEscalated`
+  — wired in both `PythonCortexBridge::invoke` and `MockCortexBridge::invoke`
+  via `push_defence_outcome`; vetoed proposals now also return
+  `CortexError::CortexFault` (fail-secure) rather than silently proceeding.
 
 And one parallel stream is **intentionally not folded in**:
 
@@ -1653,7 +1659,23 @@ And one parallel stream is **intentionally not folded in**:
    `AuditLog::with_file` / `AuditLog::from_env` in `crates/vita/src/audit.rs`;
    `from_env` wired into `LifecycleManager::new()` so `ANIMA_AUDIT_DIR` is
    honoured in production; `sink_failed` field surfaces write failures to callers;
-   `from_env` emits `eprintln!` warnings on directory or file-open failures.
+   `from_env` emits `eprintln!` warnings on directory or file-open failures;
+   `push()` calls `flush()` after each `writeln!` to match the documented
+   per-write durability guarantee.
+
+**Additional hardening (security and correctness fixes).**
+- `cortex_bridge.rs`: defence-layer `Mutex::lock` is now fail-secure — poisoning
+  propagates as `CortexError::CortexFault` rather than silently bypassing screening.
+- `cortex_bridge.rs`: vetoed `CompletionClaim` proposals return an error to the
+  caller (both `PythonCortexBridge` and `MockCortexBridge`) rather than
+  logging-only.
+- `sensors.rs` / `defence_bridge.rs` modules gated behind `#[cfg(feature = "std")]`
+  so `vita` builds clean on no_std targets.
+- `bench.yml`: `--bench <name>` flag prevents the libtest unit-test harness from
+  receiving `--output-format bencher` (the root cause of the Criterion CI failure).
+- Baselines recaptured from real benchmark runs (threshold 50 %, noise floor 500 ns).
+- Soak driver: `UnscheduledExit` now produced via `child.try_wait()` in polling
+  loop; dry-run accumulates latency stats; `fs::rename` fallback for Windows portability.
 
 ### Epic EX.3 — Performance Regression Benchmark Suite ✅
 

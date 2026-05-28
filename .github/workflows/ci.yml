@@ -376,9 +376,10 @@ jobs:
         # Memory is set to 512M: the TLS 1.3 implementation uses a 2 MiB
         # static heap plus crypto stack frames that fit comfortably in 512M.
         #
-        # E4.7: boot-to-marker latency is measured and checked against the
-        # 2000 ms budget.  The marker is E4.4_TLS_DONE (the last phase to
-        # complete before the panic handler).
+        # E4.7: QEMU wall-clock runtime is recorded for informational purposes.
+        # The 2 s boot target applies to Firecracker / Cloud Hypervisor on real
+        # hardware; QEMU+OVMF on a GitHub Actions runner includes full firmware
+        # POST time and is not a representative measurement.
         run: |
           # Locate OVMF_CODE.fd — the path varies across Ubuntu versions.
           OVMF_CODE=$(find /usr/share/OVMF /usr/share/ovmf -name "OVMF_CODE*.fd" 2>/dev/null \

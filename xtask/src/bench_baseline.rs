@@ -77,9 +77,9 @@ pub struct UpdateArgs {
 pub struct CrateBaseline {
     /// ISO-8601 timestamp when this baseline was captured.
     pub captured_at: String,
-    /// Maximum allowed regression as a fraction of the baseline measurement
-    /// (e.g. 0.20 = 20 %).  Only applied when the absolute delta is also
-    /// above `noise_floor_ns`.
+    /// Maximum allowed regression expressed as a percentage of the baseline
+    /// measurement (e.g. 20.0 = 20 %).  Only applied when the absolute delta
+    /// is also above `noise_floor_ns`.
     pub regression_threshold_pct: f64,
     /// Absolute noise floor in nanoseconds.  A measurement is only flagged as
     /// a regression when it exceeds the baseline by **both** this amount

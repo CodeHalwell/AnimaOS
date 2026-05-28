@@ -188,12 +188,23 @@ fn run_qemu_iteration(
     // moment all markers are found — not after QEMU exits (which may be the
     // full timeout duration after the panic handler has already run).
     let mut boot_latency_ms: Option<u64> = None;
+    let mut unscheduled_exit: Option<i32> = None;
     while Instant::now() < deadline {
         if let Ok(content) = fs::read_to_string(&serial_log) {
             if REQUIRED_MARKERS.iter().all(|m| content.contains(m)) {
                 boot_latency_ms = Some(start.elapsed().as_millis() as u64);
                 break;
             }
+        }
+        // Check whether QEMU exited early (crash or clean shutdown before
+        // all markers were emitted).
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                unscheduled_exit = Some(status.code().unwrap_or(-1));
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => {}
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -204,6 +215,13 @@ fn run_qemu_iteration(
 
     let outcome = if let Some(ms) = boot_latency_ms {
         return Ok((IterationOutcome::Ok, ms));
+    } else if let Some(exit_code) = unscheduled_exit {
+        // One final check: the markers may have appeared just before the exit.
+        let content = fs::read_to_string(&serial_log).unwrap_or_default();
+        if REQUIRED_MARKERS.iter().all(|m| content.contains(m)) {
+            return Ok((IterationOutcome::Ok, start.elapsed().as_millis() as u64));
+        }
+        IterationOutcome::UnscheduledExit { exit_code }
     } else {
         // One final check after the deadline in case markers appeared just before
         // we stopped polling.
@@ -243,7 +261,13 @@ fn save_manifest(manifest: &SoakManifest, output_dir: &Path) -> Result<()> {
     let tmp = output_dir.join("manifest.json.tmp");
     let json = serde_json::to_string_pretty(manifest).context("serialising soak manifest")?;
     fs::write(&tmp, &json).context("writing manifest to tmp")?;
-    fs::rename(&tmp, &path).context("renaming manifest")?;
+    // `fs::rename` is atomic on Unix but fails on Windows when the destination
+    // already exists.  Use a remove-then-rename fallback for portability.
+    if let Err(e) = fs::rename(&tmp, &path) {
+        // On Windows the destination must not exist for rename to succeed.
+        let _ = fs::remove_file(&path);
+        fs::rename(&tmp, &path).with_context(|| format!("renaming manifest: {e}"))?;
+    }
 
     // Append to JSONL log for durability.
     if let Some(last) = manifest.iterations.last() {
@@ -305,6 +329,12 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
     if args.dry_run {
         println!("🔵 Dry-run mode: skipping QEMU, generating synthetic soak result.");
         let start_i = manifest.completed_iterations + 1;
+        let mut latencies: Vec<u64> = manifest
+            .iterations
+            .iter()
+            .filter(|r| matches!(r.outcome, IterationOutcome::Ok | IterationOutcome::DryRun))
+            .map(|r| r.boot_latency_ms)
+            .collect();
         for i in start_i..=manifest.total_iterations {
             let record = IterationRecord {
                 iteration: i,
@@ -313,10 +343,14 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
                 boot_latency_ms: 50,
                 outcome: IterationOutcome::DryRun,
             };
+            latencies.push(record.boot_latency_ms);
             manifest.iterations.push(record);
             manifest.completed_iterations += 1;
             manifest.successful_iterations += 1;
             manifest.last_updated = Utc::now();
+            let (mean, p95) = compute_stats(&latencies);
+            manifest.mean_boot_latency_ms = mean;
+            manifest.p95_boot_latency_ms = p95;
             save_manifest(&manifest, &output)?;
         }
         print_summary(&manifest);
