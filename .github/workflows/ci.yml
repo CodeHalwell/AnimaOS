@@ -276,13 +276,20 @@ jobs:
       # config-file rustflags.  The TLS crypto crates (polyval, aes) require
       # force-soft CFG flags to suppress CLMUL/AES-NI intrinsics that LLVM
       # cannot lower for the x86_64-unknown-uefi target.  We merge -D warnings
-      # with the three force-soft flags here so the config entries are not
+      # with the four force-soft flags here so the config entries are not
       # needed at build time.
+      #
+      # sha2_force_soft is the legacy cfg for the digest-0.10-generation `sha2`
+      # 0.10 pulled in transitively by p256/ecdsa.  sha2_backend="soft" is the
+      # replacement cfg for the digest-0.11-generation `sha2` 0.11 used
+      # directly for the TLS transcript and HKDF.  Both must be present
+      # because neither generation recognises the other's flag.
       RUSTFLAGS: >-
         -D warnings
         --cfg aes_force_soft
         --cfg polyval_force_soft
         --cfg sha2_force_soft
+        --cfg sha2_backend="soft"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install nightly toolchain + rust-src
