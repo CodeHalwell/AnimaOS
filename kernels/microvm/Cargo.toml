@@ -77,7 +77,7 @@ log = { version = "0.4", default-features = false }
 #   an &'static T at run time without unsafe code at the call site.  Used
 #   to store the Embassy Executor in a static slot so it can satisfy the
 #   'static lifetime requirement that executor.run() imposes.
-embassy-executor = { version = "0.7", features = ["nightly"] }
+embassy-executor = { version = "0.10", features = ["nightly"] }
 embassy-futures = "0.1"
 static_cell = "2"
 
