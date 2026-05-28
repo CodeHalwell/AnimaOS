@@ -246,11 +246,11 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     let results = parse_bencher_output(&input);
 
     if results.is_empty() {
-        println!(
-            "⚠  No benchmark results parsed from {} — skipping regression check.",
+        anyhow::bail!(
+            "No benchmark results parsed from {} — verify that `cargo bench` was \
+             invoked with `--output-format bencher` and produced output.",
             args.input.display()
         );
-        return Ok(());
     }
 
     let (comparisons, regression_count) = check_against_baseline(&results, &baseline);

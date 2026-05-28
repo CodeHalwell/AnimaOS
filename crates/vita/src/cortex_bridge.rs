@@ -51,7 +51,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AuditEntry, AuditLog};
+use crate::{push_defence_outcome, AuditEntry, AuditLog};
+use defence::{ActionKind, CortexProposal, DefenceLayer};
 
 // ── IPC types (shared between the real and mock bridges) ─────────────────────
 
@@ -293,6 +294,10 @@ pub struct PythonCortexBridge {
     pub state_dir: PathBuf,
     /// LLM backend hint passed to the Python process.
     pub llm_backend: String,
+    /// Optional defence layer.  When `Some`, every `InvokeComplete` output is
+    /// screened for injection, reward hacking, and goal drift; vetoed proposals
+    /// are recorded via [`push_defence_outcome`] before returning an error.
+    pub defence: Option<Arc<Mutex<DefenceLayer>>>,
 }
 
 impl PythonCortexBridge {
@@ -302,7 +307,14 @@ impl PythonCortexBridge {
             workspace_root,
             state_dir,
             llm_backend: "mock".to_string(),
+            defence: None,
         }
+    }
+
+    /// Attaches a defence layer that screens every `InvokeComplete` output.
+    pub fn with_defence(mut self, layer: DefenceLayer) -> Self {
+        self.defence = Some(Arc::new(Mutex::new(layer)));
+        self
     }
 
     fn spawn_python(&self, socket_path: &str) -> Result<Child, CortexError> {
@@ -439,6 +451,30 @@ impl CortexBackend for PythonCortexBridge {
             summary_len: result.episode_summary.len(),
         });
 
+        // Screen the completed output through the defence layer (S5.6.5).
+        if let Some(ref dl) = self.defence {
+            if let Ok(mut layer) = dl.lock() {
+                let proposal = CortexProposal {
+                    invocation_id: task_id.clone(),
+                    intent: request.description.clone(),
+                    action: ActionKind::CompletionClaim {
+                        summary: result.output.clone(),
+                    },
+                    tool_calls_completed: result.tool_calls_made,
+                    observable_evidence: Vec::new(),
+                };
+                let outcome = layer.screen(&proposal);
+                push_defence_outcome(
+                    audit,
+                    &outcome,
+                    &request.task_id,
+                    &task_id,
+                    "cortex InvokeComplete output",
+                    layer.config.veto_window_secs,
+                );
+            }
+        }
+
         let _ = child.wait();
         let _ = std::fs::remove_file(&socket_path);
 
@@ -463,6 +499,9 @@ pub struct MockCortexBridge {
     pub inject_fault: Option<String>,
     /// Simulated latency to first tool action.
     pub simulated_latency: Duration,
+    /// Optional defence layer — screens the mock output the same way the real
+    /// bridge does so defence integration tests do not require Python.
+    pub defence: Option<Arc<Mutex<DefenceLayer>>>,
 }
 
 impl Default for MockCortexBridge {
@@ -470,6 +509,7 @@ impl Default for MockCortexBridge {
         Self {
             inject_fault: None,
             simulated_latency: Duration::from_millis(1),
+            defence: None,
         }
     }
 }
@@ -562,6 +602,30 @@ impl CortexBackend for MockCortexBridge {
             tool_calls: tool_calls_made,
             summary_len: episode_summary.len(),
         });
+
+        // Screen the completed output through the defence layer (S5.6.5).
+        if let Some(ref dl) = self.defence {
+            if let Ok(mut layer) = dl.lock() {
+                let proposal = CortexProposal {
+                    invocation_id: task_id.clone(),
+                    intent: request.description.clone(),
+                    action: ActionKind::CompletionClaim {
+                        summary: output.clone(),
+                    },
+                    tool_calls_completed: tool_calls_made,
+                    observable_evidence: observations.clone(),
+                };
+                let outcome = layer.screen(&proposal);
+                push_defence_outcome(
+                    audit,
+                    &outcome,
+                    &request.task_id,
+                    &task_id,
+                    "cortex InvokeComplete output",
+                    layer.config.veto_window_secs,
+                );
+            }
+        }
 
         Ok(CortexInvocationResult {
             task_id,

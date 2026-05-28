@@ -51,7 +51,8 @@ jobs:
       # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
-        run: cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
 
       # E4.7: Check scheduler benchmarks against baseline.
       - name: Regression check — scheduler
@@ -64,7 +65,8 @@ jobs:
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
       # ------------------------------------------------------------------
       - name: Benchmark memory
-        run: cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
 
       # E4.7: Check memory benchmarks against baseline.
       - name: Regression check — memory
@@ -77,7 +79,8 @@ jobs:
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
       - name: Benchmark praxis
-        run: cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
 
       # E4.7: Check praxis benchmarks against baseline.
       - name: Regression check — praxis

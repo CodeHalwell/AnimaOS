@@ -23,7 +23,7 @@
 //! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
 
 use serde::Serialize;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 /// A single observable lifecycle event.
@@ -387,7 +387,10 @@ pub struct AuditLog {
     entries: Vec<AuditEntry>,
     /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
     /// (all clones of a manager write to the same audit file).
-    file_sink: Option<Arc<Mutex<BufWriter<std::fs::File>>>>,
+    file_sink: Option<Arc<Mutex<std::fs::File>>>,
+    /// Set to `true` after the first write failure; subsequent pushes skip
+    /// the file entirely so a broken sink does not stall callers.
+    sink_failed: bool,
 }
 
 impl std::fmt::Debug for AuditLog {
@@ -395,6 +398,7 @@ impl std::fmt::Debug for AuditLog {
         f.debug_struct("AuditLog")
             .field("entries", &self.entries.len())
             .field("has_file_sink", &self.file_sink.is_some())
+            .field("sink_failed", &self.sink_failed)
             .finish()
     }
 }
@@ -404,6 +408,7 @@ impl Clone for AuditLog {
         Self {
             entries: self.entries.clone(),
             file_sink: self.file_sink.clone(),
+            sink_failed: self.sink_failed,
         }
     }
 }
@@ -420,11 +425,12 @@ impl AuditLog {
         Self {
             entries: Vec::new(),
             file_sink: None,
+            sink_failed: false,
         }
     }
 
     /// Opens an append-only JSONL file at `path` and attaches it as the durable
-    /// sink.  Existing content is preserved.
+    /// sink.  Each write is flushed immediately for durability.
     pub fn with_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -432,33 +438,60 @@ impl AuditLog {
             .open(path)?;
         Ok(Self {
             entries: Vec::new(),
-            file_sink: Some(Arc::new(Mutex::new(BufWriter::new(file)))),
+            file_sink: Some(Arc::new(Mutex::new(file))),
+            sink_failed: false,
         })
     }
 
     /// Creates a log that writes to `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` when
-    /// the environment variable is set.  Falls back to in-memory-only when the
-    /// variable is absent or the file cannot be opened.
+    /// the environment variable is set.  Emits a warning to stderr when the
+    /// variable is set but the file cannot be opened; falls back to in-memory-only.
     pub fn from_env(agent_id: &str) -> Self {
         if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
-            let path = std::path::PathBuf::from(dir).join(format!("{}.jsonl", agent_id));
+            let path = std::path::PathBuf::from(&dir).join(format!("{}.jsonl", agent_id));
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "anima-audit: failed to create directory {}: {e}",
+                        parent.display()
+                    );
+                }
             }
-            if let Ok(log) = Self::with_file(&path) {
-                return log;
+            match Self::with_file(&path) {
+                Ok(log) => return log,
+                Err(e) => eprintln!(
+                    "anima-audit: failed to open audit file {}: {e} — falling back to in-memory",
+                    path.display()
+                ),
             }
         }
         Self::new()
     }
 
+    /// Returns `true` if the file sink has failed and further disk writes are
+    /// being skipped.
+    pub fn sink_failed(&self) -> bool {
+        self.sink_failed
+    }
+
     /// Appends an entry to both the in-memory store and the file sink (if any).
+    ///
+    /// If the file write fails the failure is recorded in `sink_failed` and a
+    /// warning is emitted to stderr; subsequent pushes skip the file entirely.
     pub fn push(&mut self, entry: AuditEntry) {
-        if let Some(sink) = &self.file_sink {
+        if let (false, Some(sink)) = (self.sink_failed, &self.file_sink) {
             if let Ok(line) = serde_json::to_string(&entry) {
-                if let Ok(mut w) = sink.lock() {
-                    let _ = writeln!(w, "{line}");
-                    let _ = w.flush();
+                match sink.lock() {
+                    Ok(mut f) => {
+                        if writeln!(f, "{line}").is_err() {
+                            eprintln!("anima-audit: write to file sink failed — sink disabled");
+                            self.sink_failed = true;
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
+                        self.sink_failed = true;
+                    }
                 }
             }
         }

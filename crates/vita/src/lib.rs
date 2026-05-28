@@ -47,7 +47,7 @@ pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use interoception::HomeostaticMonitor;
+use interoception::{HomeostaticMonitor, InteroceptiveSensorBundle, NullPublisher};
 use memory::{
     AuditTraceEntry, CompilationConfig, DreamConfig, L1PruningStore, VirtualContextManager,
 };
@@ -141,6 +141,18 @@ pub struct LifecycleManager {
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
+    /// Last memory pressure level emitted to the audit log.  Used to suppress
+    /// duplicate `MemoryPressureEvent` entries — only transitions are logged.
+    last_pressure_level: memory::MemoryPressureEvent,
+    /// Optional interoceptive sensor bundle for 1 Hz signal publication (E5.7).
+    ///
+    /// When `Some`, each somatic-loop iteration calls `tick()` on the bundle and
+    /// pushes an [`AuditEntry::InteroceptiveSnapshot`] to the audit log so the
+    /// production audit pipeline satisfies the EX.2 wiring requirement.
+    ///
+    /// Wrapped in `Arc` so `LifecycleManager::clone()` shares the same bundle
+    /// (sensors are inherently process-global resources).
+    pub sensor_bundle: Option<Arc<InteroceptiveSensorBundle>>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -184,8 +196,10 @@ impl LifecycleManager {
         backend: Arc<dyn LlmBackend>,
         max_iterations: Option<u32>,
     ) -> Self {
+        let agent_id: String = agent_id.into();
+        let audit = AuditLog::from_env(&agent_id);
         Self {
-            agent_id: agent_id.into(),
+            agent_id,
             senses,
             memory,
             l1_memory: L1PruningStore::new(),
@@ -201,10 +215,12 @@ impl LifecycleManager {
             policy_bounds: initial_bounds,
             config,
             backend,
-            audit: AuditLog::new(),
+            audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             max_iterations,
             iterations: 0,
+            last_pressure_level: memory::MemoryPressureEvent::Normal,
+            sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
         }
     }
 
@@ -541,16 +557,46 @@ pub async fn somatic_execution_loop(
         let _stress_index =
             monitor.compute_systemic_stress_index(active_tokens, lifecycle.config.max_context);
 
-        let pressure = lifecycle.memory.check_pressure();
-        if pressure.is_elevated() {
-            let agent_id = lifecycle.agent_id.clone();
-            let max_context = lifecycle.config.max_context;
-            lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
-                agent_id,
-                level: format!("{pressure:?}"),
+        // Publish interoceptive snapshot to the audit log on every iteration
+        // when a sensor bundle is configured (EX.2 wiring, E5.7 S5.7.1).
+        if let Some(ref bundle) = lifecycle.sensor_bundle {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let signals = bundle.tick(
+                monitor,
                 active_tokens,
-                max_context,
+                lifecycle.config.max_context,
+                now_ns,
+                &NullPublisher,
+            );
+            lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
+                agent_id: lifecycle.agent_id.clone(),
+                tick_ns: now_ns,
+                thermal_load: signals.thermal_load,
+                compute_pressure: signals.compute_pressure,
+                memory_pressure: signals.memory_pressure,
+                power_budget: signals.power_budget,
+                financial_budget: signals.financial_budget,
+                attention_demand: signals.attention_demand,
+                aggregate_stress: signals.aggregate_stress(),
             });
+        }
+
+        let pressure = lifecycle.memory.check_pressure();
+        if pressure != lifecycle.last_pressure_level {
+            lifecycle.last_pressure_level = pressure;
+            if pressure.is_elevated() {
+                let agent_id = lifecycle.agent_id.clone();
+                let max_context = lifecycle.config.max_context;
+                lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
+                    agent_id,
+                    level: format!("{pressure:?}"),
+                    active_tokens,
+                    max_context,
+                });
+            }
         }
 
         // ── 5. Sleep / wake decision (E3.4) ──────────────────────────────────
