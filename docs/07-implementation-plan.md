@@ -1464,19 +1464,74 @@ nightly CI.
    unsafe pointer arithmetic; no Miri errors on the default provenance
    model)
 
-### Epic E4.7 — Production Hardening and 30-Day Soak ⬜
+### Epic E4.7 — Production Hardening and 30-Day Soak 🟡
 
 **Scope.** Boot-time and image-size optimisation, regression benchmark
-suite, and a continuous 30-day soak run.
+suite, and the harness for a continuous 30-day soak run.  The 30-day
+run itself is operator-driven and lives off CI (a GitHub-hosted runner
+cannot host a 720-hour job); the harness, manifest schema, and smoke
+test are all in-tree.
 
 **Dependencies.** E4.6.
 
+**Stories.**
+
+- S4.7.1 Image-size optimisation. ✅ (`kernels/microvm/Cargo.toml` —
+  release profile tightened to `opt-level = "z"`, `lto = "fat"`,
+  `codegen-units = 1`, `strip = "symbols"`, `debug = false`,
+  `overflow-checks = false`; CI step `Enforce EFI image-size budget
+  (E4.7.1)` in `ci.yml` asserts the release EFI is ≤ 1 MiB and the
+  debug EFI is ≤ 6 MiB).
+- S4.7.2 Boot-time gate. ✅ (`ci.yml` `microvm-boot` job — QEMU is
+  spawned in the background, the COM1 serial log is polled every 50 ms
+  for `E4.5_SOAK_DONE`, the elapsed milliseconds are recorded, and the
+  step fails if the time-to-marker exceeds 2 000 ms.  Replaces the
+  previous foreground `timeout 120` invocation that timed the full
+  panic-spin loop instead of actual boot).
+- S4.7.3 Regression benchmark suite. 🟡 (`xtask bench-baseline`
+  sub-command parses Criterion's `--output-format bencher` log,
+  compares against checked-in baselines at `bench/baselines/<crate>.json`,
+  and reports any regression that clears both the per-crate
+  `regression_threshold_pct` (default 20 %) and `noise_floor_ns`
+  (default 100 ns).  Initial baselines captured for `scheduler`
+  (16 measurements), `memory` (21), and `praxis` (16).  Wired into
+  `.github/workflows/bench.yml` — also fixes a pre-existing latent bug
+  where `cargo bench -p <crate> -- --output-format bencher` fed the
+  unrecognised flag into the lib unit-test runner first and silently
+  produced partial output.  Currently invoked with `--warn-only` in
+  CI: the checked-in baselines were captured on a developer host and
+  GitHub-hosted shared runners are 2-5× noisier, so a hard gate would
+  flap on jitter.  Follow-up is to re-capture baselines from a stable
+  CI run and drop `--warn-only`).
+- S4.7.4 30-day soak harness. ✅ (`xtask soak --hours <N>` drives QEMU
+  in a loop, records per-iteration boot latency and outcome
+  classification — `ok` / `timeout` / `unscheduled_exit` — and writes
+  a rolling JSON manifest plus a JSONL audit log so a long run can be
+  inspected or resumed without losing prior iterations.  Dry-run mode
+  (no `--efi`) emits a stub manifest for CI smoke-testing without
+  requiring QEMU on the runner.  `.github/workflows/soak.yml` runs a
+  short live soak on manual dispatch plus a dry-run self-test that
+  asserts the manifest schema).
+- S4.7.5 Documentation promotion. ✅ (`README.md` — microVM marked as
+  the production target with explicit boot-time and image-size
+  budgets; hosted target marked development-only; targets table added;
+  CI workflow table added; this `07-implementation-plan.md` flips E4.7
+  ⬜ → 🟡; `05-roadmap.md` updates the Phase 4 milestone wording to
+  match).
+
 **Exit criteria.**
 1. MicroVM boots within 2 s under Firecracker and Cloud Hypervisor.
+   🟡 (≤ 2 s asserted under QEMU/OVMF in `ci.yml`; the equivalent gate
+   against Firecracker and Cloud Hypervisor is still pending — both
+   are byte-compatible UEFI loaders but the assertion needs to run on
+   a host with those VMMs installed, not on a GitHub Linux runner).
 2. 30-day soak completes without unscheduled restart and with stable
-   memory and audit-log integrity.
+   memory and audit-log integrity. 🟡 (harness, manifest, and CI
+   smoke-test in place; the actual 720-hour run is operator-driven
+   and its manifest is committed under `artifacts/soak/` when
+   complete).
 3. Documentation updates make the microVM target primary and mark the
-   hosted target development-only.
+   hosted target development-only. ✅
 
 ---
 
