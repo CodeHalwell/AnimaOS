@@ -659,7 +659,8 @@ fn compute_finished_mac(traffic_secret: &[u8; 32], transcript_hash: &[u8]) -> [u
     let mut finished_key = [0u8; 32];
     hkdf_expand_label(&prk, b"finished", b"", &mut finished_key);
 
-    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&finished_key).unwrap();
+    // hmac 0.13 / digest 0.11 moved `new_from_slice` from `Mac` to `KeyInit`.
+    let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&finished_key).unwrap();
     mac.update(transcript_hash);
     mac.finalize().into_bytes().into()
 }

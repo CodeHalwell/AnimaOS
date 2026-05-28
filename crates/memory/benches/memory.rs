@@ -14,8 +14,9 @@
 //! cargo bench -p memory
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use memory::{ArcCache, MemoryNode, VirtualContextManager, DEFAULT_BLOCK_SIZE};
+use std::hint::black_box;
 
 // ── ArcCache benchmarks ───────────────────────────────────────────────────────
 

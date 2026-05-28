@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-05-28T00:00:00Z",
+  "regression_threshold_pct": 50.0,
+  "noise_floor_ns": 500,
+  "benchmarks": {
+    "arc_cache/sequential_inserts/64": 17802,
+    "arc_cache/sequential_inserts/256": 162014,
+    "arc_cache/sequential_inserts/1024": 1878423,
+    "arc_cache/mixed_workload/64": 1191,
+    "arc_cache/mixed_workload/256": 7974,
+    "arc_cache/mixed_workload/1024": 96957,
+    "arc_cache/get_hits/64": 1601,
+    "arc_cache/get_hits/256": 6418,
+    "arc_cache/get_hits/1024": 26350,
+    "l1_vcm/occupied_blocks/0": 0,
+    "l1_vcm/occupied_blocks/2048": 0,
+    "l1_vcm/occupied_blocks/4000": 0,
+    "l1_vcm/occupied_blocks/8192": 0,
+    "l1_vcm/add_tokens": 1158,
+    "memory_node/activation_at/t=0": 6,
+    "memory_node/activation_at/t=1": 6,
+    "memory_node/activation_at/t=10": 6,
+    "memory_node/activation_at/t=100": 5,
+    "memory_node/activation_batch/64": 523,
+    "memory_node/activation_batch/512": 3855,
+    "memory_node/activation_batch/4096": 31358
+  }
+}

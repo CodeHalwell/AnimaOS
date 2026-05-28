@@ -3,20 +3,28 @@
 //! Self-preservation plane: autonomous lifecycle director.
 
 pub mod audit;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
+#[cfg(feature = "std")]
+pub mod defence_bridge;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
 pub mod kv_gate;
 pub mod router;
+#[cfg(feature = "std")]
+pub mod sensors;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
+#[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
     PythonCortexBridge, ToolDispatcher, ToolSpec,
 };
+#[cfg(feature = "std")]
+pub use defence_bridge::push_defence_outcome;
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
     unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
@@ -38,12 +46,24 @@ pub use router::{
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
     RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
 };
+#[cfg(feature = "std")]
+pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use core::time::Duration;
+#[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "std")]
 use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
+#[cfg(feature = "std")]
+use interoception::{InteroceptiveSensorBundle, NullPublisher};
 use memory::{
     AuditTraceEntry, CompilationConfig, DreamConfig, L1PruningStore, VirtualContextManager,
 };
@@ -137,6 +157,19 @@ pub struct LifecycleManager {
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
+    /// Last memory pressure level emitted to the audit log.  Used to suppress
+    /// duplicate `MemoryPressureEvent` entries — only transitions are logged.
+    last_pressure_level: memory::MemoryPressureEvent,
+    /// Optional interoceptive sensor bundle for 1 Hz signal publication (E5.7).
+    ///
+    /// When `Some`, each somatic-loop iteration calls `tick()` on the bundle and
+    /// pushes an [`AuditEntry::InteroceptiveSnapshot`] to the audit log so the
+    /// production audit pipeline satisfies the EX.2 wiring requirement.
+    ///
+    /// Wrapped in `Arc` so `LifecycleManager::clone()` shares the same bundle
+    /// (sensors are inherently process-global resources).
+    #[cfg(feature = "std")]
+    pub sensor_bundle: Option<Arc<InteroceptiveSensorBundle>>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -180,8 +213,13 @@ impl LifecycleManager {
         backend: Arc<dyn LlmBackend>,
         max_iterations: Option<u32>,
     ) -> Self {
+        let agent_id: String = agent_id.into();
+        #[cfg(feature = "std")]
+        let audit = AuditLog::from_env(&agent_id);
+        #[cfg(not(feature = "std"))]
+        let audit = AuditLog::new();
         Self {
-            agent_id: agent_id.into(),
+            agent_id,
             senses,
             memory,
             l1_memory: L1PruningStore::new(),
@@ -197,10 +235,13 @@ impl LifecycleManager {
             policy_bounds: initial_bounds,
             config,
             backend,
-            audit: AuditLog::new(),
+            audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             max_iterations,
             iterations: 0,
+            last_pressure_level: memory::MemoryPressureEvent::Normal,
+            #[cfg(feature = "std")]
+            sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
         }
     }
 
@@ -532,10 +573,57 @@ pub async fn somatic_execution_loop(
         let human_guidance = lifecycle.senses.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
 
-        // ── 4. Stress index ───────────────────────────────────────────────────
+        // ── 4. Stress index + memory pressure ────────────────────────────────
         let active_tokens = lifecycle.memory.get_l1_token_count();
         let _stress_index =
             monitor.compute_systemic_stress_index(active_tokens, lifecycle.config.max_context);
+
+        // Publish interoceptive snapshot to the audit log on every iteration
+        // when a sensor bundle is configured (EX.2 wiring, E5.7 S5.7.1).
+        #[cfg(feature = "std")]
+        if let Some(ref bundle) = lifecycle.sensor_bundle {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let signals = bundle.tick(
+                monitor,
+                active_tokens,
+                lifecycle.config.max_context,
+                now_ns,
+                &NullPublisher,
+            );
+            lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
+                agent_id: lifecycle.agent_id.clone(),
+                tick_ns: now_ns,
+                thermal_load: signals.thermal_load,
+                compute_pressure: signals.compute_pressure,
+                memory_pressure: signals.memory_pressure,
+                power_budget: signals.power_budget,
+                financial_budget: signals.financial_budget,
+                attention_demand: signals.attention_demand,
+                aggregate_stress: signals.aggregate_stress(),
+            });
+        }
+
+        let pressure = lifecycle.memory.check_pressure();
+        if pressure != lifecycle.last_pressure_level {
+            lifecycle.last_pressure_level = pressure;
+            // Log every level transition including the return to Normal so that
+            // audit-log consumers can see the full pressure envelope over time.
+            let agent_id = lifecycle.agent_id.clone();
+            let max_context = lifecycle.config.max_context;
+            #[cfg(feature = "std")]
+            let level = format!("{pressure:?}");
+            #[cfg(not(feature = "std"))]
+            let level = alloc::format!("{pressure:?}");
+            lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
+                agent_id,
+                level,
+                active_tokens,
+                max_context,
+            });
+        }
 
         // ── 5. Sleep / wake decision (E3.4) ──────────────────────────────────
         // Sleep whenever the agenda is empty; wake when a task is available.

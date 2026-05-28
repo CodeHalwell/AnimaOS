@@ -13,6 +13,7 @@ on:
       - 'crates/scheduler/**'
       - 'crates/memory/**'
       - 'crates/praxis/**'
+      - 'bench/baselines/**'
       - '.github/workflows/bench.yml'
 
 env:
@@ -23,15 +24,39 @@ env:
 permissions:
   contents: read
 
+# Epic E4.7.3 — Regression Benchmark Suite
+#
+# Every bench step now runs the criterion harness *by name* (`--bench <name>`)
+# so the `--output-format bencher` argument is only fed to the harness that
+# understands it.  The previous form (`cargo bench -p <crate>`) also ran the
+# library's unit-test runner, which rejected `--output-format` on stable.
+# Combined with the missing `pipefail`, that made the bench job silently
+# capture partial output without failing.
+#
+# We then run `xtask bench-baseline check` against the checked-in baseline
+# at `bench/baselines/<crate>.json`.  Any per-bench regression beyond the
+# baseline's `regression_threshold_pct` (and exceeding `noise_floor_ns`)
+# fails the job before the artefacts are uploaded.
+#
+# To refresh a baseline after a deliberate perf change, run locally:
+#   cargo bench -p scheduler --bench scheduler -- --output-format bencher \
+#     | tee bench-scheduler.txt
+#   cargo xtask bench-baseline update --crate scheduler \
+#     --input bench-scheduler.txt --output bench/baselines/scheduler.json
+# then commit the updated baseline JSON.
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
 jobs:
   bench:
     name: Criterion benchmark suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -42,30 +67,65 @@ jobs:
             ${{ runner.os }}-cargo-bench-
             ${{ runner.os }}-cargo-
 
+      # Build xtask once for regression checks below.
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml
+
       # ------------------------------------------------------------------
       # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
-        run: cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p scheduler --bench scheduler -- --output-format bencher | tee bench-scheduler.txt
+
+      # E4.7: Check scheduler benchmarks against baseline.
+      # On pull_request events the regression check warns but does not block
+      # because baselines are captured on the same runner type used by the
+      # nightly schedule.  Cross-machine comparisons have too much variance to
+      # enforce as a hard gate on PR CI.
+      - name: Regression check — scheduler
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name scheduler \
+            --input bench-scheduler.txt
 
       # ------------------------------------------------------------------
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
       # ------------------------------------------------------------------
       - name: Benchmark memory
-        run: cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p memory --bench memory -- --output-format bencher | tee bench-memory.txt
+
+      # E4.7: Check memory benchmarks against baseline.
+      - name: Regression check — memory
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name memory \
+            --input bench-memory.txt
 
       # ------------------------------------------------------------------
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
       - name: Benchmark praxis
-        run: cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p praxis --bench praxis -- --output-format bencher | tee bench-praxis.txt
+
+      # E4.7: Check praxis benchmarks against baseline.
+      - name: Regression check — praxis
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name praxis \
+            --input bench-praxis.txt
 
       # ------------------------------------------------------------------
       # Upload HTML reports as artifacts (available for 30 days)
       # ------------------------------------------------------------------
       - name: Upload benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: criterion-reports-${{ github.run_id }}
           path: |

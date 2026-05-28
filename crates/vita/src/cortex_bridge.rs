@@ -51,7 +51,46 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AuditEntry, AuditLog};
+use crate::{push_defence_outcome, AuditEntry, AuditLog};
+use defence::{ActionKind, CortexProposal, DefenceLayer};
+
+// ── ChildGuard ────────────────────────────────────────────────────────────────
+
+/// RAII guard that kills and reaps a child process on drop.
+///
+/// On error paths simply `return Err(…)` — the guard's `Drop` impl kills and
+/// waits the process automatically.  On the normal success/veto paths call
+/// [`ChildGuard::into_inner`] to take ownership of the child and socket path,
+/// then perform `wait()` + cleanup explicitly so the process exits cleanly
+/// instead of being killed.
+struct ChildGuard {
+    inner: Option<(Child, PathBuf)>,
+}
+
+impl ChildGuard {
+    fn new(child: Child, socket_path: PathBuf) -> Self {
+        Self {
+            inner: Some((child, socket_path)),
+        }
+    }
+
+    /// Consume the guard and return the child + socket path for explicit cleanup.
+    /// Returns `None` if the guard was already consumed (should not happen).
+    fn into_inner(mut self) -> Option<(Child, PathBuf)> {
+        self.inner.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some((mut child, socket_path)) = self.inner.take() {
+            // Error mid-loop: kill the process so it doesn't become a zombie.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&socket_path);
+        }
+    }
+}
 
 // ── IPC types (shared between the real and mock bridges) ─────────────────────
 
@@ -118,6 +157,12 @@ impl InvokeMemoryScope {
 pub struct InvokeRequest {
     /// Stable per-invocation identifier (used for audit correlation).
     pub task_id: String,
+    /// Identifier of the agent issuing this request (used in defence audit entries).
+    ///
+    /// Defaults to an empty string for backward compatibility with pre-E5.6 callers
+    /// that do not supply an agent identity.
+    #[serde(default)]
+    pub agent_id: String,
     /// Natural-language description of the task to be performed.
     pub description: String,
     /// Tool subset the cortex is permitted to call during this invocation.
@@ -293,6 +338,10 @@ pub struct PythonCortexBridge {
     pub state_dir: PathBuf,
     /// LLM backend hint passed to the Python process.
     pub llm_backend: String,
+    /// Optional defence layer.  When `Some`, every `InvokeComplete` output is
+    /// screened for injection, reward hacking, and goal drift; vetoed proposals
+    /// are recorded via [`push_defence_outcome`] before returning an error.
+    pub defence: Option<Arc<Mutex<DefenceLayer>>>,
 }
 
 impl PythonCortexBridge {
@@ -302,7 +351,14 @@ impl PythonCortexBridge {
             workspace_root,
             state_dir,
             llm_backend: "mock".to_string(),
+            defence: None,
         }
+    }
+
+    /// Attaches a defence layer that screens every `InvokeComplete` output.
+    pub fn with_defence(mut self, layer: DefenceLayer) -> Self {
+        self.defence = Some(Arc::new(Mutex::new(layer)));
+        self
     }
 
     fn spawn_python(&self, socket_path: &str) -> Result<Child, CortexError> {
@@ -346,7 +402,11 @@ impl CortexBackend for PythonCortexBridge {
 
         let start = Instant::now();
 
-        let mut child = self.spawn_python(&socket_path_str)?;
+        let child = self.spawn_python(&socket_path_str)?;
+        // Wrap in a guard so the process is killed and reaped on any error path
+        // (IPC errors, panics, early returns).  Call into_inner() on the success
+        // and veto paths to consume the guard and do an explicit wait() instead.
+        let guard = ChildGuard::new(child, socket_path.clone());
 
         // Accept the cortex connection (blocking).
         let (mut stream, _) = listener
@@ -366,6 +426,10 @@ impl CortexBackend for PythonCortexBridge {
         // Message loop.
         let mut first_action_latency = Duration::ZERO;
         let mut tool_calls_made = 0usize;
+        // Accumulate tool call results as observable evidence for the reward-
+        // hacking detector: a non-empty list proves the cortex exercised tools
+        // rather than simply claiming work is done.
+        let mut observable_evidence: Vec<String> = Vec::new();
         let result = loop {
             let msg = recv_ipc(&mut stream)?;
             let msg = msg.ok_or(CortexError::UnexpectedEof)?;
@@ -387,6 +451,11 @@ impl CortexBackend for PythonCortexBridge {
                             Ok(r) => (r, serde_json::Value::Null),
                             Err(e) => (String::new(), serde_json::Value::String(e)),
                         };
+
+                    // Record successful tool results as observable evidence.
+                    if !result_str.is_empty() {
+                        observable_evidence.push(format!("{tool_name}: {result_str}"));
+                    }
 
                     send_ipc(
                         &mut stream,
@@ -417,8 +486,7 @@ impl CortexBackend for PythonCortexBridge {
                         task_id: task_id.clone(),
                         error: msg_str.clone(),
                     });
-                    let _ = child.wait();
-                    let _ = std::fs::remove_file(&socket_path);
+                    // guard.drop() will kill + wait + cleanup automatically.
                     return Err(CortexError::CortexFault(msg_str));
                 }
 
@@ -433,14 +501,57 @@ impl CortexBackend for PythonCortexBridge {
             task_id: task_id.clone(),
             latency_to_first_action_ms: result.latency_to_first_action.as_millis() as u64,
         });
+
+        // Screen the completed output through the defence layer BEFORE pushing
+        // CortexCompleted so the audit trail only records successful completions —
+        // vetoed attempts are recorded exclusively via DefenceVeto entries.
+        if let Some(ref dl) = self.defence {
+            let mut layer = dl
+                .lock()
+                .map_err(|_| CortexError::CortexFault("defence layer lock poisoned".to_string()))?;
+            let proposal = CortexProposal {
+                invocation_id: task_id.clone(),
+                intent: request.description.clone(),
+                action: ActionKind::CompletionClaim {
+                    summary: result.output.clone(),
+                },
+                tool_calls_completed: result.tool_calls_made,
+                // Pass the accumulated tool results so the reward-hacking
+                // detector can verify that real work was done.
+                observable_evidence,
+            };
+            let outcome = layer.screen(&proposal);
+            let vetoed = outcome.is_vetoed();
+            let veto_reason = format!("defence layer veto by detector '{}'", outcome.detector);
+            push_defence_outcome(
+                audit,
+                &outcome,
+                &request.agent_id,
+                &task_id,
+                "cortex InvokeComplete output",
+                layer.config.veto_window_secs,
+            );
+            if vetoed {
+                // Consume the guard and reap cleanly (veto is a controlled exit).
+                if let Some((mut child, sp)) = guard.into_inner() {
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&sp);
+                }
+                return Err(CortexError::CortexFault(veto_reason));
+            }
+        }
+
         audit.push(AuditEntry::CortexCompleted {
             task_id: task_id.clone(),
             tool_calls: result.tool_calls_made,
             summary_len: result.episode_summary.len(),
         });
 
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&socket_path);
+        // Normal success path: consume the guard and reap the child cleanly.
+        if let Some((mut child, sp)) = guard.into_inner() {
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&sp);
+        }
 
         Ok(result)
     }
@@ -463,6 +574,9 @@ pub struct MockCortexBridge {
     pub inject_fault: Option<String>,
     /// Simulated latency to first tool action.
     pub simulated_latency: Duration,
+    /// Optional defence layer — screens the mock output the same way the real
+    /// bridge does so defence integration tests do not require Python.
+    pub defence: Option<Arc<Mutex<DefenceLayer>>>,
 }
 
 impl Default for MockCortexBridge {
@@ -470,6 +584,7 @@ impl Default for MockCortexBridge {
         Self {
             inject_fault: None,
             simulated_latency: Duration::from_millis(1),
+            defence: None,
         }
     }
 }
@@ -557,6 +672,39 @@ impl CortexBackend for MockCortexBridge {
             task_id: task_id.clone(),
             latency_to_first_action_ms: first_action_latency.as_millis() as u64,
         });
+
+        // Screen the completed output through the defence layer BEFORE pushing
+        // CortexCompleted so the audit trail only records successful completions —
+        // vetoed attempts are recorded exclusively via DefenceVeto entries.
+        if let Some(ref dl) = self.defence {
+            let mut layer = dl
+                .lock()
+                .map_err(|_| CortexError::CortexFault("defence layer lock poisoned".to_string()))?;
+            let proposal = CortexProposal {
+                invocation_id: task_id.clone(),
+                intent: request.description.clone(),
+                action: ActionKind::CompletionClaim {
+                    summary: output.clone(),
+                },
+                tool_calls_completed: tool_calls_made,
+                observable_evidence: observations.clone(),
+            };
+            let outcome = layer.screen(&proposal);
+            let vetoed = outcome.is_vetoed();
+            let veto_reason = format!("defence layer veto by detector '{}'", outcome.detector);
+            push_defence_outcome(
+                audit,
+                &outcome,
+                &request.agent_id,
+                &task_id,
+                "cortex InvokeComplete output",
+                layer.config.veto_window_secs,
+            );
+            if vetoed {
+                return Err(CortexError::CortexFault(veto_reason));
+            }
+        }
+
         audit.push(AuditEntry::CortexCompleted {
             task_id: task_id.clone(),
             tool_calls: tool_calls_made,
@@ -662,6 +810,7 @@ mod tests {
     fn two_tool_request() -> InvokeRequest {
         InvokeRequest {
             task_id: "test-task-1".to_string(),
+            agent_id: "test-agent".to_string(),
             description: "Test the mock cortex".to_string(),
             tools: vec![
                 ToolSpec {
@@ -867,6 +1016,7 @@ mod tests {
 
         let req = InvokeRequest {
             task_id: "single-tool".to_string(),
+            agent_id: "test-agent".to_string(),
             description: "Single tool task".to_string(),
             tools: vec![ToolSpec {
                 name: "clock".to_string(),

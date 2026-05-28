@@ -13,10 +13,11 @@
 //! cargo bench -p praxis
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use praxis::{
     length_robust_filter, Bus, CircuitBreaker, ToolCandidate, ToolEnvelope, ToolRegistry,
 };
+use std::hint::black_box;
 
 // ── ToolRegistry benchmarks ───────────────────────────────────────────────────
 

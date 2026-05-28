@@ -14,15 +14,54 @@
 //!
 //! Artefacts are written to `artifacts/demos/<date>-<kind>/`.
 //!
+//! ## `bench-baseline` — E4.7 perf regression gate
+//!
+//! ```
+//! cargo xtask bench-baseline check  --crate scheduler --input bench-scheduler.txt \
+//!                                   --baseline bench/baselines/scheduler.json
+//! cargo xtask bench-baseline update --crate scheduler --input bench-scheduler.txt \
+//!                                   --output   bench/baselines/scheduler.json
+//! ```
+//!
+//! ## `soak` — E4.7 long-running soak driver
+//!
+//! ```
+//! cargo xtask soak --hours 720 --efi path/to/anima-microvm.efi \
+//!                  --output artifacts/soak/$(date +%Y%m%d)
+//! ```
+//!
 //! All demos are **fixture-only** — no live API calls are made.  Every demo
 //! can be reproduced from a clean checkout.
+//!
+//! ## `bench-baseline` — E4.7 Benchmark Regression Gate
+//!
+//! ```
+//! cargo xtask bench-baseline check  --crate-name scheduler --input bench-scheduler.txt
+//! cargo xtask bench-baseline update --crate-name scheduler --input bench-scheduler.txt
+//! ```
+//!
+//! Compares Criterion `--output-format bencher` measurements against checked-in
+//! baselines under `bench/baselines/<crate>.json`.  Fails only when a measurement
+//! exceeds **both** the percentage threshold and the absolute noise floor.
+//!
+//! ## `soak` — E4.7 MicroVM Long-Running Soak Driver
+//!
+//! ```
+//! cargo xtask soak --efi anima-microvm.efi --iterations 5
+//! cargo xtask soak --dry-run --iterations 1    # CI smoke test
+//! ```
+//!
+//! Boots the microVM EFI image under QEMU in a loop, records per-iteration
+//! outcomes, and writes a resumable checkpoint manifest.
 
 use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod bench_baseline;
 mod demo;
+mod soak;
 
 #[derive(Parser, Debug)]
 #[command(name = "xtask", about = "AnimaOS workspace automation")]
@@ -35,6 +74,10 @@ struct Cli {
 enum Commands {
     /// Run E5.8 kill-shot demonstrations and write reproducible artefact bundles.
     Demo(DemoArgs),
+    /// E4.7: Compare or update benchmark baselines (regression gate).
+    BenchBaseline(bench_baseline::BenchBaselineArgs),
+    /// E4.7: Run the microVM soak driver (long-running boot-cycle harness).
+    Soak(soak::SoakArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -63,6 +106,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Demo(args) => run_demo(args),
+        Commands::BenchBaseline(args) => run_bench_baseline(args),
+        Commands::Soak(args) => soak::run_soak(args),
     }
 }
 
@@ -119,4 +164,15 @@ fn run_demo(args: DemoArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_bench_baseline(args: bench_baseline::BenchBaselineArgs) -> Result<()> {
+    match args.action {
+        bench_baseline::BenchBaselineAction::Check(check_args) => {
+            bench_baseline::run_check(check_args)
+        }
+        bench_baseline::BenchBaselineAction::Update(update_args) => {
+            bench_baseline::run_update(update_args)
+        }
+    }
 }

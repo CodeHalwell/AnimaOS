@@ -13,8 +13,9 @@
 //! cargo bench -p scheduler
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use scheduler::{BoundedTokenPipe, IterationAwareMlfq, Task, TaskAgenda};
+use std::hint::black_box;
 
 // ── TaskAgenda benchmarks ─────────────────────────────────────────────────────
 

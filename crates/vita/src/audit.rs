@@ -9,12 +9,30 @@
 //! Sleep-maintenance phase entries ([`AuditEntry::SleepPhaseStarted`] and
 //! [`AuditEntry::SleepPhaseCompleted`]) were added to support audited end-to-end
 //! tracing of each sleep cycle (exit criterion 1 of E3.4).
+//!
+//! # EX.2 — Durable audit log
+//!
+//! [`AuditLog::with_file`] opens an append-only JSONL sink.  Every call to
+//! [`AuditLog::push`] serialises the entry and writes it to the file before
+//! adding it to the in-memory `Vec`.  The in-memory copy is retained so that
+//! all existing tests and query call sites (`entries()`, `len()`) continue to
+//! work without modification.
+//!
+//! The file sink is also configurable via the `ANIMA_AUDIT_DIR` environment
+//! variable: if set, [`AuditLog::from_env`] opens
+//! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
+
+use serde::Serialize;
+#[cfg(feature = "std")]
+use std::io::Write;
+#[cfg(feature = "std")]
+use std::sync::{Arc, Mutex};
 
 /// A single observable lifecycle event.
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
 /// therefore the enum derives `PartialEq` only (not `Eq`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -61,6 +79,25 @@ pub enum AuditEntry {
         /// `true` when the phase completed without rollback or error.
         success: bool,
     },
+
+    // ── EX.2 Memory-pressure audit entries ────────────────────────────────────
+    /// The L1 context window reached or exceeded its high-water mark.
+    ///
+    /// Emitted by the somatic loop after each memory-pressure check when the
+    /// level is `HighWater` or `Critical` (EX.2 consolidation step 2).
+    ///
+    /// The `level` field is one of `"Normal"`, `"HighWater"`, or `"Critical"`.
+    MemoryPressureEvent {
+        /// Agent that observed the pressure.
+        agent_id: String,
+        /// String form of [`memory::MemoryPressureEvent`].
+        level: String,
+        /// L1 token count at the time of the event.
+        active_tokens: u32,
+        /// Configured maximum context size.
+        max_context: u32,
+    },
+
     // ── E5.1 Cortex MVP audit entries ─────────────────────────────────────────
     /// The cortex was successfully invoked and made its first tool action.
     ///
@@ -340,20 +377,183 @@ pub enum AuditEntry {
     },
 }
 
-/// Append-only audit log.
-#[derive(Debug, Default, Clone)]
+// ── AuditLog ──────────────────────────────────────────────────────────────────
+
+/// Append-only audit log with an optional durable JSONL file sink (EX.2).
+///
+/// The in-memory `Vec<AuditEntry>` is always maintained so that all existing
+/// query call sites (`entries()`, `len()`, `is_empty()`) continue to work
+/// without modification.  When a file sink is configured, every `push` also
+/// serialises the entry as a newline-delimited JSON record.
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
+    /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
+    /// (all clones of a manager write to the same audit file).
+    #[cfg(feature = "std")]
+    file_sink: Option<Arc<Mutex<std::fs::File>>>,
+    /// Shared failure flag — `Arc<AtomicBool>` so all clones see the same
+    /// failure state.  Once a write fails, every clone skips the file to
+    /// prevent performance degradation from repeatedly locking a broken sink.
+    #[cfg(feature = "std")]
+    sink_failed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::fmt::Debug for AuditLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("AuditLog");
+        d.field("entries", &self.entries.len());
+        #[cfg(feature = "std")]
+        {
+            use std::sync::atomic::Ordering;
+            d.field("has_file_sink", &self.file_sink.is_some())
+                .field("sink_failed", &self.sink_failed.load(Ordering::Relaxed));
+        }
+        d.finish()
+    }
+}
+
+impl Clone for AuditLog {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            #[cfg(feature = "std")]
+            file_sink: self.file_sink.clone(),
+            // Clone shares the same AtomicBool so failure on one clone disables
+            // all clones — no broken-fd thundering herd.
+            #[cfg(feature = "std")]
+            sink_failed: self.sink_failed.clone(),
+        }
+    }
+}
+
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AuditLog {
-    /// Creates an empty log.
+    /// Creates an in-memory-only log (no file persistence).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Vec::new(),
+            #[cfg(feature = "std")]
+            file_sink: None,
+            #[cfg(feature = "std")]
+            sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
-    /// Appends an entry.
+    /// Opens an append-only JSONL file at `path` and attaches it as the durable
+    /// sink.  Each write is flushed immediately for durability.
+    #[cfg(feature = "std")]
+    pub fn with_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self {
+            entries: Vec::new(),
+            file_sink: Some(Arc::new(Mutex::new(file))),
+            sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
+    /// Creates a log that writes to `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` when
+    /// the environment variable is set.  Emits a warning to stderr when the
+    /// variable is set but the file cannot be opened; falls back to in-memory-only.
+    ///
+    /// # Path safety
+    ///
+    /// `agent_id` is used as a filename component.  It must be a single normal
+    /// path component (no separators, no `.`, no `..`, no root prefix) to prevent
+    /// path-traversal writes outside `ANIMA_AUDIT_DIR` on all platforms including
+    /// Windows (where `\` is also a valid separator).
+    #[cfg(feature = "std")]
+    pub fn from_env(agent_id: &str) -> Self {
+        // Reject IDs that are not a single, plain path component.
+        // On Unix `\` is a valid filename character so `Path::components()` will
+        // not split it — add an explicit check to reject `\` on all platforms,
+        // preventing path traversal via agents with Windows-style separators.
+        let is_safe = {
+            use std::path::{Component, Path};
+            let mut comps = Path::new(agent_id).components();
+            matches!(comps.next(), Some(Component::Normal(_)))
+                && comps.next().is_none()
+                && !agent_id.contains('\\')
+        };
+        if !is_safe {
+            eprintln!(
+                "anima-audit: rejected unsafe agent_id '{agent_id}' — falling back to in-memory"
+            );
+            return Self::new();
+        }
+        if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
+            let path = std::path::PathBuf::from(&dir).join(format!("{}.jsonl", agent_id));
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "anima-audit: failed to create directory {}: {e}",
+                        parent.display()
+                    );
+                }
+            }
+            match Self::with_file(&path) {
+                Ok(log) => return log,
+                Err(e) => eprintln!(
+                    "anima-audit: failed to open audit file {}: {e} — falling back to in-memory",
+                    path.display()
+                ),
+            }
+        }
+        Self::new()
+    }
+
+    /// Returns `true` if the file sink has failed and further disk writes are
+    /// being skipped.
+    #[cfg(feature = "std")]
+    pub fn sink_failed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.sink_failed.load(Ordering::Relaxed)
+    }
+
+    /// Appends an entry to both the in-memory store and the file sink (if any).
+    ///
+    /// Each write is followed by a `flush()` to honour the durability guarantee.
+    /// If the write or flush fails the failure is recorded in `sink_failed` and a
+    /// warning is emitted to stderr; subsequent pushes skip the file entirely.
+    /// The failure flag is shared across all clones via `Arc<AtomicBool>` so a
+    /// failure on any clone permanently disables all clones.
     pub fn push(&mut self, entry: AuditEntry) {
+        #[cfg(feature = "std")]
+        {
+            use std::sync::atomic::Ordering;
+            if !self.sink_failed.load(Ordering::Relaxed) {
+                if let Some(sink) = &self.file_sink {
+                    match serde_json::to_string(&entry) {
+                        Ok(line) => match sink.lock() {
+                            Ok(mut f) => {
+                                let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
+                                if !write_ok {
+                                    eprintln!("anima-audit: write/flush to file sink failed — sink disabled");
+                                    self.sink_failed.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            Err(_) => {
+                                eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
+                                self.sink_failed.store(true, Ordering::Relaxed);
+                            }
+                        },
+                        Err(e) => {
+                            // Serialisation failures are entry-specific (e.g. NaN/Inf in a
+                            // GateDecision field) — skip only this entry rather than disabling
+                            // the sink for all future writes.
+                            eprintln!("anima-audit: serialisation failure for audit entry — entry skipped: {e}");
+                        }
+                    }
+                }
+            }
+        }
         self.entries.push(entry);
     }
 

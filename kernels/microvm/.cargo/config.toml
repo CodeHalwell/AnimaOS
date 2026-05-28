@@ -11,8 +11,12 @@
 #   polyval_force_soft  — disables CLMUL autodetect in the `polyval` crate
 #                         (used by `aes-gcm` for the GHash step); uses the
 #                         pure-Rust soft64 backend instead.
-#   sha2_force_soft     — disables SHA-256 extensions autodetect in `sha2`;
-#                         uses the pure-Rust backend.
+#   sha2_force_soft     — soft-backend cfg for the digest-0.10-generation `sha2`
+#                         0.10.x still pulled in transitively by `p256`/`ecdsa`.
+#   sha2_backend="soft" — soft-backend cfg for the digest-0.11-generation `sha2`
+#                         0.11 used directly for the TLS transcript + HKDF.  Both
+#                         cfgs are listed so each `sha2` generation in the graph
+#                         selects its pure-Rust backend; each ignores the other.
 #
 # These are necessary because the UEFI target does not support runtime CPUID
 # feature detection, and LLVM fails to lower the SSE/AVX intrinsics when the
@@ -26,6 +30,7 @@ rustflags = [
     "--cfg", "aes_force_soft",
     "--cfg", "polyval_force_soft",
     "--cfg", "sha2_force_soft",
+    "--cfg", "sha2_backend=\"soft\"",
 ]
 
 [unstable]

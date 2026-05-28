@@ -18,7 +18,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check formatting
@@ -28,9 +28,9 @@ jobs:
     name: build + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -48,7 +48,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install clippy
         run: rustup component add clippy
       - name: Run clippy
@@ -82,7 +82,7 @@ jobs:
     name: xtask rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install rustfmt
         run: rustup component add rustfmt
       - name: Check xtask formatting
@@ -92,9 +92,9 @@ jobs:
     name: xtask build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -110,11 +110,11 @@ jobs:
     name: xtask clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install clippy
         run: rustup component add clippy
       - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -130,9 +130,9 @@ jobs:
     name: xtask test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Cache cargo
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -148,7 +148,7 @@ jobs:
     name: security audit (cargo-audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # rustsec/audit-check provides a pre-built cargo-audit binary and
       # produces structured annotations on the PR diff for any advisories.
       - name: Run cargo audit
@@ -160,7 +160,7 @@ jobs:
     name: supply-chain policy (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # EmbarkStudios/cargo-deny-action provides a pre-built cargo-deny binary.
       # Checks all four categories: advisories, bans, licenses, sources.
       # Policy is read from deny.toml at the repo root.
@@ -191,12 +191,12 @@ jobs:
     name: SBOM (cargo-cyclonedx)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # Two separate caches: the cargo registry tracks Cargo.lock; the
       # cargo-cyclonedx binary is keyed on its requested version so it is
       # reused across PRs that bump Cargo.lock.
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -205,7 +205,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-sbom-registry-
       - name: Cache cargo-cyclonedx binary
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cargo/bin/cargo-cyclonedx
           key: ${{ runner.os }}-cargo-cyclonedx-0.5
@@ -231,7 +231,7 @@ jobs:
             -exec cp --parents {} sbom-out/ \;
           ls -R sbom-out
       - name: Upload SBOMs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cyclonedx-sboms
           path: sbom-out/**/bom.cdx.json
@@ -276,21 +276,28 @@ jobs:
       # config-file rustflags.  The TLS crypto crates (polyval, aes) require
       # force-soft CFG flags to suppress CLMUL/AES-NI intrinsics that LLVM
       # cannot lower for the x86_64-unknown-uefi target.  We merge -D warnings
-      # with the three force-soft flags here so the config entries are not
+      # with the four force-soft flags here so the config entries are not
       # needed at build time.
+      #
+      # sha2_force_soft is the legacy cfg for the digest-0.10-generation `sha2`
+      # 0.10 pulled in transitively by p256/ecdsa.  sha2_backend="soft" is the
+      # replacement cfg for the digest-0.11-generation `sha2` 0.11 used
+      # directly for the TLS transcript and HKDF.  Both must be present
+      # because neither generation recognises the other's flag.
       RUSTFLAGS: >-
         -D warnings
         --cfg aes_force_soft
         --cfg polyval_force_soft
         --cfg sha2_force_soft
+        --cfg sha2_backend="soft"
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install nightly toolchain + rust-src
         run: |
           rustup toolchain install nightly --component rust-src,rustfmt,clippy
           rustup target add --toolchain nightly x86_64-unknown-uefi
       - name: Cache cargo (microvm)
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -311,8 +318,31 @@ jobs:
       - name: Build UEFI image (release)
         working-directory: kernels/microvm
         run: cargo +nightly build --release
+      # E4.7: Enforce EFI image-size budgets.
+      # Release ≤ 1 MiB, debug ≤ 6 MiB.  Measured after the size-optimised
+      # release profile (opt-level="s", lto="fat", strip="symbols") was added
+      # in E4.7; see docs/10-deployment-pathways.md "Image-size audit".
+      - name: Enforce EFI image-size budgets (E4.7)
+        run: |
+          RELEASE_EFI=kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi
+          DEBUG_EFI=kernels/microvm/target/x86_64-unknown-uefi/debug/anima-microvm.efi
+          RELEASE_SIZE=$(stat -c %s "$RELEASE_EFI")
+          DEBUG_SIZE=$(stat -c %s "$DEBUG_EFI")
+          RELEASE_MAX=$((1 * 1024 * 1024))   # 1 MiB
+          DEBUG_MAX=$((6 * 1024 * 1024))     # 6 MiB
+          echo "Release EFI: ${RELEASE_SIZE} bytes (budget: ${RELEASE_MAX} bytes)"
+          echo "Debug   EFI: ${DEBUG_SIZE} bytes (budget: ${DEBUG_MAX} bytes)"
+          if [ "$RELEASE_SIZE" -gt "$RELEASE_MAX" ]; then
+            echo "❌ Release EFI exceeds 1 MiB budget (${RELEASE_SIZE} bytes)"
+            exit 1
+          fi
+          if [ "$DEBUG_SIZE" -gt "$DEBUG_MAX" ]; then
+            echo "❌ Debug EFI exceeds 6 MiB budget (${DEBUG_SIZE} bytes)"
+            exit 1
+          fi
+          echo "✅ EFI image-size budgets satisfied"
       - name: Upload EFI artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: anima-microvm-efi
           path: kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi
@@ -323,23 +353,27 @@ jobs:
     runs-on: ubuntu-latest
     needs: microvm-build
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install QEMU and OVMF firmware
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
-      - name: Install nightly toolchain + rust-src
-        run: |
-          rustup toolchain install nightly --component rust-src
-          rustup target add --toolchain nightly x86_64-unknown-uefi
-      - name: Build UEFI image (release)
-        working-directory: kernels/microvm
-        run: cargo +nightly build --release
+      # Reuse the EFI image produced by the microvm-build job rather than
+      # cold-rebuilding it here.  A second cold build added ~50 s to every
+      # run and was a second failure surface — CI run #26538288288 failed
+      # in this step (exit 101) despite microvm-build's identical step
+      # succeeding on the same commit.  The image-size budget enforced by
+      # microvm-build means the artefact is exactly what we want to test.
+      - name: Download EFI artefact from microvm-build
+        uses: actions/download-artifact@v4
+        with:
+          name: anima-microvm-efi
+          path: efi-artifact
       - name: Prepare FAT ESP image
         run: |
           mkdir -p esp/EFI/BOOT
-          cp kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
-             esp/EFI/BOOT/BOOTX64.EFI
+          cp efi-artifact/anima-microvm.efi esp/EFI/BOOT/BOOTX64.EFI
+          ls -la esp/EFI/BOOT/
       - name: Boot in QEMU and verify E4.1 + E4.2 + E4.3 + E4.4 output
         # Strategy: the UEFI binary writes to COM1 (port 0x3F8) via x86
         # port I/O, bypassing OVMF's EFI console routing.  QEMU emulates a
@@ -352,6 +386,11 @@ jobs:
         #
         # Memory is set to 512M: the TLS 1.3 implementation uses a 2 MiB
         # static heap plus crypto stack frames that fit comfortably in 512M.
+        #
+        # E4.7: QEMU wall-clock runtime is recorded for informational purposes.
+        # The 2 s boot target applies to Firecracker / Cloud Hypervisor on real
+        # hardware; QEMU+OVMF on a GitHub Actions runner includes full firmware
+        # POST time and is not a representative measurement.
         run: |
           # Locate OVMF_CODE.fd — the path varies across Ubuntu versions.
           OVMF_CODE=$(find /usr/share/OVMF /usr/share/ovmf -name "OVMF_CODE*.fd" 2>/dev/null \
@@ -362,15 +401,10 @@ jobs:
           fi
           echo "Using OVMF: $OVMF_CODE"
 
-          # Run QEMU.  The boot task runs all phases (Embassy + smoltcp TCP +
-          # TLS 1.3) then panics.  120 s is ample — TLS loopback completes
-          # in ms on hardware.
+          # Run QEMU with boot-time measurement.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
           # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
-          #   QEMU's default qemu64 CPU model does not include RDRAND; without
-          #   this flag the CPUID feature check in RdRand::is_available()
-          #   returns false and run_tls_loopback_test() returns an error before
-          #   writing E4.4_TLS_DONE to COM1.
+          BOOT_START=$(date +%s%3N)
           timeout 120 qemu-system-x86_64 \
             -cpu qemu64,+rdrand \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
@@ -380,9 +414,16 @@ jobs:
             -m 512M \
             -no-reboot \
             2>/tmp/qemu-stderr.txt || true
+          BOOT_END=$(date +%s%3N)
+          BOOT_MS=$((BOOT_END - BOOT_START))
 
           echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
           echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
+          # E4.7: Log boot-to-completion latency.  This is informational;
+          # the 2 s E4.7 target applies to Firecracker / Cloud Hypervisor,
+          # not to QEMU+OVMF.  QEMU on a GitHub Actions runner includes full
+          # firmware POST (~15–60 s) that does not reflect bare-metal latency.
+          echo "Boot-to-completion latency (QEMU+OVMF): ${BOOT_MS} ms (informational — 2 s target is for Firecracker/Cloud Hypervisor)"
 
           # E4.2 exit criterion: Embassy async task completed and signalled.
           grep -q "E4.2_TASK_DONE" /tmp/qemu-serial.txt && \
@@ -399,13 +440,56 @@ jobs:
             echo "✅ E4.4 exit criterion met: TLS 1.3 handshake and application-data exchange complete" || \
             { echo "❌ E4.4_TLS_DONE not found in serial output"; exit 1; }
 
+          # E4.5 exit criterion: sleep-cycle soak (5 phases) complete.
+          grep -q "E4.5_SOAK_DONE" /tmp/qemu-serial.txt && \
+            echo "✅ E4.5 exit criterion met: sleep-cycle soak completed" || \
+            { echo "❌ E4.5_SOAK_DONE not found in serial output"; exit 1; }
+
           # E4.1 exit criterion (carried forward): panic handler reached.
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }
+
+          # ----------------------------------------------------------
+          # E4.7.2 — boot-to-soak-complete gate.
+          # ----------------------------------------------------------
+          # Two budgets, two purposes:
+          #
+          #   PRODUCTION TARGET: 2 000 ms.  This is the E4.7 exit criterion
+          #     and applies to the bare-metal microVM under Firecracker or
+          #     Cloud Hypervisor on production hardware.  It is asserted
+          #     separately (exit criterion 1, tracked 🟡 in 07-implementation-
+          #     plan.md) on a dedicated host with those VMMs installed.
+          #
+          #   CI CEILING: 15 000 ms.  Shared GitHub-hosted runners use the
+          #     full software-emulated qemu64 CPU model with no KVM, and
+          #     OVMF initialisation alone consumes several seconds on cold
+          #     runners.  A 2 s gate here would gate on the runner's CPU
+          #     allocation rather than on kernel changes.  15 s is high
+          #     enough to absorb routine runner noise but low enough to
+          #     catch a regression that doubled the boot path.
+          if [ -f /tmp/qemu-boot-time.txt ]; then
+            BOOT_MS=$(cat /tmp/qemu-boot-time.txt)
+            PROD_BUDGET_MS=2000
+            CI_BUDGET_MS=15000
+            if [ "$BOOT_MS" -le "$PROD_BUDGET_MS" ]; then
+              echo "✅ E4.7.2 production budget met: boot-to-soak-complete ${BOOT_MS} ms ≤ ${PROD_BUDGET_MS} ms"
+            else
+              echo "ℹ️  E4.7.2 production budget exceeded under QEMU+OVMF emulation (${BOOT_MS} ms > ${PROD_BUDGET_MS} ms); this is expected on shared runners — the production target is asserted separately on Firecracker/Cloud Hypervisor hardware."
+            fi
+            if [ "$BOOT_MS" -le "$CI_BUDGET_MS" ]; then
+              echo "✅ E4.7.2 CI ceiling met: ${BOOT_MS} ms ≤ ${CI_BUDGET_MS} ms"
+            else
+              echo "::error::E4.7.2 CI ceiling exceeded: ${BOOT_MS} ms > ${CI_BUDGET_MS} ms — this is large enough to indicate a real regression"
+              exit 1
+            fi
+          else
+            echo "::error::E4.7.2 boot-time was not captured (E4.5_SOAK_DONE never appeared)"
+            exit 1
+          fi
       - name: Upload QEMU serial log
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qemu-serial-log
           path: /tmp/qemu-serial.txt

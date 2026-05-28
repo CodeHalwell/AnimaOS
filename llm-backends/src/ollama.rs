@@ -81,7 +81,12 @@ impl OllamaBackend {
     }
 
     fn build_agent(timeout: Duration) -> ureq::Agent {
-        ureq::AgentBuilder::new().timeout(timeout).build()
+        // ureq 3.x: configure the end-to-end (global) timeout via the
+        // `ConfigBuilder` and convert the resulting `Config` into an `Agent`.
+        ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .build()
+            .into()
     }
 
     fn endpoint(&self) -> String {
@@ -124,14 +129,20 @@ impl LlmBackend for OllamaBackend {
                 },
             });
 
-            let response = self
+            // ureq 3.x: `.header(..)` replaces `.set(..)`, and `.send(..)`
+            // takes any `AsSendBody` (here the serialized JSON string) in
+            // place of `.send_string(..)`.
+            let mut response = self
                 .agent
-                .post(&self.endpoint())
-                .set("Content-Type", "application/json")
-                .send_string(&body.to_string())
+                .post(self.endpoint())
+                .header("Content-Type", "application/json")
+                .send(body.to_string())
                 .map_err(|e| LlmBackendError::Provider(format!("ollama request failed: {e}")))?;
 
-            let reader = BufReader::new(response.into_reader());
+            // `body_mut().as_reader()` is the streaming, unbounded equivalent
+            // of ureq 2.x's `into_reader()` — appropriate for the unbounded
+            // newline-delimited token stream Ollama emits.
+            let reader = BufReader::new(response.body_mut().as_reader());
             let mut events: Vec<StreamingCompletion> = Vec::new();
 
             for line in reader.lines() {
