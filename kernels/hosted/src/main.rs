@@ -42,7 +42,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use interoception::HomeostaticMonitor;
+use console::{Console, ServerConfig};
+use interoception::{HomeostaticMonitor, InteroceptiveSensorBundle};
 use llm_backends::factory::BackendFactory;
 use memory::VirtualContextManager;
 use scheduler::Task;
@@ -682,6 +683,89 @@ fn cmd_why() {
     );
 }
 
+/// `anima serve` — boot a single long-lived agent and expose the operator
+/// console (HTTP/SSE telemetry + a guidance ingress).
+///
+/// This is the container/hosted realisation of `docs/11-operator-interface.md`.
+/// The agent starts idle: it sleeps until operator guidance (or another sensory
+/// event) wakes it, demonstrating the human-as-a-sense model directly. The
+/// console never touches the lifecycle — it shares the `SensoryBridge` for
+/// ingress and tails the durable audit log for egress.
+fn cmd_serve() {
+    // The console tails the agent's audit JSONL; make sure vita writes one by
+    // pinning ANIMA_AUDIT_DIR (honoured by `AuditLog::from_env`) before the
+    // LifecycleManager is constructed.
+    let audit_dir = std::env::var("ANIMA_AUDIT_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{home}/.anima/audit")
+    });
+    std::env::set_var("ANIMA_AUDIT_DIR", &audit_dir);
+    let _ = std::fs::create_dir_all(&audit_dir);
+
+    let agent_id = std::env::var("ANIMA_AGENT_ID").unwrap_or_else(|_| "anima".to_string());
+    let audit_path = std::path::PathBuf::from(&audit_dir).join(format!("{agent_id}.jsonl"));
+
+    let provider = std::env::var("ANIMA_BACKEND").unwrap_or_else(|_| "mock".to_string());
+    let backend = BackendFactory::from_env_or_mock(&provider);
+
+    // The shared bridge: POSTed guidance lands in the very queue the loop drains.
+    let bridge = SensoryBridge::new(HumanGuidance::new("operator-console"));
+
+    let mut manager = LifecycleManager::new(
+        &agent_id,
+        bridge.clone(),
+        VirtualContextManager::with_capacity(0, 8192),
+        LifecycleConfig { max_context: 8192 },
+        HumanGuidance::new("boot"),
+        Arc::clone(&backend),
+        None, // run forever
+    );
+    // Publish vital signs every iteration: the snapshot is written to the audit
+    // log, where the console's tailer turns it into a `Vitals` event.
+    manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
+
+    // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
+    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
+    let addr = console
+        .start()
+        .expect("operator console failed to bind — is the port already in use?");
+    let token_note = std::env::var("ANIMA_CONSOLE_TOKEN")
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+
+    println!("anima-hosted: operator console listening on http://{addr}");
+    println!(
+        "  dashboard : http://{addr}/{}",
+        if token_note { "?token=…" } else { "" }
+    );
+    println!("  events    : GET  http://{addr}/events   (Server-Sent Events)");
+    println!("  guidance  : POST http://{addr}/guidance (afferent ingress)");
+    if token_note {
+        println!("  auth      : bearer token required (ANIMA_CONSOLE_TOKEN)");
+    }
+    println!("  backend   : {} ({})", backend.id(), backend.model_id());
+    println!("  audit log : {}", audit_path.display());
+    println!(
+        "\nThe agent starts idle and sleeps until a sense wakes it. Send guidance —\n\
+         it enters the sensory queue and is arbitrated by the gate, never executed directly:\n  \
+         anima-console send \"summarise the overnight logs\" --priority High --url http://{addr}\n  \
+         anima-console tui --url http://{addr}\n"
+    );
+
+    // Drive the somatic loop forever on a worker thread; the audit tailer +
+    // SSE server (already running) surface everything it does.
+    let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
+    monitor.record_ttft(1.0);
+    let worker = std::thread::Builder::new()
+        .name("anima-somatic-loop".to_string())
+        .spawn(move || {
+            block_on(somatic_execution_loop(&mut manager, &monitor))
+                .expect("somatic execution loop failed");
+        })
+        .expect("spawn somatic loop");
+    worker.join().expect("somatic loop thread panicked");
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -691,6 +775,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("identity") {
         cmd_identity(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("serve") {
+        cmd_serve();
         return;
     }
 

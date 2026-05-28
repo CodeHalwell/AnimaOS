@@ -40,6 +40,7 @@ This directory contains the full design for Anima. Read in order if you are new;
 | [`08-cognitive-architecture.md`](./08-cognitive-architecture.md) | Cognitive layer above the somatic substrate: cortex, gate, router, learned KV-cache controller, episodic/identity memory, defence layer. Reconciled into Stage 5 of the implementation plan. |
 | [`09-threat-model.md`](./09-threat-model.md) | Security posture: trust boundaries, attack surfaces, mitigations, and the defence layer's role. |
 | [`10-deployment-pathways.md`](./10-deployment-pathways.md) | The two parallel deployment surfaces — containerised (Docker + Ollama + Unsloth) for iteration, bare-metal native for the production target — and how the workspace stays one codebase across both. |
+| [`11-operator-interface.md`](./11-operator-interface.md) | The human↔agent interface (Epic E6): the operator console. Human-as-a-sense afferent guidance + an efferent telemetry/event stream, one `console-proto` wire protocol over two transports — HTTP/SSE in the container, COM1 serial in the microVM. |
 
 ## Status
 

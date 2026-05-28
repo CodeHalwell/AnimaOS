@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AnimaOS · Operator Console</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #141925; --ink: #e6e9ef; --muted: #8a93a6;
+    --line: #232a3a; --accent: #5cc8ff; --ok: #54d685; --warn: #ffcf5c;
+    --crit: #ff6b6b; --msg: #b794f6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
+    border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  #conn { margin-left: auto; font-size: 12px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); }
+  #conn.up { color: var(--ok); border-color: var(--ok); }
+  #conn.down { color: var(--crit); border-color: var(--crit); }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; }
+  .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
+    color: var(--muted); margin: 0 0 12px; }
+  .vital { margin-bottom: 10px; }
+  .vital .row { display: flex; justify-content: space-between; font-size: 12px; }
+  .bar { height: 7px; background: #0a0d13; border-radius: 4px; overflow: hidden; margin-top: 3px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  .state-line { display: flex; justify-content: space-between; padding: 4px 0;
+    border-bottom: 1px dashed var(--line); }
+  .state-line:last-child { border-bottom: 0; }
+  .state-line b { color: var(--accent); }
+  #feed { height: 52vh; overflow-y: auto; display: flex; flex-direction: column-reverse; }
+  .ev { padding: 5px 8px; border-left: 3px solid var(--line); margin: 3px 0;
+    border-radius: 0 6px 6px 0; background: #10141e; white-space: pre-wrap; word-break: break-word; }
+  .ev .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin-right: 8px; }
+  .ev.msg { border-left-color: var(--msg); } .ev.msg .tag { color: var(--msg); }
+  .ev.gate { border-left-color: var(--accent); } .ev.gate .tag { color: var(--accent); }
+  .ev.task { border-left-color: var(--ok); } .ev.task .tag { color: var(--ok); }
+  .ev.audit { border-left-color: var(--warn); } .ev.audit .tag { color: var(--warn); }
+  .ev.veto { border-left-color: var(--crit); } .ev.veto .tag { color: var(--crit); }
+  form { display: flex; gap: 8px; margin-top: 14px; }
+  input[type=text] { flex: 1; background: #0a0d13; border: 1px solid var(--line);
+    color: var(--ink); padding: 9px 12px; border-radius: 8px; font: inherit; }
+  select, button { background: #0a0d13; border: 1px solid var(--line); color: var(--ink);
+    padding: 9px 12px; border-radius: 8px; font: inherit; cursor: pointer; }
+  button { background: var(--accent); color: #04121c; font-weight: 600; border: 0; }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ANIMA<span style="color:var(--accent)">OS</span></h1>
+  <span class="sub">operator console · the human is a sense, not the driver</span>
+  <span id="conn" class="down">connecting…</span>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <h2>Vital signs <span id="stress" style="float:right;color:var(--ink)"></span></h2>
+      <div id="vitals"></div>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>Lifecycle</h2>
+      <div class="state-line"><span>state</span><b id="lifecycle">—</b></div>
+      <div class="state-line"><span>sleep phase</span><b id="phase">—</b></div>
+      <div class="state-line"><span>agenda depth</span><b id="agenda">—</b></div>
+      <div class="state-line"><span>uptime</span><b id="uptime">—</b></div>
+    </div>
+  </section>
+  <section class="panel">
+    <h2>Event stream</h2>
+    <div id="feed"></div>
+    <form id="send">
+      <input id="text" type="text" placeholder="send guidance to the agent…  (it is gated, not executed)" autocomplete="off" />
+      <select id="priority">
+        <option>Low</option><option selected>Normal</option><option>High</option><option>Critical</option>
+      </select>
+      <button type="submit">Send</button>
+    </form>
+    <div class="hint">Guidance enters the agent's sensory queue and is arbitrated by the Striatal Gate — it cannot preempt the kernel.</div>
+  </section>
+</main>
+<script>
+(function () {
+  const VITALS = [
+    ["thermal_load", "thermal"], ["compute_pressure", "compute"],
+    ["memory_pressure", "memory"], ["power_budget", "power"],
+    ["financial_budget", "budget"], ["attention_demand", "attention"],
+  ];
+  const vitalsEl = document.getElementById("vitals");
+  const bars = {};
+  for (const [key, label] of VITALS) {
+    const wrap = document.createElement("div"); wrap.className = "vital";
+    wrap.innerHTML = `<div class="row"><span>${label}</span><span data-v="${key}">—</span></div>
+      <div class="bar"><span data-b="${key}" style="width:0%"></span></div>`;
+    vitalsEl.appendChild(wrap);
+    bars[key] = { v: wrap.querySelector(`[data-v="${key}"]`), b: wrap.querySelector(`[data-b="${key}"]`) };
+  }
+  const $ = (id) => document.getElementById(id);
+  const conn = $("conn");
+
+  function colorFor(v) { return v > 0.85 ? "var(--crit)" : v > 0.6 ? "var(--warn)" : "var(--accent)"; }
+
+  function addFeed(cls, tag, body) {
+    const el = document.createElement("div");
+    el.className = "ev " + cls;
+    el.innerHTML = `<span class="tag">${tag}</span>${escapeHtml(body)}`;
+    const feed = $("feed");
+    feed.prepend(el);
+    while (feed.childNodes.length > 300) feed.removeChild(feed.lastChild);
+  }
+  function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+  function handle(ev) {
+    switch (ev.type) {
+      case "Vitals":
+        for (const [key] of VITALS) {
+          const v = ev[key] ?? 0;
+          bars[key].v.textContent = v.toFixed(2);
+          bars[key].b.style.width = (v * 100).toFixed(0) + "%";
+          bars[key].b.style.background = colorFor(key === "power_budget" || key === "financial_budget" ? 1 - v : v);
+        }
+        $("stress").textContent = "stress " + (ev.aggregate_stress ?? 0).toFixed(2);
+        break;
+      case "State":
+        $("lifecycle").textContent = ev.lifecycle;
+        $("phase").textContent = ev.sleep_phase || "—";
+        $("agenda").textContent = ev.agenda_depth;
+        break;
+      case "Gate":
+        addFeed("gate", "gate",
+          `${ev.invoke ? "INVOKE" : "block"} ${ev.cost_class || ""} · value ${ev.value_score.toFixed(2)} vs threshold ${ev.threshold.toFixed(2)}${ev.override_active ? " · OVERRIDE" : ""}\n${ev.reasoning}`);
+        break;
+      case "TaskStarted": addFeed("task", "task→", `#${ev.task_id} ${ev.prompt}`); break;
+      case "AgentMessage": addFeed("msg", "agent", `#${ev.task_id} (${ev.tokens} tok) ${ev.text}`); break;
+      case "Audit":
+        addFeed(ev.kind === "DefenceVeto" || ev.kind === "AttentionDemandEscalated" ? "veto" : "audit", ev.kind, ev.detail);
+        break;
+      case "Heartbeat": $("uptime").textContent = fmtUptime(ev.uptime_secs); break;
+    }
+  }
+  function fmtUptime(s) {
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return `${h}h ${m}m ${sec}s`;
+  }
+
+  // EventSource carries the optional token via ?token= (set by the page URL).
+  const token = new URLSearchParams(location.search).get("token");
+  const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
+  let es;
+  function connect() {
+    es = new EventSource(url);
+    es.onopen = () => { conn.textContent = "connected"; conn.className = "up"; };
+    es.onerror = () => { conn.textContent = "reconnecting…"; conn.className = "down"; };
+    es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch (e) {} };
+  }
+  connect();
+
+  $("send").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = $("text").value.trim();
+    if (!text) return;
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = "Bearer " + token;
+    try {
+      const r = await fetch("/guidance", {
+        method: "POST", headers,
+        body: JSON.stringify({ text, priority: $("priority").value }),
+      });
+      if (r.ok) { $("text").value = ""; }
+      else { const j = await r.json().catch(() => ({})); addFeed("veto", "rejected", j.error || ("HTTP " + r.status)); }
+    } catch (err) { addFeed("veto", "error", String(err)); }
+  });
+})();
+</script>
+</body>
+</html>

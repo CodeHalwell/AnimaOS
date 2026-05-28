@@ -1,0 +1,23 @@
+[package]
+name = "console-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Transport-agnostic wire protocol for the AnimaOS operator console (afferent guidance in, telemetry/efferent events out)."
+
+[dependencies]
+# Declared directly (not via the workspace) so `default-features = false` is
+# honoured — the microVM kernel needs serde without its `std` default.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# `serde` derives Serialize/Deserialize on the wire types.  On by default; the
+# microVM kernel disables it (`default-features = false`) to keep the EFI image
+# inside its ≤1 MiB budget — the kernel only ever needs the dependency-free
+# manual `to_ndjson` / `parse_input_line` helpers.
+default = ["serde"]
+serde = ["dep:serde"]
+# `json` adds serde_json-backed line (de)serialisation helpers for the std
+# container surface (the `console` crate + the `anima-console` client).
+json = ["serde", "dep:serde_json"]

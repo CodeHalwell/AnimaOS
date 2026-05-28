@@ -42,11 +42,15 @@ COPY . .
 
 # BuildKit cache mounts keep cargo registry + target/ warm across rebuilds.
 # Requires Docker 23+ (BuildKit is the default there).
+# Build both the agent (`anima-hosted`) and the operator client
+# (`anima-console`): the latter ships in the image so `docker compose exec`
+# can run the TUI/tap against the live agent from inside the container network.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p hosted --bin anima-hosted \
-    && cp target/release/anima-hosted /usr/local/bin/anima-hosted
+    cargo build --release --locked -p hosted --bin anima-hosted -p console --bin anima-console \
+    && cp target/release/anima-hosted /usr/local/bin/anima-hosted \
+    && cp target/release/anima-console /usr/local/bin/anima-console
 
 # ---- Stage 2: runtime -------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -59,16 +63,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --create-home --shell /bin/bash --uid 1000 anima
 
 COPY --from=builder /usr/local/bin/anima-hosted /usr/local/bin/anima-hosted
+COPY --from=builder /usr/local/bin/anima-console /usr/local/bin/anima-console
 
 USER anima
 WORKDIR /home/anima
 
 # Defaults assume the sibling `ollama` compose service is reachable as
 # `ollama:11434`.  Override with `-e ANIMA_BACKEND=mock` to bypass.
+#
+# ANIMA_CONSOLE_ADDR binds the operator console to all interfaces *inside* the
+# container; compose maps only loopback on the host (127.0.0.1:8088).  Set
+# ANIMA_CONSOLE_TOKEN to require a bearer token.  ANIMA_AUDIT_DIR lives under
+# the persisted ~/.anima volume so the console can tail it.
 ENV ANIMA_BACKEND=ollama \
     ANIMA_OLLAMA_URL=http://ollama:11434 \
     ANIMA_OLLAMA_MODEL=hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M \
-    ANIMA_OLLAMA_CTX=8192
+    ANIMA_OLLAMA_CTX=8192 \
+    ANIMA_CONSOLE_ADDR=0.0.0.0:8088 \
+    ANIMA_AUDIT_DIR=/home/anima/.anima/audit
+
+# The operator console (only published to host loopback by compose).
+EXPOSE 8088
 
 ENTRYPOINT ["anima-hosted"]
-CMD []
+# Default to the operator-console server. Override for one-shot subcommands,
+# e.g. `docker compose run --rm hosted why`.
+CMD ["serve"]

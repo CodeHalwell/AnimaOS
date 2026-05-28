@@ -87,6 +87,7 @@
 
 extern crate alloc;
 
+mod operator_console;
 mod sleep_soak;
 mod tls;
 
@@ -400,6 +401,19 @@ async fn kernel_boot_task() {
     embassy_futures::yield_now().await;
 
     sleep_soak::run_sleep_soak(serial_write).expect("E4.5 sleep-cycle soak failed");
+
+    // ------------------------------------------------------------------
+    // Phase 8 — Operator-console serial framing (E6.4, Phase 0)
+    //
+    // Frames the shared console_proto wire protocol onto COM1 so the same
+    // operator dashboard/TUI that drive the container surface also work
+    // against the microVM via the host-side `anima-console serial` bridge.
+    // ------------------------------------------------------------------
+    serial_write("\n[E6.4] kernel_boot_task: Phase 8 — operator-console serial framing\n");
+    embassy_futures::yield_now().await;
+
+    operator_console::run_operator_console_demo(serial_write)
+        .expect("E6.4 operator-console serial framing failed");
 
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.
