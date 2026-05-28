@@ -6,8 +6,14 @@ name: MicroVM Soak (E4.7)
 #   smoke-test  — 5-minute dry-run CI gate (no QEMU).  Runs on every PR to
 #                 verify the soak harness itself is healthy.
 #   full-soak   — Manual dispatch only, for the production-readiness 30-day
-#                 run.  Requires a self-hosted or GitHub-hosted runner with
-#                 QEMU and OVMF available.
+#                 run.  IMPORTANT: GitHub-hosted runners (ubuntu-latest) are
+#                 terminated after 6 hours.  A full 8640-iteration × 5-min
+#                 soak takes ~30 days, so full-soak MUST target a self-hosted
+#                 runner with QEMU/OVMF and no job-time limit.  Use the
+#                 `runner` input (default: self-hosted) to select the runner
+#                 label.  If you need to resume a previous run, set `output`
+#                 to the same artifacts directory and the harness will pick up
+#                 from the last completed iteration.
 
 on:
   workflow_dispatch:
@@ -28,6 +34,10 @@ on:
         description: 'Seconds to wait between iterations (default 300 = 5 min, gives 30-day cadence at 8640 iterations)'
         required: false
         default: '300'
+      runner:
+        description: 'Runner label for full-soak job (must be self-hosted for 30-day runs; ubuntu-latest is capped at 6 h)'
+        required: false
+        default: 'self-hosted'
   pull_request:
     branches: [main]
     paths:
@@ -94,7 +104,11 @@ jobs:
 
   soak-full:
     name: Soak full run (QEMU, E4.7)
-    runs-on: ubuntu-latest
+    # Self-hosted runner required: GitHub-hosted runners are capped at 6 hours
+    # and cannot complete a 30-day soak.  Override with the `runner` input when
+    # dispatching.  The soak harness is resumable — restart with the same
+    # `output` directory to continue from the last completed iteration.
+    runs-on: ${{ github.event.inputs.runner || 'self-hosted' }}
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'full'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

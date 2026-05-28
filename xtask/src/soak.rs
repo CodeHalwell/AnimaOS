@@ -269,11 +269,26 @@ fn save_manifest(manifest: &SoakManifest, output_dir: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest).context("serialising soak manifest")?;
     fs::write(&tmp, &json).context("writing manifest to tmp")?;
     // `fs::rename` is atomic on Unix but fails on Windows when the destination
-    // already exists.  Use a remove-then-rename fallback for portability.
-    if let Err(e) = fs::rename(&tmp, &path) {
-        // On Windows the destination must not exist for rename to succeed.
-        let _ = fs::remove_file(&path);
-        fs::rename(&tmp, &path).with_context(|| format!("renaming manifest: {e}"))?;
+    // already exists.  Use a three-step backup strategy on Windows so that if
+    // the final rename fails the original manifest is not lost.
+    if cfg!(windows) {
+        let backup = output_dir.join("manifest.json.bak");
+        let had_existing = path.exists();
+        if had_existing {
+            fs::rename(&path, &backup).context("backing up existing manifest on Windows")?;
+        }
+        if let Err(e) = fs::rename(&tmp, &path) {
+            // Restore the backup before returning the error.
+            if had_existing {
+                let _ = fs::rename(&backup, &path);
+            }
+            return Err(e).context("renaming manifest on Windows");
+        }
+        if had_existing {
+            let _ = fs::remove_file(&backup);
+        }
+    } else {
+        fs::rename(&tmp, &path).context("renaming manifest")?;
     }
 
     // Append to JSONL log for durability.
