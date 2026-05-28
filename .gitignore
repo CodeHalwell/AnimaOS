@@ -7,3 +7,7 @@ __pycache__/
 bom.cdx.json
 bom.cdx.xml
 sbom-out/
+
+# QEMU FAT ESP image staged when booting the microVM kernel locally
+# (esp/EFI/BOOT/BOOTX64.EFI + OVMF NvVars). Throwaway boot artefacts.
+esp/
