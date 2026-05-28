@@ -1549,7 +1549,7 @@ not block stage closure.
 Keep the `docs/` suite synchronised with the code. Every PR that
 changes a public interface updates the relevant section here.
 
-### Epic EX.2 — Audit Log and Telemetry Pipeline 🟡
+### Epic EX.2 — Audit Log and Telemetry Pipeline ✅
 
 A single durable audit log and a telemetry export that is consumed by
 both development tooling and the homeostatic monitor. Owners change as
@@ -1586,20 +1586,21 @@ And one parallel stream is **intentionally not folded in**:
   retention policy (`TraceConfig::enabled`) and belongs in a separate
   durable sink.
 
-**Consolidation slice (next sprint, when EX.2 is picked up).**
+**Consolidation slice — completed.**
 
-1. Implement a real `SignalPublisher` in `vita` that pushes
+1. ✅ Implement a real `SignalPublisher` in `vita` that pushes
    `InteroceptiveSnapshot` audit entries at the existing 1 Hz cadence.
-   ~20 LOC, no schema change.
-2. Add a `MemoryPressureEvent` audit variant and have the scheduler call
-   `AuditLog::push` next to `memory::emit_to_pipe`. ~30 LOC.
-3. Route `defence::ScreeningOutcome::vetoed` back through
+   Delivered in `crates/vita/src/sensors.rs` (`AuditSignalPublisher`).
+2. ✅ Add a `MemoryPressureEvent` audit variant and emit it from the somatic
+   loop when `VirtualContextManager::check_pressure()` is elevated.
+   Delivered in `crates/vita/src/audit.rs` (variant) and `crates/vita/src/lib.rs`
+   (somatic loop wiring).
+3. ✅ Route `defence::ScreeningOutcome::vetoed` back through
    `vita::cortex_bridge` and push `DefenceVeto` / `AttentionDemandEscalated`.
-   ~40 LOC.
-4. Replace the in-memory `Vec<AuditEntry>` with a durable backend
-   (initial pick: append-only `bincode` log under a configurable
-   `ANIMA_AUDIT_DIR`; SQLite or RocksDB if the access pattern grows).
-   That single change closes the epic.
+   Delivered in `crates/vita/src/defence_bridge.rs` (`push_defence_outcome`).
+4. ✅ Replace the in-memory `Vec<AuditEntry>` with a durable backend
+   (append-only JSONL under `ANIMA_AUDIT_DIR`; `AuditLog::with_file` /
+   `AuditLog::from_env`). Delivered in `crates/vita/src/audit.rs`.
 
 ### Epic EX.3 — Performance Regression Benchmark Suite ✅
 

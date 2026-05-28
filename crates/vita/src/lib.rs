@@ -4,14 +4,18 @@
 
 pub mod audit;
 pub mod cortex_bridge;
+pub mod defence_bridge;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
 pub mod kv_gate;
 pub mod router;
+pub mod sensors;
 pub mod sleep;
 
 pub use audit::{AuditEntry, AuditLog};
+pub use defence_bridge::push_defence_outcome;
+pub use sensors::AuditSignalPublisher;
 pub use cortex_bridge::{
     archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
@@ -532,10 +536,22 @@ pub async fn somatic_execution_loop(
         let human_guidance = lifecycle.senses.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
 
-        // ── 4. Stress index ───────────────────────────────────────────────────
+        // ── 4. Stress index + memory pressure ────────────────────────────────
         let active_tokens = lifecycle.memory.get_l1_token_count();
         let _stress_index =
             monitor.compute_systemic_stress_index(active_tokens, lifecycle.config.max_context);
+
+        let pressure = lifecycle.memory.check_pressure();
+        if pressure.is_elevated() {
+            let agent_id = lifecycle.agent_id.clone();
+            let max_context = lifecycle.config.max_context;
+            lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
+                agent_id,
+                level: format!("{pressure:?}"),
+                active_tokens,
+                max_context,
+            });
+        }
 
         // ── 5. Sleep / wake decision (E3.4) ──────────────────────────────────
         // Sleep whenever the agenda is empty; wake when a task is available.
