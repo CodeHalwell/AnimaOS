@@ -611,10 +611,13 @@ fn efi_main() -> Status {
     // pointer is correct for a spin-poll executor that never sleeps.
     let executor = EXECUTOR.init(Executor::new(core::ptr::null_mut()));
 
+    // embassy-executor 0.10 changed the `#[task]` macro to return
+    // `Result<SpawnToken, SpawnError>` (capacity check moved to construction
+    // time), and `Spawner::spawn` now returns `()`.  We `.expect` the Result
+    // from the task before passing the resulting token to `spawn(..)`.
     executor
         .spawner()
-        .spawn(kernel_boot_task())
-        .expect("failed to spawn kernel_boot_task");
+        .spawn(kernel_boot_task().expect("failed to construct kernel_boot_task SpawnToken"));
 
     serial_write("[E4.2] kernel_boot_task spawned — entering Embassy spin-poll loop\n");
 
