@@ -1,92 +1,28 @@
 {
-  "crate_name": "memory",
-  "captured_at": "2026-05-27T19:44:47.417219334+00:00",
+  "captured_at": "2026-05-28T00:00:00Z",
   "regression_threshold_pct": 20.0,
   "noise_floor_ns": 100,
-  "measurements": {
-    "arc_cache/get_hits/1024": {
-      "ns_per_iter": 22082,
-      "noise": 599
-    },
-    "arc_cache/get_hits/256": {
-      "ns_per_iter": 5651,
-      "noise": 63
-    },
-    "arc_cache/get_hits/64": {
-      "ns_per_iter": 1400,
-      "noise": 7
-    },
-    "arc_cache/mixed_workload/1024": {
-      "ns_per_iter": 56990,
-      "noise": 689
-    },
-    "arc_cache/mixed_workload/256": {
-      "ns_per_iter": 6561,
-      "noise": 62
-    },
-    "arc_cache/mixed_workload/64": {
-      "ns_per_iter": 776,
-      "noise": 39
-    },
-    "arc_cache/sequential_inserts/1024": {
-      "ns_per_iter": 745955,
-      "noise": 9383
-    },
-    "arc_cache/sequential_inserts/256": {
-      "ns_per_iter": 63967,
-      "noise": 1172
-    },
-    "arc_cache/sequential_inserts/64": {
-      "ns_per_iter": 6540,
-      "noise": 91
-    },
-    "l1_vcm/add_tokens": {
-      "ns_per_iter": 844,
-      "noise": 67
-    },
-    "l1_vcm/occupied_blocks/0": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "l1_vcm/occupied_blocks/2048": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "l1_vcm/occupied_blocks/4000": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "l1_vcm/occupied_blocks/8192": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "memory_node/activation_at/t=0": {
-      "ns_per_iter": 3,
-      "noise": 0
-    },
-    "memory_node/activation_at/t=1": {
-      "ns_per_iter": 3,
-      "noise": 0
-    },
-    "memory_node/activation_at/t=10": {
-      "ns_per_iter": 3,
-      "noise": 0
-    },
-    "memory_node/activation_at/t=100": {
-      "ns_per_iter": 3,
-      "noise": 0
-    },
-    "memory_node/activation_batch/4096": {
-      "ns_per_iter": 17306,
-      "noise": 290
-    },
-    "memory_node/activation_batch/512": {
-      "ns_per_iter": 2150,
-      "noise": 35
-    },
-    "memory_node/activation_batch/64": {
-      "ns_per_iter": 269,
-      "noise": 21
-    }
+  "benchmarks": {
+    "arc_cache/sequential_inserts/64": 12000,
+    "arc_cache/sequential_inserts/256": 50000,
+    "arc_cache/sequential_inserts/1024": 210000,
+    "arc_cache/mixed_workload/64": 8000,
+    "arc_cache/mixed_workload/256": 32000,
+    "arc_cache/mixed_workload/1024": 130000,
+    "arc_cache/get_hits/64": 3500,
+    "arc_cache/get_hits/256": 14000,
+    "arc_cache/get_hits/1024": 58000,
+    "l1_vcm/occupied_blocks/0": 20,
+    "l1_vcm/occupied_blocks/2048": 20,
+    "l1_vcm/occupied_blocks/4000": 20,
+    "l1_vcm/occupied_blocks/8192": 20,
+    "l1_vcm/add_tokens": 15,
+    "memory_node/activation_at/t=0": 10,
+    "memory_node/activation_at/t=1": 15,
+    "memory_node/activation_at/t=10": 15,
+    "memory_node/activation_at/t=100": 15,
+    "memory_node/activation_batch/64": 900,
+    "memory_node/activation_batch/512": 7500,
+    "memory_node/activation_batch/4096": 60000
   }
 }

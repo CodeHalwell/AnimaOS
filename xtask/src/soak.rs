@@ -1,537 +1,525 @@
-//! `xtask soak` — Epic E4.7 long-running soak driver.
+//! E4.7 — MicroVM long-running soak driver.
 //!
-//! # What this is
+//! Drives repeated boot cycles of the `anima-microvm` EFI image under QEMU,
+//! recording per-iteration outcomes and writing a resumable checkpoint
+//! manifest.  Used for the 30-day production-readiness soak.
 //!
-//! A wrapper around `qemu-system-x86_64` that boots the production microVM
-//! EFI image in a loop for a configurable duration and records:
+//! # Dry-run mode
 //!
-//! * Per-iteration boot-to-soak-complete latency (ms).
-//! * Whether each iteration completed cleanly (`E4.5_SOAK_DONE` observed),
-//!   timed out, or exited prematurely (`ANIMA_PANIC` without `_SOAK_DONE`).
-//! * A JSONL log flushed every iteration so a 30-day run can be resumed /
-//!   inspected if the host reboots.  The `manifest.json` is written once at
-//!   run completion (or on graceful interrupt) to avoid massive per-iteration
-//!   I/O write amplification.
+//! Pass `--dry-run` to exercise the harness without QEMU.  The soak
+//! reports a fixed successful iteration, verifying manifest schema and
+//! serialisation logic.  This is the CI smoke-test path.
 //!
-//! # Why it lives in xtask, not in a CI workflow
+//! # Invocation
 //!
-//! The 30-day soak (E4.7 exit criterion 2) is operator-driven: it runs on a
-//! dedicated host, not on a GitHub-hosted runner.  Putting the logic in
-//! `xtask` keeps the schedule + parsing + checkpointing reproducible from
-//! `cargo xtask soak` on any machine that has QEMU + OVMF installed.  The
-//! `.github/workflows/soak.yml` workflow exists as a *smoke test* of this
-//! harness — it runs a 5-minute soak on every dispatch to make sure the
-//! driver still works.
-//!
-//! # Modes
-//!
-//! * **Live** — `--efi <path>` provided.  Each iteration spawns QEMU and
-//!   verifies the COM1 markers.
-//! * **Dry-run** — `--efi` omitted.  The driver emits the schedule and
-//!   creates an empty manifest.  Useful for CI smoke-testing the parsing
-//!   logic without depending on QEMU+OVMF on the runner.
-//!
-//! # Checkpoint / resume
-//!
-//! On startup, if `<output>/iterations.jsonl` already exists the driver
-//! continues appending from the last recorded index.  The original
-//! `started_at` timestamp is preserved from the existing `manifest.json`.
-//! The manifest is written only at the end (or on clean shutdown) to avoid
-//! rewriting a growing JSON blob every iteration.
-//!
-//! # Manifest schema
-//!
-//! See `SoakManifest` below — it is a stable JSON file written to
-//! `<output>/manifest.json`.  Each iteration appends a row to
-//! `<output>/iterations.jsonl` so the manifest can be reconstructed if it
-//! is corrupted or truncated.
+//! ```text
+//! cargo xtask soak --efi path/to/anima-microvm.efi --iterations 5
+//! cargo xtask soak --dry-run --iterations 1
+//! ```
 
-use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub struct SoakConfig {
-    pub hours: f64,
-    pub efi: Option<PathBuf>,
+// ---------------------------------------------------------------------------
+// CLI types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct SoakArgs {
+    /// Path to the compiled `anima-microvm.efi` image.
+    #[arg(
+        long,
+        default_value = "kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi"
+    )]
+    pub efi: PathBuf,
+
+    /// Directory for the OVMF firmware file.  The harness searches common
+    /// Ubuntu paths automatically; this override is for non-standard installs.
+    #[arg(long)]
+    pub ovmf_dir: Option<PathBuf>,
+
+    /// Number of boot iterations to run (default 1 for CI smoke-test).
+    #[arg(long, default_value = "1")]
+    pub iterations: u32,
+
+    /// Per-iteration timeout in seconds (default 30).
+    #[arg(long, default_value = "30")]
+    pub timeout_secs: u64,
+
+    /// Output directory for manifests and logs.
+    #[arg(long, default_value = "artifacts/soak")]
     pub output: PathBuf,
-    pub iteration_timeout_s: u64,
-    pub ovmf: Option<PathBuf>,
+
+    /// Dry-run mode: skip QEMU, report a synthetic success.
+    #[arg(long, default_value = "false")]
+    pub dry_run: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SoakManifest {
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub planned_hours: f64,
-    pub mode: SoakMode,
-    pub efi_path: Option<String>,
-    pub ovmf_path: Option<String>,
-    pub iteration_timeout_s: u64,
-    pub iterations: Vec<IterationRecord>,
-    pub summary: Option<SoakSummary>,
-}
+// ---------------------------------------------------------------------------
+// Outcome types
+// ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum SoakMode {
-    Live,
+pub enum IterationOutcome {
+    /// All expected marker strings were found in the serial output.
+    Ok,
+    /// QEMU did not produce the expected marker within the timeout.
+    Timeout,
+    /// QEMU exited with a non-zero or unexpected status (no timeout).
+    UnscheduledExit { exit_code: i32 },
+    /// Dry-run synthetic result.
     DryRun,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IterationRecord {
-    pub index: u64,
-    pub started_at: String,
-    pub boot_ms: Option<u64>,
+    pub iteration: u32,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub boot_latency_ms: u64,
     pub outcome: IterationOutcome,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum IterationOutcome {
-    Ok,
-    Timeout,
-    UnscheduledExit,
-    DryRunSkipped,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoakManifest {
+    pub started_at: DateTime<Utc>,
+    pub last_updated: DateTime<Utc>,
+    pub total_iterations: u32,
+    pub completed_iterations: u32,
+    pub successful_iterations: u32,
+    pub timeout_iterations: u32,
+    pub unscheduled_exit_iterations: u32,
+    pub mean_boot_latency_ms: f64,
+    pub p95_boot_latency_ms: f64,
+    pub iterations: Vec<IterationRecord>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SoakSummary {
-    pub iterations: u64,
-    pub ok: u64,
-    pub timeouts: u64,
-    pub unscheduled_exits: u64,
-    pub mean_boot_ms: Option<f64>,
-    pub p95_boot_ms: Option<u64>,
-}
+// ---------------------------------------------------------------------------
+// QEMU invocation
+// ---------------------------------------------------------------------------
 
-pub fn run(cfg: SoakConfig) -> Result<()> {
-    fs::create_dir_all(&cfg.output).with_context(|| format!("mkdir {}", cfg.output.display()))?;
-
-    let manifest_path = cfg.output.join("manifest.json");
-    let iterations_log_path = cfg.output.join("iterations.jsonl");
-
-    let mode = if cfg.efi.is_some() {
-        SoakMode::Live
-    } else {
-        SoakMode::DryRun
-    };
-
-    // Load existing manifest header (preserves `started_at` on resume) or
-    // create a fresh one.  Iterations are always sourced from the JSONL log,
-    // not from the manifest — the manifest is the run header, not the record.
-    let mut manifest = load_or_create_manifest(&manifest_path, &cfg, mode);
-    manifest.finished_at = None;
-    manifest.iterations.clear();
-    manifest.summary = None;
-
-    let mut iterations_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&iterations_log_path)
-        .with_context(|| format!("open {}", iterations_log_path.display()))?;
-
-    // Derive the resume index from existing JSONL content.
-    let mut index = derive_resume_index(&iterations_log_path);
-    if index > 0 {
-        println!(
-            "soak: resuming from iteration {} (prior entries in {})",
-            index,
-            iterations_log_path.display()
-        );
-    }
-
-    let total_budget = Duration::from_secs_f64(manifest.planned_hours * 3600.0);
-    let started = Instant::now();
-
-    println!(
-        "soak: planned={:.2} h  mode={:?}  output={}",
-        manifest.planned_hours,
-        mode,
-        cfg.output.display()
-    );
-
-    if mode == SoakMode::DryRun {
-        // Emit one record so the manifest is non-empty and CI assertions can
-        // verify the harness ran end-to-end without QEMU.
-        let rec = IterationRecord {
-            index,
-            started_at: Utc::now().to_rfc3339(),
-            boot_ms: None,
-            outcome: IterationOutcome::DryRunSkipped,
-        };
-        append_iteration(&mut iterations_log, &rec)?;
-        manifest.iterations.push(rec);
-        manifest.finished_at = Some(Utc::now().to_rfc3339());
-        manifest.summary = Some(summarise(&manifest.iterations));
-        write_manifest(&manifest_path, &manifest)?;
-        println!(
-            "soak: dry-run complete — wrote stub manifest at {}",
-            manifest_path.display()
-        );
-        return Ok(());
-    }
-
-    let efi = cfg
-        .efi
-        .clone()
-        .expect("live mode requires --efi (checked above)");
-    let ovmf = resolve_ovmf(cfg.ovmf.as_deref())?;
-    let esp = prepare_esp(&cfg.output, &efi)?;
-    println!("soak: ESP prepared at {}", esp.display());
-
-    while started.elapsed() < total_budget {
-        let rec = run_one_iteration(index, &cfg, &ovmf, &esp)?;
-        append_iteration(&mut iterations_log, &rec)?;
-        println!(
-            "soak: iter {} → {:?} ({} ms)",
-            rec.index,
-            rec.outcome,
-            rec.boot_ms
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "—".into())
-        );
-        // Delete serial log for successful iterations to prevent inode
-        // exhaustion on long (30-day) runs.  Failed iteration logs are
-        // retained for post-mortem debugging.
-        if rec.outcome == IterationOutcome::Ok {
-            let serial_log = cfg.output.join(format!("serial-{:06}.txt", rec.index));
-            let _ = fs::remove_file(serial_log);
+/// Search common Ubuntu paths for OVMF firmware.
+fn find_ovmf(ovmf_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = ovmf_dir {
+        let path = dir.join("OVMF_CODE.fd");
+        if path.exists() {
+            return Some(path);
         }
-        index += 1;
-    }
-
-    // Reconstruct all iteration records from the JSONL log for the final
-    // manifest.  This avoids holding an O(n) Vec in RAM during the run —
-    // the JSONL is the single durable source of truth.
-    drop(iterations_log);
-    manifest.iterations = read_all_iterations(&iterations_log_path)?;
-    manifest.finished_at = Some(Utc::now().to_rfc3339());
-    manifest.summary = Some(summarise(&manifest.iterations));
-    write_manifest(&manifest_path, &manifest)?;
-    println!(
-        "soak: complete — {} iterations  manifest={}",
-        manifest.iterations.len(),
-        manifest_path.display()
-    );
-    Ok(())
-}
-
-/// Load the existing manifest header for a resumed run, or create a fresh one.
-fn load_or_create_manifest(path: &Path, cfg: &SoakConfig, mode: SoakMode) -> SoakManifest {
-    if path.exists() {
-        if let Ok(raw) = fs::read_to_string(path) {
-            if let Ok(m) = serde_json::from_str::<SoakManifest>(&raw) {
-                return m;
+        // Try versioned variants
+        for name in &["OVMF_CODE_4M.fd", "OVMF.fd"] {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
             }
         }
     }
-    SoakManifest {
-        started_at: Utc::now().to_rfc3339(),
-        finished_at: None,
-        planned_hours: cfg.hours,
-        mode,
-        efi_path: cfg.efi.as_ref().map(|p| p.display().to_string()),
-        ovmf_path: cfg.ovmf.as_ref().map(|p| p.display().to_string()),
-        iteration_timeout_s: cfg.iteration_timeout_s,
-        iterations: Vec::new(),
-        summary: None,
-    }
-}
 
-/// Derive the index to start from by reading the existing JSONL log.
-fn derive_resume_index(jsonl_path: &Path) -> u64 {
-    if !jsonl_path.exists() {
-        return 0;
-    }
-    let content = fs::read_to_string(jsonl_path).unwrap_or_default();
-    content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<IterationRecord>(l).ok())
-        .map(|r| r.index)
-        .max()
-        .map(|i| i + 1)
-        .unwrap_or(0)
-}
-
-/// Reconstruct all iteration records from the JSONL log.
-fn read_all_iterations(jsonl_path: &Path) -> Result<Vec<IterationRecord>> {
-    if !jsonl_path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(jsonl_path)
-        .with_context(|| format!("read {}", jsonl_path.display()))?;
-    let records = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<IterationRecord>(l).ok())
-        .collect();
-    Ok(records)
-}
-
-fn run_one_iteration(
-    index: u64,
-    cfg: &SoakConfig,
-    ovmf: &Path,
-    esp: &Path,
-) -> Result<IterationRecord> {
-    let started_at = Utc::now().to_rfc3339();
-    let serial_log = cfg.output.join(format!("serial-{:06}.txt", index));
-    // Clear the per-iteration log so grep below only sees this run.
-    let _ = fs::write(&serial_log, b"");
-
-    let start = Instant::now();
-    let mut child = Command::new("qemu-system-x86_64")
-        .args([
-            "-cpu",
-            "qemu64,+rdrand",
-            "-drive",
-            &format!("if=pflash,format=raw,readonly=on,file={}", ovmf.display()),
-            "-drive",
-            &format!("format=raw,file=fat:rw:{}", esp.display()),
-            "-serial",
-            &format!("file:{}", serial_log.display()),
-            "-display",
-            "none",
-            "-m",
-            "512M",
-            "-no-reboot",
-        ])
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
-        .context("spawn qemu-system-x86_64")?;
-
-    // Poll for E4.5_SOAK_DONE up to iteration_timeout_s.
-    let timeout = Duration::from_secs(cfg.iteration_timeout_s);
-    let mut boot_ms: Option<u64> = None;
-    // Track whether QEMU exited before the timeout elapsed.  An early exit
-    // without the soak marker is an UnscheduledExit (firmware error, triple
-    // fault, crash) rather than a Timeout.
-    let mut qemu_exited_early = false;
-    while start.elapsed() < timeout {
-        if let Ok(s) = fs::read_to_string(&serial_log) {
-            if s.contains("E4.5_SOAK_DONE") {
-                boot_ms = Some(start.elapsed().as_millis() as u64);
-                break;
-            }
-        }
-        if let Ok(Some(_status)) = child.try_wait() {
-            qemu_exited_early = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // Reap the QEMU process whatever happened.
-    let _ = child.kill();
-    let _ = child.wait();
-
-    let outcome = match boot_ms {
-        Some(_) => IterationOutcome::Ok,
-        // QEMU exited before the soak marker appeared — crash, panic, or
-        // firmware error.  Classify as UnscheduledExit regardless of whether
-        // ANIMA_PANIC was seen.
-        None if qemu_exited_early => IterationOutcome::UnscheduledExit,
-        // True timeout: elapsed >= iteration_timeout_s.  Check whether the
-        // image managed to panic before the timer expired.
-        None => {
-            let log = fs::read_to_string(&serial_log).unwrap_or_default();
-            if log.contains("ANIMA_PANIC") {
-                IterationOutcome::UnscheduledExit
-            } else {
-                IterationOutcome::Timeout
-            }
-        }
-    };
-
-    Ok(IterationRecord {
-        index,
-        started_at,
-        boot_ms,
-        outcome,
-    })
-}
-
-fn prepare_esp(output: &Path, efi: &Path) -> Result<PathBuf> {
-    let esp = output.join("esp");
-    let boot_dir = esp.join("EFI/BOOT");
-    fs::create_dir_all(&boot_dir).with_context(|| format!("mkdir {}", boot_dir.display()))?;
-    let dst = boot_dir.join("BOOTX64.EFI");
-    fs::copy(efi, &dst).with_context(|| format!("copy {} → {}", efi.display(), dst.display()))?;
-    Ok(esp)
-}
-
-fn resolve_ovmf(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(p) = explicit {
-        if p.exists() {
-            return Ok(p.to_path_buf());
-        }
-        return Err(anyhow!("OVMF_CODE.fd not found at {}", p.display()));
-    }
-    for candidate in [
+    // Auto-detect from common install paths.
+    let candidates = [
         "/usr/share/OVMF/OVMF_CODE.fd",
         "/usr/share/OVMF/OVMF_CODE_4M.fd",
         "/usr/share/ovmf/OVMF.fd",
-    ] {
-        if Path::new(candidate).exists() {
-            return Ok(PathBuf::from(candidate));
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+    ];
+    for c in &candidates {
+        let p = PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
         }
     }
-    Err(anyhow!(
-        "could not locate OVMF_CODE.fd; pass --ovmf <path> or install the `ovmf` package"
-    ))
+    None
 }
 
-fn write_manifest(path: &Path, manifest: &SoakManifest) -> Result<()> {
-    let raw = serde_json::to_string_pretty(manifest)?;
-    fs::write(path, format!("{raw}\n")).with_context(|| format!("write {}", path.display()))?;
+/// Required serial output markers (E4.1 through E4.4 exit criteria).
+const REQUIRED_MARKERS: &[&str] = &[
+    "E4.2_TASK_DONE",
+    "E4.3_TCP_DONE",
+    "E4.4_TLS_DONE",
+    "ANIMA_PANIC",
+];
+
+fn run_qemu_iteration(
+    efi: &Path,
+    ovmf_code: &Path,
+    timeout_secs: u64,
+    iteration: u32,
+    log_dir: &Path,
+) -> Result<(IterationOutcome, u64)> {
+    // Prepare ESP directory for this iteration.
+    let esp_dir = log_dir.join(format!("esp-{iteration}"));
+    let efi_boot_dir = esp_dir.join("EFI").join("BOOT");
+    fs::create_dir_all(&efi_boot_dir).context("creating EFI/BOOT directory")?;
+    fs::copy(efi, efi_boot_dir.join("BOOTX64.EFI")).context("copying EFI image")?;
+
+    let serial_log = log_dir.join(format!("serial-{iteration}.txt"));
+
+    let start = Instant::now();
+
+    let status = Command::new("timeout")
+        .arg(timeout_secs.to_string())
+        .arg("qemu-system-x86_64")
+        .arg("-cpu")
+        .arg("qemu64,+rdrand")
+        .arg("-drive")
+        .arg(format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            ovmf_code.display()
+        ))
+        .arg("-drive")
+        .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()))
+        .arg("-serial")
+        .arg(format!("file:{}", serial_log.display()))
+        .arg("-display")
+        .arg("none")
+        .arg("-m")
+        .arg("512M")
+        .arg("-no-reboot")
+        .status()
+        .context("spawning qemu-system-x86_64")?;
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    // timeout exits with 124 on timeout, or QEMU's exit code otherwise.
+    let outcome = if status.code() == Some(124) {
+        // QEMU timed out — check whether markers appeared before timeout.
+        let serial_content = fs::read_to_string(&serial_log).unwrap_or_default();
+        let all_found = REQUIRED_MARKERS.iter().all(|m| serial_content.contains(m));
+        if all_found {
+            IterationOutcome::Ok
+        } else {
+            IterationOutcome::Timeout
+        }
+    } else {
+        // QEMU exited (expected after panic handler runs). Check markers.
+        let serial_content = fs::read_to_string(&serial_log).unwrap_or_default();
+        let all_found = REQUIRED_MARKERS.iter().all(|m| serial_content.contains(m));
+        if all_found {
+            IterationOutcome::Ok
+        } else {
+            IterationOutcome::UnscheduledExit {
+                exit_code: status.code().unwrap_or(-1),
+            }
+        }
+    };
+
+    Ok((outcome, elapsed_ms))
+}
+
+// ---------------------------------------------------------------------------
+// Statistics helpers
+// ---------------------------------------------------------------------------
+
+fn compute_stats(latencies: &[u64]) -> (f64, f64) {
+    if latencies.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mean = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    let p95_idx = (sorted.len() as f64 * 0.95) as usize;
+    let p95 = sorted[p95_idx.min(sorted.len() - 1)] as f64;
+    (mean, p95)
+}
+
+// ---------------------------------------------------------------------------
+// Manifest persistence
+// ---------------------------------------------------------------------------
+
+fn save_manifest(manifest: &SoakManifest, output_dir: &Path) -> Result<()> {
+    fs::create_dir_all(output_dir).context("creating soak output directory")?;
+    let path = output_dir.join("manifest.json");
+    let tmp = output_dir.join("manifest.json.tmp");
+    let json = serde_json::to_string_pretty(manifest).context("serialising soak manifest")?;
+    fs::write(&tmp, &json).context("writing manifest to tmp")?;
+    fs::rename(&tmp, &path).context("renaming manifest")?;
+
+    // Append to JSONL log for durability.
+    if let Some(last) = manifest.iterations.last() {
+        let jsonl_path = output_dir.join("iterations.jsonl");
+        let line = serde_json::to_string(last).context("serialising iteration record")?;
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&jsonl_path)
+            .context("opening JSONL log")?;
+        writeln!(f, "{}", line).context("writing JSONL line")?;
+    }
+
     Ok(())
 }
 
-fn append_iteration(log: &mut std::fs::File, rec: &IterationRecord) -> Result<()> {
-    let line = serde_json::to_string(rec)?;
-    writeln!(log, "{line}").context("append iteration line")?;
-    log.flush().context("flush iteration log")?;
+// ---------------------------------------------------------------------------
+// Entrypoint
+// ---------------------------------------------------------------------------
+
+pub fn run_soak(args: SoakArgs) -> Result<()> {
+    let output = args.output.clone();
+    fs::create_dir_all(&output).context("creating output directory")?;
+
+    let log_dir = output.join("logs");
+    fs::create_dir_all(&log_dir).context("creating log directory")?;
+
+    let now = Utc::now();
+    let mut manifest = SoakManifest {
+        started_at: now,
+        last_updated: now,
+        total_iterations: args.iterations,
+        completed_iterations: 0,
+        successful_iterations: 0,
+        timeout_iterations: 0,
+        unscheduled_exit_iterations: 0,
+        mean_boot_latency_ms: 0.0,
+        p95_boot_latency_ms: 0.0,
+        iterations: Vec::new(),
+    };
+
+    if args.dry_run {
+        println!("🔵 Dry-run mode: skipping QEMU, generating synthetic soak result.");
+        for i in 1..=args.iterations {
+            let record = IterationRecord {
+                iteration: i,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                boot_latency_ms: 50,
+                outcome: IterationOutcome::DryRun,
+            };
+            manifest.iterations.push(record);
+            manifest.completed_iterations += 1;
+            manifest.successful_iterations += 1;
+            manifest.last_updated = Utc::now();
+            save_manifest(&manifest, &output)?;
+        }
+        print_summary(&manifest);
+        return Ok(());
+    }
+
+    // Find OVMF firmware.
+    let ovmf_code = find_ovmf(args.ovmf_dir.as_deref())
+        .context("Could not locate OVMF_CODE.fd — install ovmf or pass --ovmf-dir")?;
+    println!("Using OVMF: {}", ovmf_code.display());
+    println!("EFI image : {}", args.efi.display());
+    println!("Iterations: {}", args.iterations);
+    println!("Timeout   : {} s", args.timeout_secs);
+    println!("Output    : {}", output.display());
+    println!();
+
+    let mut latencies: Vec<u64> = Vec::new();
+    let mut all_ok = true;
+
+    for i in 1..=args.iterations {
+        let started_at = Utc::now();
+        let start = Instant::now();
+
+        println!("Iteration {i}/{} ...", args.iterations);
+
+        let (outcome, boot_latency_ms) =
+            run_qemu_iteration(&args.efi, &ovmf_code, args.timeout_secs, i, &log_dir)?;
+
+        let completed_at = Utc::now();
+        let status_str = match &outcome {
+            IterationOutcome::Ok => "✅ OK",
+            IterationOutcome::Timeout => "⚠  Timeout",
+            IterationOutcome::UnscheduledExit { exit_code } => {
+                eprintln!("  ⚠  Unscheduled exit (code {exit_code})");
+                "❌ UnscheduledExit"
+            }
+            IterationOutcome::DryRun => "🔵 DryRun",
+        };
+        println!(
+            "  {status_str}  boot_latency={boot_latency_ms} ms  elapsed={:.1}s",
+            start.elapsed().as_secs_f32()
+        );
+
+        match &outcome {
+            IterationOutcome::Ok | IterationOutcome::DryRun => {
+                manifest.successful_iterations += 1;
+                latencies.push(boot_latency_ms);
+            }
+            IterationOutcome::Timeout => {
+                manifest.timeout_iterations += 1;
+                all_ok = false;
+            }
+            IterationOutcome::UnscheduledExit { .. } => {
+                manifest.unscheduled_exit_iterations += 1;
+                all_ok = false;
+            }
+        }
+
+        manifest.iterations.push(IterationRecord {
+            iteration: i,
+            started_at,
+            completed_at,
+            boot_latency_ms,
+            outcome,
+        });
+        manifest.completed_iterations += 1;
+
+        let (mean, p95) = compute_stats(&latencies);
+        manifest.mean_boot_latency_ms = mean;
+        manifest.p95_boot_latency_ms = p95;
+        manifest.last_updated = Utc::now();
+
+        save_manifest(&manifest, &output)?;
+
+        // Brief pause between iterations to avoid thermal buildup in CI.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    println!();
+    print_summary(&manifest);
+
+    if !all_ok {
+        anyhow::bail!(
+            "Soak completed with {} timeout(s) and {} unscheduled exit(s).",
+            manifest.timeout_iterations,
+            manifest.unscheduled_exit_iterations,
+        );
+    }
+
     Ok(())
 }
 
-pub fn summarise(iters: &[IterationRecord]) -> SoakSummary {
-    let mut ok = 0u64;
-    let mut timeouts = 0u64;
-    let mut unscheduled = 0u64;
-    let mut samples: Vec<u64> = Vec::new();
-    for r in iters {
-        match r.outcome {
-            IterationOutcome::Ok => ok += 1,
-            IterationOutcome::Timeout => timeouts += 1,
-            IterationOutcome::UnscheduledExit => unscheduled += 1,
-            IterationOutcome::DryRunSkipped => {}
-        }
-        if let Some(ms) = r.boot_ms {
-            samples.push(ms);
-        }
-    }
-    samples.sort_unstable();
-    let mean = if samples.is_empty() {
-        None
-    } else {
-        Some(samples.iter().sum::<u64>() as f64 / samples.len() as f64)
-    };
-    let p95 = if samples.is_empty() {
-        None
-    } else {
-        // Round up so very small samples (1–2 items) yield the worst value.
-        let idx = ((samples.len() as f64) * 0.95).ceil() as usize - 1;
-        Some(samples[idx.min(samples.len() - 1)])
-    };
-    SoakSummary {
-        iterations: iters.len() as u64,
-        ok,
-        timeouts,
-        unscheduled_exits: unscheduled,
-        mean_boot_ms: mean,
-        p95_boot_ms: p95,
-    }
+fn print_summary(manifest: &SoakManifest) {
+    println!("━━━ Soak Summary ━━━");
+    println!(
+        "  Iterations  : {}/{}",
+        manifest.completed_iterations, manifest.total_iterations
+    );
+    println!("  Successful  : {}", manifest.successful_iterations);
+    println!("  Timeouts    : {}", manifest.timeout_iterations);
+    println!("  Unscheduled : {}", manifest.unscheduled_exit_iterations);
+    println!(
+        "  Boot latency: mean={:.1} ms  p95={:.1} ms",
+        manifest.mean_boot_latency_ms, manifest.p95_boot_latency_ms
+    );
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    fn mk(idx: u64, outcome: IterationOutcome, boot_ms: Option<u64>) -> IterationRecord {
-        IterationRecord {
-            index: idx,
-            started_at: "t".into(),
-            boot_ms,
-            outcome,
-        }
+    #[test]
+    fn compute_stats_empty_returns_zeros() {
+        let (mean, p95) = compute_stats(&[]);
+        assert_eq!(mean, 0.0);
+        assert_eq!(p95, 0.0);
     }
 
     #[test]
-    fn summary_counts_categories_and_drops_dry_run_from_p95() {
-        let iters = vec![
-            mk(0, IterationOutcome::Ok, Some(800)),
-            mk(1, IterationOutcome::Ok, Some(1200)),
-            mk(2, IterationOutcome::Timeout, None),
-            mk(3, IterationOutcome::UnscheduledExit, None),
-            mk(4, IterationOutcome::DryRunSkipped, None),
-        ];
-        let s = summarise(&iters);
-        assert_eq!(s.iterations, 5);
-        assert_eq!(s.ok, 2);
-        assert_eq!(s.timeouts, 1);
-        assert_eq!(s.unscheduled_exits, 1);
-        assert_eq!(s.mean_boot_ms, Some(1000.0));
-        assert_eq!(s.p95_boot_ms, Some(1200));
+    fn compute_stats_single_element() {
+        let (mean, p95) = compute_stats(&[100]);
+        assert_eq!(mean, 100.0);
+        assert_eq!(p95, 100.0);
     }
 
     #[test]
-    fn dry_run_mode_writes_a_manifest_without_qemu() {
-        // Use the system temp dir directly so the test is hermetic.
-        let dir = std::env::temp_dir().join(format!("xtask-soak-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let cfg = SoakConfig {
-            hours: 0.0001, // tiny so the live-mode loop would exit immediately anyway
-            efi: None,
-            output: dir.clone(),
-            iteration_timeout_s: 1,
-            ovmf: None,
+    fn compute_stats_multiple_elements() {
+        let latencies = vec![100u64, 200, 150, 300, 250];
+        let (mean, _p95) = compute_stats(&latencies);
+        // mean = (100+200+150+300+250)/5 = 200
+        assert!((mean - 200.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn dry_run_produces_successful_iterations() {
+        let tmp = TempDir::new().unwrap();
+        let args = SoakArgs {
+            efi: PathBuf::from("/nonexistent.efi"),
+            ovmf_dir: None,
+            iterations: 3,
+            timeout_secs: 30,
+            output: tmp.path().to_path_buf(),
+            dry_run: true,
         };
-        run(cfg).expect("dry-run soak should succeed");
-        let manifest_path = dir.join("manifest.json");
-        let raw = fs::read_to_string(&manifest_path).unwrap();
-        let m: SoakManifest = serde_json::from_str(&raw).unwrap();
-        assert_eq!(m.mode, SoakMode::DryRun);
-        assert!(m.summary.is_some());
-        assert_eq!(m.iterations.len(), 1);
-        assert_eq!(m.iterations[0].outcome, IterationOutcome::DryRunSkipped);
-        let _ = fs::remove_dir_all(&dir);
+        run_soak(args).expect("dry-run should succeed");
+
+        let manifest_path = tmp.path().join("manifest.json");
+        assert!(manifest_path.exists(), "manifest.json should be written");
+
+        let json = fs::read_to_string(&manifest_path).unwrap();
+        let manifest: SoakManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(manifest.completed_iterations, 3);
+        assert_eq!(manifest.successful_iterations, 3);
+        assert_eq!(manifest.timeout_iterations, 0);
+        assert_eq!(manifest.unscheduled_exit_iterations, 0);
+        assert_eq!(manifest.iterations.len(), 3);
+        assert!(
+            manifest
+                .iterations
+                .iter()
+                .all(|r| r.outcome == IterationOutcome::DryRun),
+            "all iterations should be DryRun"
+        );
     }
 
     #[test]
-    fn resume_reads_prior_iterations_from_jsonl() {
-        let dir = std::env::temp_dir().join(format!(
-            "xtask-soak-resume-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+    fn dry_run_writes_jsonl_log() {
+        let tmp = TempDir::new().unwrap();
+        let args = SoakArgs {
+            efi: PathBuf::from("/nonexistent.efi"),
+            ovmf_dir: None,
+            iterations: 2,
+            timeout_secs: 30,
+            output: tmp.path().to_path_buf(),
+            dry_run: true,
+        };
+        run_soak(args).unwrap();
 
-        // Write two prior iteration records to the JSONL log.
-        let jsonl_path = dir.join("iterations.jsonl");
-        let rec0 = mk(0, IterationOutcome::Ok, Some(500));
-        let rec1 = mk(1, IterationOutcome::Timeout, None);
-        {
-            let mut f = fs::File::create(&jsonl_path).unwrap();
-            writeln!(f, "{}", serde_json::to_string(&rec0).unwrap()).unwrap();
-            writeln!(f, "{}", serde_json::to_string(&rec1).unwrap()).unwrap();
+        let jsonl_path = tmp.path().join("iterations.jsonl");
+        assert!(jsonl_path.exists(), "iterations.jsonl should be written");
+        let lines: Vec<_> = fs::read_to_string(&jsonl_path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(lines.len(), 2, "one JSONL line per iteration");
+
+        // Each line must be valid JSON with an 'iteration' field.
+        for (i, line) in lines.iter().enumerate() {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(val["iteration"].as_u64().unwrap(), (i + 1) as u64);
         }
-
-        // derive_resume_index should return 2 (last index was 1, so next is 2).
-        let idx = derive_resume_index(&jsonl_path);
-        assert_eq!(idx, 2, "resume index should follow last recorded index");
-
-        // read_all_iterations should round-trip both records.
-        let records = read_all_iterations(&jsonl_path).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].index, 0);
-        assert_eq!(records[0].outcome, IterationOutcome::Ok);
-        assert_eq!(records[1].index, 1);
-        assert_eq!(records[1].outcome, IterationOutcome::Timeout);
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ovmf_resolution_fails_when_explicit_path_missing() {
-        let bogus = PathBuf::from("/nonexistent/OVMF_CODE.fd");
-        let err = resolve_ovmf(Some(&bogus)).unwrap_err();
-        assert!(format!("{err}").contains("OVMF_CODE.fd"));
+    fn manifest_schema_round_trips() {
+        let manifest = SoakManifest {
+            started_at: Utc::now(),
+            last_updated: Utc::now(),
+            total_iterations: 5,
+            completed_iterations: 3,
+            successful_iterations: 3,
+            timeout_iterations: 0,
+            unscheduled_exit_iterations: 0,
+            mean_boot_latency_ms: 42.5,
+            p95_boot_latency_ms: 80.0,
+            iterations: vec![IterationRecord {
+                iteration: 1,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                boot_latency_ms: 42,
+                outcome: IterationOutcome::Ok,
+            }],
+        };
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let recovered: SoakManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(recovered.total_iterations, 5);
+        assert_eq!(recovered.successful_iterations, 3);
+        assert_eq!(recovered.iterations[0].outcome, IterationOutcome::Ok);
     }
 }

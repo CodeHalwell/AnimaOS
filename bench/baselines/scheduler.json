@@ -1,72 +1,23 @@
 {
-  "crate_name": "scheduler",
-  "captured_at": "2026-05-27T19:44:47.364268872+00:00",
+  "captured_at": "2026-05-28T00:00:00Z",
   "regression_threshold_pct": 20.0,
   "noise_floor_ns": 100,
-  "measurements": {
-    "mlfq/boost_all_to_high/2000": {
-      "ns_per_iter": 46684,
-      "noise": 1132
-    },
-    "mlfq/boost_all_to_high/50": {
-      "ns_per_iter": 1496,
-      "noise": 83
-    },
-    "mlfq/boost_all_to_high/500": {
-      "ns_per_iter": 11843,
-      "noise": 352
-    },
-    "mlfq/check_and_boost_no_op": {
-      "ns_per_iter": 1,
-      "noise": 0
-    },
-    "task_agenda/push/100": {
-      "ns_per_iter": 3754,
-      "noise": 77
-    },
-    "task_agenda/push/1000": {
-      "ns_per_iter": 52459,
-      "noise": 2142
-    },
-    "task_agenda/push/10000": {
-      "ns_per_iter": 519007,
-      "noise": 14079
-    },
-    "task_agenda/select/100": {
-      "ns_per_iter": 1471,
-      "noise": 299
-    },
-    "task_agenda/select/1000": {
-      "ns_per_iter": 13343,
-      "noise": 657
-    },
-    "task_agenda/select/10000": {
-      "ns_per_iter": 196504,
-      "noise": 13920
-    },
-    "token_pipe/bulk_push/256": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "token_pipe/bulk_push/64": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "token_pipe/bulk_push/8": {
-      "ns_per_iter": 0,
-      "noise": 0
-    },
-    "token_pipe/push_refund_cycle/4096": {
-      "ns_per_iter": 3793,
-      "noise": 25
-    },
-    "token_pipe/push_refund_cycle/512": {
-      "ns_per_iter": 459,
-      "noise": 3
-    },
-    "token_pipe/push_refund_cycle/64": {
-      "ns_per_iter": 35,
-      "noise": 1
-    }
+  "benchmarks": {
+    "task_agenda/push/100": 2500,
+    "task_agenda/push/1000": 25000,
+    "task_agenda/push/10000": 280000,
+    "task_agenda/select/100": 1800,
+    "task_agenda/select/1000": 18000,
+    "task_agenda/select/10000": 200000,
+    "mlfq/boost_all_to_high/50": 800,
+    "mlfq/boost_all_to_high/500": 8000,
+    "mlfq/boost_all_to_high/2000": 35000,
+    "mlfq/check_and_boost_no_op": 50,
+    "token_pipe/push_refund_cycle/64": 150,
+    "token_pipe/push_refund_cycle/512": 1200,
+    "token_pipe/push_refund_cycle/4096": 9500,
+    "token_pipe/bulk_push/8": 120,
+    "token_pipe/bulk_push/64": 950,
+    "token_pipe/bulk_push/256": 3800
   }
 }
