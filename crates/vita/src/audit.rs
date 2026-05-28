@@ -9,12 +9,28 @@
 //! Sleep-maintenance phase entries ([`AuditEntry::SleepPhaseStarted`] and
 //! [`AuditEntry::SleepPhaseCompleted`]) were added to support audited end-to-end
 //! tracing of each sleep cycle (exit criterion 1 of E3.4).
+//!
+//! # EX.2 — Durable audit log
+//!
+//! [`AuditLog::with_file`] opens an append-only JSONL sink.  Every call to
+//! [`AuditLog::push`] serialises the entry and writes it to the file before
+//! adding it to the in-memory `Vec`.  The in-memory copy is retained so that
+//! all existing tests and query call sites (`entries()`, `len()`) continue to
+//! work without modification.
+//!
+//! The file sink is also configurable via the `ANIMA_AUDIT_DIR` environment
+//! variable: if set, [`AuditLog::from_env`] opens
+//! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
+
+use serde::Serialize;
+use std::io::{BufWriter, Write};
+use std::sync::{Arc, Mutex};
 
 /// A single observable lifecycle event.
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
 /// therefore the enum derives `PartialEq` only (not `Eq`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -61,6 +77,25 @@ pub enum AuditEntry {
         /// `true` when the phase completed without rollback or error.
         success: bool,
     },
+
+    // ── EX.2 Memory-pressure audit entries ────────────────────────────────────
+    /// The L1 context window reached or exceeded its high-water mark.
+    ///
+    /// Emitted by the somatic loop after each memory-pressure check when the
+    /// level is `HighWater` or `Critical` (EX.2 consolidation step 2).
+    ///
+    /// The `level` field is one of `"Normal"`, `"HighWater"`, or `"Critical"`.
+    MemoryPressureEvent {
+        /// Agent that observed the pressure.
+        agent_id: String,
+        /// String form of [`memory::MemoryPressureEvent`].
+        level: String,
+        /// L1 token count at the time of the event.
+        active_tokens: u32,
+        /// Configured maximum context size.
+        max_context: u32,
+    },
+
     // ── E5.1 Cortex MVP audit entries ─────────────────────────────────────────
     /// The cortex was successfully invoked and made its first tool action.
     ///
@@ -340,20 +375,94 @@ pub enum AuditEntry {
     },
 }
 
-/// Append-only audit log.
-#[derive(Debug, Default, Clone)]
+// ── AuditLog ──────────────────────────────────────────────────────────────────
+
+/// Append-only audit log with an optional durable JSONL file sink (EX.2).
+///
+/// The in-memory `Vec<AuditEntry>` is always maintained so that all existing
+/// query call sites (`entries()`, `len()`, `is_empty()`) continue to work
+/// without modification.  When a file sink is configured, every `push` also
+/// serialises the entry as a newline-delimited JSON record.
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
+    /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
+    /// (all clones of a manager write to the same audit file).
+    file_sink: Option<Arc<Mutex<BufWriter<std::fs::File>>>>,
+}
+
+impl std::fmt::Debug for AuditLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuditLog")
+            .field("entries", &self.entries.len())
+            .field("has_file_sink", &self.file_sink.is_some())
+            .finish()
+    }
+}
+
+impl Clone for AuditLog {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            file_sink: self.file_sink.clone(),
+        }
+    }
+}
+
+impl Default for AuditLog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AuditLog {
-    /// Creates an empty log.
+    /// Creates an in-memory-only log (no file persistence).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Vec::new(),
+            file_sink: None,
+        }
     }
 
-    /// Appends an entry.
+    /// Opens an append-only JSONL file at `path` and attaches it as the durable
+    /// sink.  Existing content is preserved.
+    pub fn with_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self {
+            entries: Vec::new(),
+            file_sink: Some(Arc::new(Mutex::new(BufWriter::new(file)))),
+        })
+    }
+
+    /// Creates a log that writes to `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` when
+    /// the environment variable is set.  Falls back to in-memory-only when the
+    /// variable is absent or the file cannot be opened.
+    pub fn from_env(agent_id: &str) -> Self {
+        if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
+            let path =
+                std::path::PathBuf::from(dir).join(format!("{}.jsonl", agent_id));
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(log) = Self::with_file(&path) {
+                return log;
+            }
+        }
+        Self::new()
+    }
+
+    /// Appends an entry to both the in-memory store and the file sink (if any).
     pub fn push(&mut self, entry: AuditEntry) {
+        if let Some(sink) = &self.file_sink {
+            if let Ok(line) = serde_json::to_string(&entry) {
+                if let Ok(mut w) = sink.lock() {
+                    let _ = writeln!(w, "{line}");
+                    let _ = w.flush();
+                }
+            }
+        }
         self.entries.push(entry);
     }
 

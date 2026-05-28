@@ -132,6 +132,18 @@ fn print_audit(manager: &LifecycleManager) {
                 let mark = if *success { "✓" } else { "✗" };
                 println!("  {mark}   sleep_phase_completed phase={phase} success={success}");
             }
+            // EX.2 memory pressure entries
+            AuditEntry::MemoryPressureEvent {
+                agent_id,
+                level,
+                active_tokens,
+                max_context,
+            } => {
+                println!(
+                    "  ⚠  memory_pressure agent={agent_id} level={level} \
+                     tokens={active_tokens}/{max_context}"
+                );
+            }
             // E5.1 cortex entries
             AuditEntry::CortexInvoked {
                 task_id,
