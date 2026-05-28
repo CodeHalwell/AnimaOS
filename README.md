@@ -23,7 +23,9 @@ anima-os/
 │   ├── praxis/                # Efferent actuator: routing, circuit breaker, MCP/A2A envelopes
 │   ├── self/                  # Self/non-self barrier: typestate capability tokens
 │   ├── interoception/         # Stress index, TTFT window
-│   └── senses/                # Afferent input: text / PCM packetization
+│   ├── senses/                # Afferent input: text / PCM packetization
+│   ├── console-proto/         # Operator-console wire protocol (no_std, both surfaces)
+│   └── console/               # Operator console: HTTP/SSE server + anima-console client
 └── kernels/
     ├── hosted/                # Linux process emulation binary (`anima-hosted`) — development only
     └── microvm/               # x86_64-unknown-uefi framekernel — production target
@@ -120,6 +122,20 @@ anima-os/
 - Sleep-cycle soak: VCM pressure, MLFQ boost, L1 pruning, stress index, `run_dream_walk_no_std`
 - CI: `microvm-boot` greps COM1 serial for `E4.1_*` … `E4.5_SOAK_DONE`; Miri + Kani in nightly CI
 
+### Operator Console (`console` / `console-proto`, Epic E6)
+- `OperatorInput` (afferent guidance, gated — never preempts the kernel) +
+  `OperatorEvent` (efferent vitals / state / gate rationale / audit / agent
+  messages) over one `no_std` NDJSON protocol (`console-proto`)
+- `anima-hosted serve` — boots a single agent and the console: a hand-rolled
+  HTTP/SSE server (`GET /events`, `POST /guidance`) with an embedded browser
+  dashboard at `GET /`; zero third-party HTTP deps
+- `anima-console` client: `tui` (pure-ANSI dashboard), `tap`, `send`, and the
+  microVM `serial` bridge
+- Decoupled by construction: tails `vita`'s audit JSONL for egress and shares
+  the `SensoryBridge` for ingress — no changes to the lifecycle
+- microVM Phase 0: the same protocol framed onto COM1 (`ANIMA_TLM` / `ANIMA_IN`)
+  with no `serde_json` in the kernel — see `docs/11-operator-interface.md`
+
 The non-TCB crates explicitly enforce `#![forbid(unsafe_code)]`.
 
 ## Building & Running
@@ -183,9 +199,14 @@ docker-compose with NVIDIA GPU passthrough.  Useful for local development
 when iterating on cognition without rebuilding the UEFI kernel each time:
 
 ```sh
-docker compose up --build                       # inference stack
+docker compose up --build                       # inference stack + operator console
 docker compose --profile training up --build    # also build the trainer
 ```
+
+The `hosted` service runs `anima-hosted serve` and publishes the operator
+console on host loopback — open **http://127.0.0.1:8088/** for the dashboard,
+or attach the terminal UI with `anima-console tui --url http://127.0.0.1:8088`.
+See [`docs/11-operator-interface.md`](./docs/11-operator-interface.md).
 
 Operational details — model defaults, env vars, VRAM budget on a 3090,
 known limitations — live in [`docker/README.md`](./docker/README.md).

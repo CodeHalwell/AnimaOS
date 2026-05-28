@@ -1,0 +1,232 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PageHero from '../components/PageHero.astro';
+
+const vitals = [
+  { label: 'thermal', v: 0.12 },
+  { label: 'compute', v: 0.34 },
+  { label: 'memory', v: 0.21 },
+  { label: 'power', v: 1.0 },
+  { label: 'budget', v: 0.88 },
+  { label: 'attention', v: 0.5 },
+];
+const feed = [
+  { cls: 'gate', tag: 'gate', body: 'INVOKE Frontier · value 0.82 vs threshold 0.40 — user-facing, high urgency' },
+  { cls: 'task', tag: 'task→', body: '#9223372036854775808 summarise the overnight telemetry' },
+  { cls: 'msg', tag: 'agent', body: '#9223372036854775808 (412 tok) Overnight: 2 builds, 1 thermal excursion at 03:14…' },
+  { cls: 'audit', tag: 'MemoryPressureEvent', body: 'HighWater (6144/8192 tokens)' },
+  { cls: 'veto', tag: 'DefenceVeto', body: 'PromptInjectionDetector blocked "ignore previous instructions"' },
+];
+function pct(v: number) { return Math.round(v * 100); }
+function barColor(v: number) { return v > 0.85 ? '#ff6b6b' : v > 0.6 ? '#ffcf5c' : '#5cc8ff'; }
+---
+
+<Layout
+  title="Operator Console — AnimaOS"
+  description="The human↔agent interface: afferent guidance in, an efferent telemetry stream out — one wire protocol across the container and the bare-metal microVM."
+>
+  <PageHero
+    eyebrow="11 — Operator Interface"
+    title="The human is a sense, not the driver."
+    description="Anima has no display server and no control panel. The operator console is the human-facing realisation of the body's afferent/efferent split: guidance enters as a high-priority sensory signal (still arbitrated by the gate, never preempting the kernel), and the agent's vital signs, decisions, and messages stream back out. One wire protocol carries it over HTTP in the container and over the COM1 serial line in the microVM."
+  />
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Two channels</span>
+        <h2>Afferent in, efferent out.</h2>
+        <p class="lede">
+          The console never reaches into the lifecycle. It shares the agent's
+          <code>SensoryBridge</code> for ingress and tails the durable audit log
+          for egress — so it can be attached or removed without changing how the
+          agent runs.
+        </p>
+      </div>
+
+      <div class="chan-grid">
+        <div class="chan">
+          <div class="chan-dir mono">human → agent</div>
+          <h3>Afferent · guidance</h3>
+          <p>
+            An <code>OperatorInput</code> (text, priority, force) becomes a
+            prioritised sensory packet. It is validated against the agent's
+            <code>HumanGuidance</code> policy and screened by the
+            <code>defence</code> layer, then weighted by the Striatal Gate. The
+            human cannot preempt the kernel — only offer it a signal.
+          </p>
+        </div>
+        <div class="chan">
+          <div class="chan-dir mono">agent → human</div>
+          <h3>Efferent · telemetry</h3>
+          <p>
+            An <code>OperatorEvent</code> stream: 1 Hz vitals, lifecycle state
+            and sleep phase, gate rationale, audit deltas, and the agent's own
+            messages. Mapped live from the same audit JSONL an operator could
+            <code>tail&nbsp;-f</code>.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">The dashboard</span>
+        <h2>What an operator sees.</h2>
+        <p class="lede">
+          The browser dashboard ships embedded in the agent and is served at
+          <code>GET /</code>; a pure-ANSI terminal UI (<code>anima-console tui</code>)
+          renders the same stream over SSH. Below is a static snapshot.
+        </p>
+      </div>
+
+      <div class="console-mock">
+        <div class="cm-head">
+          <span class="cm-brand">ANIMA<span style="color:#5cc8ff">OS</span></span>
+          <span class="cm-sub">operator console</span>
+          <span class="cm-conn">● connected</span>
+        </div>
+        <div class="cm-body">
+          <div class="cm-left">
+            <div class="cm-panel">
+              <h4>Vital signs <span style="float:right;color:#e6e9ef">stress 0.18</span></h4>
+              {vitals.map((row) => (
+                <div class="cm-vital">
+                  <div class="cm-row"><span>{row.label}</span><span>{row.v.toFixed(2)}</span></div>
+                  <div class="cm-bar"><span style={`width:${pct(row.v)}%;background:${barColor(row.v)}`}></span></div>
+                </div>
+              ))}
+            </div>
+            <div class="cm-panel">
+              <h4>Lifecycle</h4>
+              <div class="cm-sl"><span>state</span><b>Awake</b></div>
+              <div class="cm-sl"><span>sleep phase</span><b>—</b></div>
+              <div class="cm-sl"><span>agenda depth</span><b>1</b></div>
+              <div class="cm-sl"><span>uptime</span><b>0h 12m 04s</b></div>
+            </div>
+          </div>
+          <div class="cm-right cm-panel">
+            <h4>Event stream</h4>
+            <div class="cm-feed">
+              {feed.map((e) => (
+                <div class={`cm-ev ${e.cls}`}><span class="cm-tag">{e.tag}</span>{e.body}</div>
+              ))}
+            </div>
+            <div class="cm-input">
+              <span class="cm-prompt mono">send guidance ▸</span>
+              <span class="cm-caret">summarise the overnight logs</span>
+              <span class="cm-pill mono">High</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">One protocol, two transports</span>
+        <h2>The same stream, bare metal or container.</h2>
+      </div>
+      <div class="chan-grid">
+        <div class="chan">
+          <div class="chan-dir mono">container / hosted</div>
+          <h3>HTTP + Server-Sent Events</h3>
+          <p>
+            <code>anima-hosted serve</code> exposes a hand-rolled, zero-dependency
+            HTTP server: <code>GET /events</code> (SSE), <code>POST /guidance</code>,
+            and the dashboard at <code>GET /</code>. Docker publishes it on host
+            loopback (<code>127.0.0.1:8088</code>).
+          </p>
+        </div>
+        <div class="chan">
+          <div class="chan-dir mono">microVM (bare metal)</div>
+          <h3>COM1 serial framing</h3>
+          <p>
+            The kernel frames the identical NDJSON onto the serial line
+            (<code>ANIMA_TLM</code> out, <code>ANIMA_IN</code> in) with no
+            <code>serde_json</code> linked in. <code>anima-console serial</code>
+            bridges it to the same dashboard. Phase 1 moves it onto the kernel's
+            smoltcp + TLS 1.3 stack.
+          </p>
+        </div>
+      </div>
+
+      <p class="footnote">
+        Full design: <code>docs/11-operator-interface.md</code> · crates
+        <code>console-proto</code> and <code>console</code>.
+      </p>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .chan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  @media (max-width: 760px) { .chan-grid { grid-template-columns: 1fr; } }
+  .chan {
+    background: var(--bg-1); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem;
+  }
+  .chan-dir {
+    font-size: 0.7rem; letter-spacing: 0.08em; color: var(--accent);
+    text-transform: uppercase; margin-bottom: 0.5rem;
+  }
+  .chan h3 { margin: 0 0 0.6rem; }
+  .chan p { color: var(--fg-2); line-height: 1.65; margin: 0; }
+  .footnote { color: var(--fg-3); font-size: 0.85rem; margin-top: 1.5rem; }
+
+  /* Dashboard mock */
+  .console-mock {
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    background: #0b0e14; font-family: var(--mono); font-size: 0.8rem; color: #e6e9ef;
+  }
+  .cm-head {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.7rem 1rem; border-bottom: 1px solid #232a3a;
+  }
+  .cm-brand { font-weight: 700; letter-spacing: 0.04em; }
+  .cm-sub { color: #8a93a6; font-size: 0.72rem; }
+  .cm-conn { margin-left: auto; color: #54d685; font-size: 0.72rem; }
+  .cm-body { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; padding: 1rem; }
+  @media (max-width: 760px) { .cm-body { grid-template-columns: 1fr; } }
+  .cm-panel {
+    background: #141925; border: 1px solid #232a3a; border-radius: 10px; padding: 0.9rem 1rem;
+  }
+  .cm-left { display: flex; flex-direction: column; gap: 1rem; }
+  .cm-panel h4 {
+    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.12em;
+    color: #8a93a6; margin: 0 0 0.75rem;
+  }
+  .cm-vital { margin-bottom: 0.55rem; }
+  .cm-row { display: flex; justify-content: space-between; font-size: 0.72rem; }
+  .cm-bar { height: 6px; background: #0a0d13; border-radius: 4px; overflow: hidden; margin-top: 3px; }
+  .cm-bar > span { display: block; height: 100%; }
+  .cm-sl { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px dashed #232a3a; }
+  .cm-sl:last-child { border-bottom: 0; }
+  .cm-sl b { color: #5cc8ff; }
+  .cm-feed { display: flex; flex-direction: column; gap: 0.3rem; }
+  .cm-ev {
+    padding: 0.35rem 0.55rem; border-left: 3px solid #232a3a; border-radius: 0 6px 6px 0;
+    background: #10141e; font-size: 0.74rem; line-height: 1.5;
+  }
+  .cm-tag {
+    font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: #8a93a6; margin-right: 0.5rem;
+  }
+  .cm-ev.msg { border-left-color: #b794f6; } .cm-ev.msg .cm-tag { color: #b794f6; }
+  .cm-ev.gate { border-left-color: #5cc8ff; } .cm-ev.gate .cm-tag { color: #5cc8ff; }
+  .cm-ev.task { border-left-color: #54d685; } .cm-ev.task .cm-tag { color: #54d685; }
+  .cm-ev.audit { border-left-color: #ffcf5c; } .cm-ev.audit .cm-tag { color: #ffcf5c; }
+  .cm-ev.veto { border-left-color: #ff6b6b; } .cm-ev.veto .cm-tag { color: #ff6b6b; }
+  .cm-input {
+    display: flex; align-items: center; gap: 0.6rem; margin-top: 0.9rem;
+    background: #0a0d13; border: 1px solid #232a3a; border-radius: 8px; padding: 0.55rem 0.75rem;
+  }
+  .cm-prompt { color: #8a93a6; font-size: 0.72rem; }
+  .cm-caret { color: #e6e9ef; flex: 1; }
+  .cm-pill {
+    color: #04121c; background: #5cc8ff; border-radius: 6px; padding: 0.1rem 0.5rem; font-size: 0.7rem;
+  }
+</style>

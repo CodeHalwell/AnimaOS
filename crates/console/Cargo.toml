@@ -1,0 +1,16 @@
+[package]
+name = "console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Operator console for AnimaOS: an in-process telemetry/guidance bridge and the anima-console client (TUI + serial bridge)."
+
+[[bin]]
+name = "anima-console"
+path = "src/bin/anima-console.rs"
+
+[dependencies]
+console-proto = { path = "../console-proto", features = ["json"] }
+senses = { path = "../senses" }
+interoception = { path = "../interoception" }
+serde_json = { workspace = true }

@@ -44,6 +44,13 @@ memory = { path = "../../crates/memory", default-features = false, features = ["
 #   modules require std and are excluded.
 interoception = { path = "../../crates/interoception", default-features = false }
 
+# console-proto: the operator-console wire protocol (E6.4, Phase 0).
+#   default-features = false drops serde + serde_json entirely, so only the
+#   dependency-free `to_ndjson` writer and `parse_input_line` reader are linked
+#   — keeping the EFI image inside its ≤1 MiB budget.  The kernel frames
+#   `ANIMA_TLM` telemetry lines onto COM1 and parses `ANIMA_IN` guidance lines.
+console-proto = { path = "../../crates/console-proto", default-features = false }
+
 # uefi: UEFI application framework.
 # Features used:
 #   logger — wires `log` crate to the UEFI console (SimpleTextOutputProtocol).

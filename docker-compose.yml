@@ -108,6 +108,11 @@ services:
       dockerfile: docker/Dockerfile
     image: animaos/hosted:dev
     container_name: anima-hosted
+    # Run the operator-console server: a single long-lived agent that exposes
+    # telemetry (SSE) + a guidance ingress.  The agent starts idle and is woken
+    # by operator guidance.  Override for one-shot subcommands, e.g.
+    #   docker compose run --rm hosted why
+    command: ["serve"]
     depends_on:
       ollama:
         condition: service_healthy
@@ -115,6 +120,10 @@ services:
       # the agent's first /api/generate can race the download and 404.
       ollama-init:
         condition: service_completed_successfully
+    ports:
+      # Operator console — bound to host loopback only, like the ollama daemon.
+      # Open http://127.0.0.1:8088/ for the dashboard.
+      - "127.0.0.1:8088:8088"
     environment:
       # `ollama` (default) / `mock` / `anthropic` / `openai`.
       ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
@@ -123,6 +132,11 @@ services:
       ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-8192}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Operator console: bind all interfaces inside the container (compose maps
+      # only loopback on the host).  Set ANIMA_CONSOLE_TOKEN to require a token.
+      ANIMA_CONSOLE_ADDR: 0.0.0.0:8088
+      ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-}
+      ANIMA_AUDIT_DIR: /home/anima/.anima/audit
     volumes:
       # Persist the identity store + audit logs across runs.
       - anima-data:/home/anima/.anima
