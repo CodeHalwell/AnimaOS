@@ -142,7 +142,7 @@ rand_core = { version = "0.6", default-features = false }
 der = { version = "0.7", default-features = false, features = ["alloc"] }
 
 [build-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 
 # -----------------------------------------------------------------------------
 # Epic E4.7 — Production hardening: minimise the EFI image footprint.
