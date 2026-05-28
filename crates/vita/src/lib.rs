@@ -609,20 +609,20 @@ pub async fn somatic_execution_loop(
         let pressure = lifecycle.memory.check_pressure();
         if pressure != lifecycle.last_pressure_level {
             lifecycle.last_pressure_level = pressure;
-            if pressure.is_elevated() {
-                let agent_id = lifecycle.agent_id.clone();
-                let max_context = lifecycle.config.max_context;
-                #[cfg(feature = "std")]
-                let level = format!("{pressure:?}");
-                #[cfg(not(feature = "std"))]
-                let level = alloc::format!("{pressure:?}");
-                lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
-                    agent_id,
-                    level,
-                    active_tokens,
-                    max_context,
-                });
-            }
+            // Log every level transition including the return to Normal so that
+            // audit-log consumers can see the full pressure envelope over time.
+            let agent_id = lifecycle.agent_id.clone();
+            let max_context = lifecycle.config.max_context;
+            #[cfg(feature = "std")]
+            let level = format!("{pressure:?}");
+            #[cfg(not(feature = "std"))]
+            let level = alloc::format!("{pressure:?}");
+            lifecycle.audit.push(AuditEntry::MemoryPressureEvent {
+                agent_id,
+                level,
+                active_tokens,
+                max_context,
+            });
         }
 
         // ── 5. Sleep / wake decision (E3.4) ──────────────────────────────────

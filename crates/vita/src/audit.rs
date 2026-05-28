@@ -472,12 +472,15 @@ impl AuditLog {
     #[cfg(feature = "std")]
     pub fn from_env(agent_id: &str) -> Self {
         // Reject IDs that are not a single, plain path component.
-        // `Path::components()` normalises both `/` and `\` on all platforms so
-        // the check is safe even on Windows where `\` is also a separator.
+        // On Unix `\` is a valid filename character so `Path::components()` will
+        // not split it — add an explicit check to reject `\` on all platforms,
+        // preventing path traversal via agents with Windows-style separators.
         let is_safe = {
             use std::path::{Component, Path};
             let mut comps = Path::new(agent_id).components();
-            matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
+            matches!(comps.next(), Some(Component::Normal(_)))
+                && comps.next().is_none()
+                && !agent_id.contains('\\')
         };
         if !is_safe {
             eprintln!(
@@ -542,8 +545,10 @@ impl AuditLog {
                             }
                         },
                         Err(e) => {
-                            eprintln!("anima-audit: serialisation failure for audit entry — sink disabled: {e}");
-                            self.sink_failed.store(true, Ordering::Relaxed);
+                            // Serialisation failures are entry-specific (e.g. NaN/Inf in a
+                            // GateDecision field) — skip only this entry rather than disabling
+                            // the sink for all future writes.
+                            eprintln!("anima-audit: serialisation failure for audit entry — entry skipped: {e}");
                         }
                     }
                 }
