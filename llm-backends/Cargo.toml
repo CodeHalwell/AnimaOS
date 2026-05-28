@@ -11,4 +11,4 @@ serde_json = { workspace = true }
 # Synchronous HTTP client for the Ollama backend. Default features ship
 # rustls + json; no OpenSSL build dependency, so the container build stays
 # clean.
-ureq = "2"
+ureq = "3"
