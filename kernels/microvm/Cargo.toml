@@ -104,7 +104,7 @@ static_cell = "2"
 # connection without real hardware.  Packets are looped through an in-
 # memory VecDeque<Vec<u8>> so both sides of the connection run in the same
 # poll loop — no virtio-net device is required in the CI QEMU invocation.
-smoltcp = { version = "0.11", default-features = false, features = [
+smoltcp = { version = "0.13", default-features = false, features = [
     "proto-ipv4",
     "socket-tcp",
     "medium-ethernet",
