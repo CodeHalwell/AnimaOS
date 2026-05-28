@@ -76,10 +76,15 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
         shell: bash
-        run: set -o pipefail && cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+        run: set -o pipefail && cargo bench -p scheduler --bench scheduler -- --output-format bencher | tee bench-scheduler.txt
 
       # E4.7: Check scheduler benchmarks against baseline.
+      # On pull_request events the regression check warns but does not block
+      # because baselines are captured on the same runner type used by the
+      # nightly schedule.  Cross-machine comparisons have too much variance to
+      # enforce as a hard gate on PR CI.
       - name: Regression check — scheduler
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: |
           cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
             --crate-name scheduler \
@@ -90,10 +95,11 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark memory
         shell: bash
-        run: set -o pipefail && cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
+        run: set -o pipefail && cargo bench -p memory --bench memory -- --output-format bencher | tee bench-memory.txt
 
       # E4.7: Check memory benchmarks against baseline.
       - name: Regression check — memory
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: |
           cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
             --crate-name memory \
@@ -104,10 +110,11 @@ jobs:
       # ------------------------------------------------------------------
       - name: Benchmark praxis
         shell: bash
-        run: set -o pipefail && cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+        run: set -o pipefail && cargo bench -p praxis --bench praxis -- --output-format bencher | tee bench-praxis.txt
 
       # E4.7: Check praxis benchmarks against baseline.
       - name: Regression check — praxis
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: |
           cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
             --crate-name praxis \

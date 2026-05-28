@@ -4,12 +4,14 @@
 
 pub mod audit;
 pub mod cortex_bridge;
+#[cfg(feature = "std")]
 pub mod defence_bridge;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
 pub mod kv_gate;
 pub mod router;
+#[cfg(feature = "std")]
 pub mod sensors;
 pub mod sleep;
 
@@ -21,6 +23,7 @@ pub use cortex_bridge::{
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
     PythonCortexBridge, ToolDispatcher, ToolSpec,
 };
+#[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
@@ -43,6 +46,7 @@ pub use router::{
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
     RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
 };
+#[cfg(feature = "std")]
 pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
@@ -154,6 +158,7 @@ pub struct LifecycleManager {
     ///
     /// Wrapped in `Arc` so `LifecycleManager::clone()` shares the same bundle
     /// (sensors are inherently process-global resources).
+    #[cfg(feature = "std")]
     pub sensor_bundle: Option<Arc<InteroceptiveSensorBundle>>,
 }
 
@@ -222,6 +227,7 @@ impl LifecycleManager {
             max_iterations,
             iterations: 0,
             last_pressure_level: memory::MemoryPressureEvent::Normal,
+            #[cfg(feature = "std")]
             sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
         }
     }
@@ -561,6 +567,7 @@ pub async fn somatic_execution_loop(
 
         // Publish interoceptive snapshot to the audit log on every iteration
         // when a sensor bundle is configured (EX.2 wiring, E5.7 S5.7.1).
+        #[cfg(feature = "std")]
         if let Some(ref bundle) = lifecycle.sensor_bundle {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

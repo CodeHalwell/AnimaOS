@@ -453,25 +453,33 @@ impl CortexBackend for PythonCortexBridge {
 
         // Screen the completed output through the defence layer (S5.6.5).
         if let Some(ref dl) = self.defence {
-            if let Ok(mut layer) = dl.lock() {
-                let proposal = CortexProposal {
-                    invocation_id: task_id.clone(),
-                    intent: request.description.clone(),
-                    action: ActionKind::CompletionClaim {
-                        summary: result.output.clone(),
-                    },
-                    tool_calls_completed: result.tool_calls_made,
-                    observable_evidence: Vec::new(),
-                };
-                let outcome = layer.screen(&proposal);
-                push_defence_outcome(
-                    audit,
-                    &outcome,
-                    &request.task_id,
-                    &task_id,
-                    "cortex InvokeComplete output",
-                    layer.config.veto_window_secs,
-                );
+            let mut layer = dl
+                .lock()
+                .map_err(|_| CortexError::CortexFault("defence layer lock poisoned".to_string()))?;
+            let proposal = CortexProposal {
+                invocation_id: task_id.clone(),
+                intent: request.description.clone(),
+                action: ActionKind::CompletionClaim {
+                    summary: result.output.clone(),
+                },
+                tool_calls_completed: result.tool_calls_made,
+                observable_evidence: Vec::new(),
+            };
+            let outcome = layer.screen(&proposal);
+            let vetoed = outcome.is_vetoed();
+            let veto_reason = format!("defence layer veto by detector '{}'", outcome.detector);
+            push_defence_outcome(
+                audit,
+                &outcome,
+                &request.task_id,
+                &task_id,
+                "cortex InvokeComplete output",
+                layer.config.veto_window_secs,
+            );
+            if vetoed {
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(CortexError::CortexFault(veto_reason));
             }
         }
 
@@ -605,25 +613,31 @@ impl CortexBackend for MockCortexBridge {
 
         // Screen the completed output through the defence layer (S5.6.5).
         if let Some(ref dl) = self.defence {
-            if let Ok(mut layer) = dl.lock() {
-                let proposal = CortexProposal {
-                    invocation_id: task_id.clone(),
-                    intent: request.description.clone(),
-                    action: ActionKind::CompletionClaim {
-                        summary: output.clone(),
-                    },
-                    tool_calls_completed: tool_calls_made,
-                    observable_evidence: observations.clone(),
-                };
-                let outcome = layer.screen(&proposal);
-                push_defence_outcome(
-                    audit,
-                    &outcome,
-                    &request.task_id,
-                    &task_id,
-                    "cortex InvokeComplete output",
-                    layer.config.veto_window_secs,
-                );
+            let mut layer = dl
+                .lock()
+                .map_err(|_| CortexError::CortexFault("defence layer lock poisoned".to_string()))?;
+            let proposal = CortexProposal {
+                invocation_id: task_id.clone(),
+                intent: request.description.clone(),
+                action: ActionKind::CompletionClaim {
+                    summary: output.clone(),
+                },
+                tool_calls_completed: tool_calls_made,
+                observable_evidence: observations.clone(),
+            };
+            let outcome = layer.screen(&proposal);
+            let vetoed = outcome.is_vetoed();
+            let veto_reason = format!("defence layer veto by detector '{}'", outcome.detector);
+            push_defence_outcome(
+                audit,
+                &outcome,
+                &request.task_id,
+                &task_id,
+                "cortex InvokeComplete output",
+                layer.config.veto_window_secs,
+            );
+            if vetoed {
+                return Err(CortexError::CortexFault(veto_reason));
             }
         }
 
