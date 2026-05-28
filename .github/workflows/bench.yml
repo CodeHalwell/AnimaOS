@@ -75,28 +75,8 @@ jobs:
       # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
-        run: |
-          cargo bench -p scheduler --bench scheduler -- --output-format bencher \
-            | tee bench-scheduler.txt
-      - name: Regression check — scheduler (E4.7.3)
-        run: |
-          # --warn-only: surface regressions in the log without blocking the PR.
-          # The checked-in baselines were captured on a developer host; GitHub-
-          # hosted runners are 2-5× noisier and routinely flag false positives
-          # until baselines are re-captured from CI itself (tracked as the
-          # follow-up to E4.7.3).  Real regressions still appear in the log.
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate scheduler \
-            --input bench-scheduler.txt \
-            --baseline bench/baselines/scheduler.json \
-            --warn-only
-
-      # E4.7: Check scheduler benchmarks against baseline.
-      - name: Regression check — scheduler
-        run: |
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate-name scheduler \
-            --input bench-scheduler.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
 
       # E4.7: Check scheduler benchmarks against baseline.
       - name: Regression check — scheduler
@@ -109,23 +89,8 @@ jobs:
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
       # ------------------------------------------------------------------
       - name: Benchmark memory
-        run: |
-          cargo bench -p memory --bench memory -- --output-format bencher \
-            | tee bench-memory.txt
-      - name: Regression check — memory (E4.7.3)
-        run: |
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate memory \
-            --input bench-memory.txt \
-            --baseline bench/baselines/memory.json \
-            --warn-only
-
-      # E4.7: Check memory benchmarks against baseline.
-      - name: Regression check — memory
-        run: |
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate-name memory \
-            --input bench-memory.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
 
       # E4.7: Check memory benchmarks against baseline.
       - name: Regression check — memory
@@ -138,23 +103,8 @@ jobs:
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
       - name: Benchmark praxis
-        run: |
-          cargo bench -p praxis --bench praxis -- --output-format bencher \
-            | tee bench-praxis.txt
-      - name: Regression check — praxis (E4.7.3)
-        run: |
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate praxis \
-            --input bench-praxis.txt \
-            --baseline bench/baselines/praxis.json \
-            --warn-only
-
-      # E4.7: Check praxis benchmarks against baseline.
-      - name: Regression check — praxis
-        run: |
-          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
-            --crate-name praxis \
-            --input bench-praxis.txt
+        shell: bash
+        run: set -o pipefail && cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
 
       # E4.7: Check praxis benchmarks against baseline.
       - name: Regression check — praxis

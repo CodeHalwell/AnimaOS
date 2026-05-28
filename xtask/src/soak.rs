@@ -150,20 +150,21 @@ fn run_qemu_iteration(
     timeout_secs: u64,
     iteration: u32,
     log_dir: &Path,
+    esp_dir: &Path,
 ) -> Result<(IterationOutcome, u64)> {
-    // Prepare ESP directory for this iteration.
-    let esp_dir = log_dir.join(format!("esp-{iteration}"));
+    // Reuse the shared ESP directory — copy the EFI image to the fixed location.
+    // The directory was created once before the loop; only the image is refreshed.
     let efi_boot_dir = esp_dir.join("EFI").join("BOOT");
-    fs::create_dir_all(&efi_boot_dir).context("creating EFI/BOOT directory")?;
     fs::copy(efi, efi_boot_dir.join("BOOTX64.EFI")).context("copying EFI image")?;
 
     let serial_log = log_dir.join(format!("serial-{iteration}.txt"));
 
     let start = Instant::now();
+    let deadline = start + Duration::from_secs(timeout_secs);
 
-    let status = Command::new("timeout")
-        .arg(timeout_secs.to_string())
-        .arg("qemu-system-x86_64")
+    // Spawn QEMU without the `timeout` wrapper so we can kill it ourselves the
+    // instant the required serial markers appear, recording accurate boot latency.
+    let mut child = Command::new("qemu-system-x86_64")
         .arg("-cpu")
         .arg("qemu64,+rdrand")
         .arg("-drive")
@@ -180,35 +181,40 @@ fn run_qemu_iteration(
         .arg("-m")
         .arg("512M")
         .arg("-no-reboot")
-        .status()
+        .spawn()
         .context("spawning qemu-system-x86_64")?;
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-
-    // timeout exits with 124 on timeout, or QEMU's exit code otherwise.
-    let outcome = if status.code() == Some(124) {
-        // QEMU timed out — check whether markers appeared before timeout.
-        let serial_content = fs::read_to_string(&serial_log).unwrap_or_default();
-        let all_found = REQUIRED_MARKERS.iter().all(|m| serial_content.contains(m));
-        if all_found {
-            IterationOutcome::Ok
-        } else {
-            IterationOutcome::Timeout
-        }
-    } else {
-        // QEMU exited (expected after panic handler runs). Check markers.
-        let serial_content = fs::read_to_string(&serial_log).unwrap_or_default();
-        let all_found = REQUIRED_MARKERS.iter().all(|m| serial_content.contains(m));
-        if all_found {
-            IterationOutcome::Ok
-        } else {
-            IterationOutcome::UnscheduledExit {
-                exit_code: status.code().unwrap_or(-1),
+    // Poll the serial log for required markers.  Boot latency is recorded the
+    // moment all markers are found — not after QEMU exits (which may be the
+    // full timeout duration after the panic handler has already run).
+    let mut boot_latency_ms: Option<u64> = None;
+    while Instant::now() < deadline {
+        if let Ok(content) = fs::read_to_string(&serial_log) {
+            if REQUIRED_MARKERS.iter().all(|m| content.contains(m)) {
+                boot_latency_ms = Some(start.elapsed().as_millis() as u64);
+                break;
             }
         }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Kill QEMU (it stays alive in the panic handler) and reap the child.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let outcome = if let Some(ms) = boot_latency_ms {
+        return Ok((IterationOutcome::Ok, ms));
+    } else {
+        // One final check after the deadline in case markers appeared just before
+        // we stopped polling.
+        let content = fs::read_to_string(&serial_log).unwrap_or_default();
+        if REQUIRED_MARKERS.iter().all(|m| content.contains(m)) {
+            return Ok((IterationOutcome::Ok, start.elapsed().as_millis() as u64));
+        }
+        IterationOutcome::Timeout
     };
 
-    Ok((outcome, elapsed_ms))
+    Ok((outcome, start.elapsed().as_millis() as u64))
 }
 
 // ---------------------------------------------------------------------------
@@ -266,23 +272,40 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
     let log_dir = output.join("logs");
     fs::create_dir_all(&log_dir).context("creating log directory")?;
 
-    let now = Utc::now();
-    let mut manifest = SoakManifest {
-        started_at: now,
-        last_updated: now,
-        total_iterations: args.iterations,
-        completed_iterations: 0,
-        successful_iterations: 0,
-        timeout_iterations: 0,
-        unscheduled_exit_iterations: 0,
-        mean_boot_latency_ms: 0.0,
-        p95_boot_latency_ms: 0.0,
-        iterations: Vec::new(),
+    // Resume from an existing manifest when present so the soak can be
+    // interrupted and restarted without losing previous progress.
+    let manifest_path = output.join("manifest.json");
+    let mut manifest = if manifest_path.exists() {
+        let json = fs::read_to_string(&manifest_path).context("reading existing manifest")?;
+        let mut m: SoakManifest =
+            serde_json::from_str(&json).context("parsing existing manifest")?;
+        // Allow callers to extend a completed run by raising --iterations.
+        m.total_iterations = m.total_iterations.max(args.iterations);
+        println!(
+            "Resuming soak from iteration {}/{}.",
+            m.completed_iterations, m.total_iterations
+        );
+        m
+    } else {
+        let now = Utc::now();
+        SoakManifest {
+            started_at: now,
+            last_updated: now,
+            total_iterations: args.iterations,
+            completed_iterations: 0,
+            successful_iterations: 0,
+            timeout_iterations: 0,
+            unscheduled_exit_iterations: 0,
+            mean_boot_latency_ms: 0.0,
+            p95_boot_latency_ms: 0.0,
+            iterations: Vec::new(),
+        }
     };
 
     if args.dry_run {
         println!("🔵 Dry-run mode: skipping QEMU, generating synthetic soak result.");
-        for i in 1..=args.iterations {
+        let start_i = manifest.completed_iterations + 1;
+        for i in start_i..=manifest.total_iterations {
             let record = IterationRecord {
                 iteration: i,
                 started_at: Utc::now(),
@@ -305,22 +328,39 @@ pub fn run_soak(args: SoakArgs) -> Result<()> {
         .context("Could not locate OVMF_CODE.fd — install ovmf or pass --ovmf-dir")?;
     println!("Using OVMF: {}", ovmf_code.display());
     println!("EFI image : {}", args.efi.display());
-    println!("Iterations: {}", args.iterations);
+    println!("Iterations: {}", manifest.total_iterations);
     println!("Timeout   : {} s", args.timeout_secs);
     println!("Output    : {}", output.display());
     println!();
 
-    let mut latencies: Vec<u64> = Vec::new();
-    let mut all_ok = true;
+    // Create the shared ESP directory once; all iterations reuse it.
+    let esp_dir = log_dir.join("esp-shared");
+    let efi_boot_dir = esp_dir.join("EFI").join("BOOT");
+    fs::create_dir_all(&efi_boot_dir).context("creating shared EFI/BOOT directory")?;
 
-    for i in 1..=args.iterations {
+    let mut latencies: Vec<u64> = manifest
+        .iterations
+        .iter()
+        .filter(|r| matches!(r.outcome, IterationOutcome::Ok | IterationOutcome::DryRun))
+        .map(|r| r.boot_latency_ms)
+        .collect();
+    let mut all_ok = manifest.timeout_iterations == 0 && manifest.unscheduled_exit_iterations == 0;
+
+    let start_i = manifest.completed_iterations + 1;
+    for i in start_i..=manifest.total_iterations {
         let started_at = Utc::now();
         let start = Instant::now();
 
-        println!("Iteration {i}/{} ...", args.iterations);
+        println!("Iteration {i}/{} ...", manifest.total_iterations);
 
-        let (outcome, boot_latency_ms) =
-            run_qemu_iteration(&args.efi, &ovmf_code, args.timeout_secs, i, &log_dir)?;
+        let (outcome, boot_latency_ms) = run_qemu_iteration(
+            &args.efi,
+            &ovmf_code,
+            args.timeout_secs,
+            i,
+            &log_dir,
+            &esp_dir,
+        )?;
 
         let completed_at = Utc::now();
         let status_str = match &outcome {
