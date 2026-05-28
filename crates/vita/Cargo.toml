@@ -17,6 +17,7 @@ interoception = { path = "../interoception" }
 scheduler = { path = "../scheduler" }
 senses = { path = "../senses" }
 kv-controller = { path = "../kv-controller" }
+defence = { path = "../defence" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
