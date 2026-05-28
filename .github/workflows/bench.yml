@@ -13,6 +13,7 @@ on:
       - 'crates/scheduler/**'
       - 'crates/memory/**'
       - 'crates/praxis/**'
+      - 'bench/baselines/**'
       - '.github/workflows/bench.yml'
 
 env:
@@ -42,11 +43,22 @@ jobs:
             ${{ runner.os }}-cargo-bench-
             ${{ runner.os }}-cargo-
 
+      # Build xtask once for regression checks below.
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml
+
       # ------------------------------------------------------------------
       # Scheduler — MLFQ hot paths and BoundedTokenPipe credit accounting
       # ------------------------------------------------------------------
       - name: Benchmark scheduler
         run: cargo bench -p scheduler -- --output-format bencher | tee bench-scheduler.txt
+
+      # E4.7: Check scheduler benchmarks against baseline.
+      - name: Regression check — scheduler
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name scheduler \
+            --input bench-scheduler.txt
 
       # ------------------------------------------------------------------
       # Memory — ARC cache, L1 VCM occupancy, MemoryNode decay evaluation
@@ -54,11 +66,25 @@ jobs:
       - name: Benchmark memory
         run: cargo bench -p memory -- --output-format bencher | tee bench-memory.txt
 
+      # E4.7: Check memory benchmarks against baseline.
+      - name: Regression check — memory
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name memory \
+            --input bench-memory.txt
+
       # ------------------------------------------------------------------
       # Praxis — tool registry dispatch, routing filter, circuit breaker
       # ------------------------------------------------------------------
       - name: Benchmark praxis
         run: cargo bench -p praxis -- --output-format bencher | tee bench-praxis.txt
+
+      # E4.7: Check praxis benchmarks against baseline.
+      - name: Regression check — praxis
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- bench-baseline check \
+            --crate-name praxis \
+            --input bench-praxis.txt
 
       # ------------------------------------------------------------------
       # Upload HTML reports as artifacts (available for 30 days)

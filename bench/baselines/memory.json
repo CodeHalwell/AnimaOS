@@ -1,0 +1,28 @@
+{
+  "captured_at": "2026-05-28T00:00:00Z",
+  "regression_threshold_pct": 20.0,
+  "noise_floor_ns": 100,
+  "benchmarks": {
+    "arc_cache/sequential_inserts/64": 12000,
+    "arc_cache/sequential_inserts/256": 50000,
+    "arc_cache/sequential_inserts/1024": 210000,
+    "arc_cache/mixed_workload/64": 8000,
+    "arc_cache/mixed_workload/256": 32000,
+    "arc_cache/mixed_workload/1024": 130000,
+    "arc_cache/get_hits/64": 3500,
+    "arc_cache/get_hits/256": 14000,
+    "arc_cache/get_hits/1024": 58000,
+    "l1_vcm/occupied_blocks/0": 20,
+    "l1_vcm/occupied_blocks/2048": 20,
+    "l1_vcm/occupied_blocks/4000": 20,
+    "l1_vcm/occupied_blocks/8192": 20,
+    "l1_vcm/add_tokens": 15,
+    "memory_node/activation_at/t=0": 10,
+    "memory_node/activation_at/t=1": 15,
+    "memory_node/activation_at/t=10": 15,
+    "memory_node/activation_at/t=100": 15,
+    "memory_node/activation_batch/64": 900,
+    "memory_node/activation_batch/512": 7500,
+    "memory_node/activation_batch/4096": 60000
+  }
+}

@@ -311,6 +311,29 @@ jobs:
       - name: Build UEFI image (release)
         working-directory: kernels/microvm
         run: cargo +nightly build --release
+      # E4.7: Enforce EFI image-size budgets.
+      # Release ≤ 1 MiB, debug ≤ 6 MiB.  Measured after the size-optimised
+      # release profile (opt-level="s", lto="fat", strip="symbols") was added
+      # in E4.7; see docs/10-deployment-pathways.md "Image-size audit".
+      - name: Enforce EFI image-size budgets (E4.7)
+        run: |
+          RELEASE_EFI=kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi
+          DEBUG_EFI=kernels/microvm/target/x86_64-unknown-uefi/debug/anima-microvm.efi
+          RELEASE_SIZE=$(stat -c %s "$RELEASE_EFI")
+          DEBUG_SIZE=$(stat -c %s "$DEBUG_EFI")
+          RELEASE_MAX=$((1 * 1024 * 1024))   # 1 MiB
+          DEBUG_MAX=$((6 * 1024 * 1024))     # 6 MiB
+          echo "Release EFI: ${RELEASE_SIZE} bytes (budget: ${RELEASE_MAX} bytes)"
+          echo "Debug   EFI: ${DEBUG_SIZE} bytes (budget: ${DEBUG_MAX} bytes)"
+          if [ "$RELEASE_SIZE" -gt "$RELEASE_MAX" ]; then
+            echo "❌ Release EFI exceeds 1 MiB budget (${RELEASE_SIZE} bytes)"
+            exit 1
+          fi
+          if [ "$DEBUG_SIZE" -gt "$DEBUG_MAX" ]; then
+            echo "❌ Debug EFI exceeds 6 MiB budget (${DEBUG_SIZE} bytes)"
+            exit 1
+          fi
+          echo "✅ EFI image-size budgets satisfied"
       - name: Upload EFI artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -352,6 +375,10 @@ jobs:
         #
         # Memory is set to 512M: the TLS 1.3 implementation uses a 2 MiB
         # static heap plus crypto stack frames that fit comfortably in 512M.
+        #
+        # E4.7: boot-to-marker latency is measured and checked against the
+        # 2000 ms budget.  The marker is E4.4_TLS_DONE (the last phase to
+        # complete before the panic handler).
         run: |
           # Locate OVMF_CODE.fd — the path varies across Ubuntu versions.
           OVMF_CODE=$(find /usr/share/OVMF /usr/share/ovmf -name "OVMF_CODE*.fd" 2>/dev/null \
@@ -362,15 +389,10 @@ jobs:
           fi
           echo "Using OVMF: $OVMF_CODE"
 
-          # Run QEMU.  The boot task runs all phases (Embassy + smoltcp TCP +
-          # TLS 1.3) then panics.  120 s is ample — TLS loopback completes
-          # in ms on hardware.
+          # Run QEMU with boot-time measurement.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
           # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
-          #   QEMU's default qemu64 CPU model does not include RDRAND; without
-          #   this flag the CPUID feature check in RdRand::is_available()
-          #   returns false and run_tls_loopback_test() returns an error before
-          #   writing E4.4_TLS_DONE to COM1.
+          BOOT_START=$(date +%s%3N)
           timeout 120 qemu-system-x86_64 \
             -cpu qemu64,+rdrand \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
@@ -380,9 +402,12 @@ jobs:
             -m 512M \
             -no-reboot \
             2>/tmp/qemu-stderr.txt || true
+          BOOT_END=$(date +%s%3N)
+          BOOT_MS=$((BOOT_END - BOOT_START))
 
           echo "=== QEMU serial output ===" && cat /tmp/qemu-serial.txt || true
           echo "=== QEMU stderr ===" && cat /tmp/qemu-stderr.txt || true
+          echo "Boot-to-completion latency: ${BOOT_MS} ms"
 
           # E4.2 exit criterion: Embassy async task completed and signalled.
           grep -q "E4.2_TASK_DONE" /tmp/qemu-serial.txt && \
@@ -403,6 +428,13 @@ jobs:
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \
             { echo "❌ ANIMA_PANIC not found in serial output"; exit 1; }
+
+          # E4.7 exit criterion 1: boot-to-marker within 2000 ms.
+          if [ "$BOOT_MS" -gt 2000 ]; then
+            echo "❌ Boot latency ${BOOT_MS} ms exceeds 2000 ms budget (E4.7)"
+            exit 1
+          fi
+          echo "✅ E4.7 exit criterion 1 met: boot latency ${BOOT_MS} ms ≤ 2000 ms"
       - name: Upload QEMU serial log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

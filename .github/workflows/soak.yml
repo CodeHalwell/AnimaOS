@@ -1,0 +1,165 @@
+name: MicroVM Soak (E4.7)
+
+# E4.7 exit criterion 2: 30-day soak without unscheduled restart.
+#
+# This workflow provides two modes:
+#   smoke-test  — 5-minute dry-run CI gate (no QEMU).  Runs on every PR to
+#                 verify the soak harness itself is healthy.
+#   full-soak   — Manual dispatch only, for the production-readiness 30-day
+#                 run.  Requires a self-hosted or GitHub-hosted runner with
+#                 QEMU and OVMF available.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '"smoke" for dry-run CI check, "full" for QEMU-backed run'
+        required: false
+        default: smoke
+      iterations:
+        description: 'Number of boot iterations (full mode only, default 8640 = 30 days @ 5-min cycle)'
+        required: false
+        default: '8640'
+      timeout_secs:
+        description: 'Per-iteration timeout in seconds (default 30)'
+        required: false
+        default: '30'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'xtask/src/soak.rs'
+      - '.github/workflows/soak.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  soak-smoke:
+    name: Soak smoke-test (dry-run, E4.7)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Cache cargo (xtask)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-
+
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml
+
+      - name: Run soak smoke-test (dry-run)
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- soak \
+            --dry-run \
+            --iterations 3 \
+            --output artifacts/soak-smoke
+
+      - name: Verify manifest schema
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          with open("artifacts/soak-smoke/manifest.json") as f:
+              m = json.load(f)
+          assert m["completed_iterations"] == 3, f"expected 3, got {m['completed_iterations']}"
+          assert m["successful_iterations"] == 3, f"expected 3, got {m['successful_iterations']}"
+          assert m["timeout_iterations"] == 0
+          assert m["unscheduled_exit_iterations"] == 0
+          assert len(m["iterations"]) == 3
+          assert all(i["outcome"] == "dry_run" for i in m["iterations"]), \
+              "all iterations should be dry_run"
+          print("✅ Manifest schema valid")
+          EOF
+
+      - name: Upload soak smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: soak-smoke-manifest-${{ github.run_id }}
+          path: artifacts/soak-smoke/
+          retention-days: 7
+
+  soak-full:
+    name: Soak full run (QEMU, E4.7)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'full'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf
+
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --component rust-src
+          rustup target add --toolchain nightly x86_64-unknown-uefi
+
+      - name: Build microVM EFI image (release)
+        working-directory: kernels/microvm
+        run: cargo +nightly build --release
+
+      - name: Cache cargo (xtask)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xtask/target
+          key: ${{ runner.os }}-xtask-${{ hashFiles('xtask/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xtask-
+
+      - name: Build xtask
+        run: cargo build --manifest-path xtask/Cargo.toml
+
+      - name: Run microVM soak
+        run: |
+          cargo run --manifest-path xtask/Cargo.toml -- soak \
+            --efi kernels/microvm/target/x86_64-unknown-uefi/release/anima-microvm.efi \
+            --iterations ${{ github.event.inputs.iterations }} \
+            --timeout-secs ${{ github.event.inputs.timeout_secs }} \
+            --output artifacts/soak-full
+
+      - name: Verify soak success
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          with open("artifacts/soak-full/manifest.json") as f:
+              m = json.load(f)
+          total = m["completed_iterations"]
+          ok = m["successful_iterations"]
+          failures = m["timeout_iterations"] + m["unscheduled_exit_iterations"]
+          print(f"Completed: {total}, OK: {ok}, Failures: {failures}")
+          print(f"Mean boot latency: {m['mean_boot_latency_ms']:.1f} ms")
+          print(f"P95  boot latency: {m['p95_boot_latency_ms']:.1f} ms")
+          if failures > 0:
+              print(f"❌ {failures} iteration(s) failed")
+              sys.exit(1)
+          if ok < 1:
+              print("❌ No successful iterations")
+              sys.exit(1)
+          # E4.7 exit criterion 1: boot within 2 s on average.
+          if m["mean_boot_latency_ms"] > 2000:
+              print(f"❌ Mean boot latency {m['mean_boot_latency_ms']:.1f} ms exceeds 2000 ms budget")
+              sys.exit(1)
+          print("✅ Soak passed all assertions")
+          EOF
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: soak-full-manifest-${{ github.run_id }}
+          path: artifacts/soak-full/
+          retention-days: 30
