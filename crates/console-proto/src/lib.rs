@@ -559,6 +559,89 @@ mod tests {
         assert!(parse_input_line(r#"{"priority":"Low"}"#).is_none());
     }
 
+    // ── Escape-sequence round-trip suite ────────────────────────────────────
+    //
+    // The kernel RX path (`extract_json_string`) must decode exactly what the
+    // kernel TX path (`write_json_str`) encodes, for every byte an operator
+    // might send. These cases exercise the JSON-mandated escapes (U+0000–U+001F,
+    // quote, backslash) plus pass-through bytes (DEL, multi-byte UTF-8) that the
+    // writer leaves raw.
+
+    /// Adversarial inputs that have historically broken hand-rolled JSON codecs.
+    fn escape_torture_strings() -> alloc::vec::Vec<String> {
+        let mut cases = vec![
+            String::new(),                                 // empty
+            "\u{0000}".to_string(),                        // NUL
+            "before\u{0000}after".to_string(),             // embedded NUL
+            "\t\n\r".to_string(),                          // the named escapes
+            "quote\"end".to_string(),                      // double quote
+            "back\\slash".to_string(),                     // backslash
+            "forward/slash".to_string(),                   // solidus (left raw)
+            "\\\"\\\"".to_string(),                        // alternating backslash/quote
+            "say \\\"hi\\\" now".to_string(),              // pre-escaped-looking literal
+            "emoji 😀 and 中文 and \u{1F680}".to_string(), // multi-byte / astral UTF-8
+            "DEL\u{7f}end".to_string(),                    // 0x7F is valid raw JSON
+            "tab\tnewline\nreturn\rvertical\u{000b}formfeed\u{000c}".to_string(),
+            "x".repeat(10_000), // long body
+        ];
+        // Every C0 control code, individually.
+        for c in 0u32..0x20 {
+            cases.push(char::from_u32(c).unwrap().to_string());
+        }
+        cases
+    }
+
+    #[test]
+    fn write_then_extract_round_trips_every_escape() {
+        for s in escape_torture_strings() {
+            let mut line = String::from(r#"{"text":"#);
+            write_json_str(&mut line, &s);
+            line.push('}');
+            let input = parse_input_line(&line)
+                .unwrap_or_else(|| panic!("manual round-trip failed to parse: {line:?}"));
+            assert_eq!(input.text, s, "manual round-trip mismatch for {s:?}");
+        }
+    }
+
+    #[test]
+    fn write_json_str_escapes_control_bytes_not_raw() {
+        // A C0 control code must be emitted as \u00xx, never as a raw byte that
+        // would corrupt the NDJSON line framing.
+        let mut out = String::new();
+        write_json_str(&mut out, "a\u{0001}b\u{001f}c");
+        assert!(out.contains("\\u0001"), "U+0001 not escaped: {out}");
+        assert!(out.contains("\\u001f"), "U+001F not escaped: {out}");
+        assert!(
+            !out.chars().any(|c| (c as u32) < 0x20),
+            "raw control byte leaked into output: {out:?}"
+        );
+    }
+
+    #[test]
+    fn extract_json_string_stops_at_unescaped_quote_not_escaped_one() {
+        // The closing quote must be the first *unescaped* one, so an escaped
+        // quote inside the value does not truncate it early.
+        let line = r#"{"text":"a\"b","priority":"High"}"#;
+        let input = parse_input_line(line).expect("parses");
+        assert_eq!(input.text, "a\"b");
+        assert_eq!(input.priority, Priority::High);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn manually_written_escapes_parse_back_through_serde() {
+        // The kernel↔serde interop contract for nasty operator text: anything
+        // the dependency-free writer emits must also parse via serde_json.
+        for s in escape_torture_strings() {
+            let mut line = String::from(r#"{"text":"#);
+            write_json_str(&mut line, &s);
+            line.push('}');
+            let input = json::input_from_line(&line)
+                .unwrap_or_else(|| panic!("serde failed to parse manual line: {line:?}"));
+            assert_eq!(input.text, s, "serde interop mismatch for {s:?}");
+        }
+    }
+
     #[test]
     fn to_ndjson_emits_type_tag_for_every_variant() {
         let events = vec![

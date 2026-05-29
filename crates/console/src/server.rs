@@ -285,12 +285,30 @@ impl ConsoleServer {
         content_length: usize,
         out: &mut TcpStream,
     ) -> std::io::Result<()> {
-        // Cap the body to a sane size to bound memory regardless of policy.
+        // The operator is a potentially-compromised channel (threat model §5),
+        // so bound the request body and reject anything we cannot faithfully
+        // decode rather than silently truncating it or lossily mangling bytes
+        // into U+FFFD — either of which could smuggle an unintended command
+        // past the policy bounds applied downstream.
         const MAX_BODY: usize = 64 * 1024;
-        let to_read = content_length.min(MAX_BODY);
-        let mut body = vec![0u8; to_read];
+        if content_length > MAX_BODY {
+            return write_json(
+                out,
+                413,
+                "Payload Too Large",
+                br#"{"ok":false,"error":"request body exceeds 64 KiB limit"}"#,
+            );
+        }
+        let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body)?;
-        let body = String::from_utf8_lossy(&body);
+        let Ok(body) = String::from_utf8(body) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+            );
+        };
 
         let Some(input) = json::input_from_line(&body) else {
             return write_json(
@@ -555,6 +573,59 @@ mod tests {
             "gate_override_reason must carry the force value"
         );
         assert!(matches!(&pkt.packet, senses::SensoryPacket::Text(t) if t.contains("rollback")));
+    }
+
+    fn http_request_bytes(addr: std::net::SocketAddr, raw: &[u8]) -> String {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(raw).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buf = String::new();
+        let _ = s.read_to_string(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn post_guidance_rejects_oversized_body() {
+        // A Content-Length beyond the 64 KiB cap must be rejected outright
+        // rather than silently truncated to a partial (and possibly altered)
+        // command. The server should answer before reading the body.
+        let (addr, _hub, bridge) = start();
+        let raw = "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: 70000\r\nConnection: close\r\n\r\n";
+        let resp = http_request(addr, raw);
+        assert!(
+            resp.contains("413"),
+            "expected 413 Payload Too Large, got: {resp}"
+        );
+        assert!(
+            bridge.next_prioritized_packet().is_none(),
+            "no packet should be enqueued for a rejected oversized body"
+        );
+    }
+
+    #[test]
+    fn post_guidance_rejects_non_utf8_body() {
+        // Invalid UTF-8 must be rejected, not lossily replaced with U+FFFD,
+        // which could smuggle a mangled command past the policy bounds.
+        let (addr, _hub, bridge) = start();
+        // Body: {"text":"<0xFF>"} — the 0xFF byte is not valid UTF-8.
+        let mut body = br#"{"text":""#.to_vec();
+        body.push(0xFF);
+        body.extend_from_slice(br#""}"#);
+        let mut raw = format!(
+            "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&body);
+        let resp = http_request_bytes(addr, &raw);
+        assert!(
+            resp.contains("400"),
+            "expected 400 Bad Request for non-UTF-8, got: {resp}"
+        );
+        assert!(
+            bridge.next_prioritized_packet().is_none(),
+            "no packet should be enqueued for a rejected non-UTF-8 body"
+        );
     }
 
     #[test]
