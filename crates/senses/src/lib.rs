@@ -75,6 +75,12 @@ pub struct HumanGuidance {
     pub policy_hint: String,
     /// Maximum allowed text-input length in bytes.  `None` means unlimited.
     pub max_text_length: Option<usize>,
+    /// Maximum allowed PCM frame length in samples.  `None` means unlimited.
+    ///
+    /// Bounds the per-frame allocation accepted from the (potentially
+    /// compromised) operator channel so a single oversized frame cannot exhaust
+    /// memory before downstream speech-to-text ever runs (threat model T-3).
+    pub max_pcm_samples: Option<usize>,
     /// Text inputs that start with any of these prefixes are rejected.
     pub blocked_prefixes: Vec<String>,
 }
@@ -85,6 +91,7 @@ impl HumanGuidance {
         Self {
             policy_hint: policy_hint.into(),
             max_text_length: None,
+            max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
         }
     }
@@ -307,8 +314,10 @@ impl SensoryBridge {
     ///
     /// # Errors
     ///
-    /// Returns [`SensoryBridgeError::PolicyViolation`] when `samples` is empty
-    /// (an empty PCM frame carries no useful information).
+    /// Returns [`SensoryBridgeError::PolicyViolation`] when:
+    /// - `samples` is empty (an empty PCM frame carries no useful information).
+    /// - `samples.len()` exceeds [`HumanGuidance::max_pcm_samples`] (when set) —
+    ///   bounds operator-channel allocation against a resource-exhaustion DoS.
     pub fn packetize_pcm_checked(
         &self,
         samples: Vec<i16>,
@@ -318,6 +327,16 @@ impl SensoryBridge {
             return Err(SensoryBridgeError::PolicyViolation {
                 reason: "PCM frame must not be empty".into(),
             });
+        }
+        if let Some(max_samples) = self.active_bounds.lock().expect("poisoned").max_pcm_samples {
+            if samples.len() > max_samples {
+                return Err(SensoryBridgeError::PolicyViolation {
+                    reason: format!(
+                        "PCM frame length {} exceeds policy limit {max_samples}",
+                        samples.len()
+                    ),
+                });
+            }
         }
         self.queue
             .lock()
@@ -456,6 +475,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "strict-len".to_string(),
             max_text_length: Some(5),
+            max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
         });
         let err = bridge
@@ -470,6 +490,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "strict-len".to_string(),
             max_text_length: Some(5),
+            max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
         });
         bridge
@@ -483,6 +504,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "no-sys".to_string(),
             max_text_length: None,
+            max_pcm_samples: None,
             blocked_prefixes: vec!["SYSTEM:".to_string(), "OVERRIDE:".to_string()],
         });
         let err = bridge
@@ -502,6 +524,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "no-sys".to_string(),
             max_text_length: None,
+            max_pcm_samples: None,
             blocked_prefixes: vec!["SYSTEM:".to_string()],
         });
         bridge
@@ -518,6 +541,38 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
         assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn checked_pcm_rejects_frame_exceeding_max_samples_without_panicking() {
+        let bridge = SensoryBridge::new(HumanGuidance {
+            policy_hint: "bounded-pcm".to_string(),
+            max_text_length: None,
+            max_pcm_samples: Some(3),
+            blocked_prefixes: Vec::new(),
+        });
+        let err = bridge
+            .packetize_pcm_checked(vec![1, 2, 3, 4], SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(
+            !bridge.has_packets(),
+            "queue must stay empty after an oversized PCM frame is rejected"
+        );
+    }
+
+    #[test]
+    fn checked_pcm_accepts_frame_exactly_at_max_samples() {
+        let bridge = SensoryBridge::new(HumanGuidance {
+            policy_hint: "bounded-pcm".to_string(),
+            max_text_length: None,
+            max_pcm_samples: Some(3),
+            blocked_prefixes: Vec::new(),
+        });
+        bridge
+            .packetize_pcm_checked(vec![1, 2, 3], SensoryPriority::Normal)
+            .expect("exactly-at-limit PCM frame should be accepted");
+        assert!(bridge.has_packets());
     }
 
     // ── Forced packetise (E6.6) ───────────────────────────────────────────────
@@ -542,6 +597,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "strict".into(),
             max_text_length: Some(5),
+            max_pcm_samples: None,
             blocked_prefixes: vec!["INJECT:".into()],
         });
         // Length violation
@@ -624,6 +680,7 @@ mod tests {
         bridge.set_active_bounds(HumanGuidance {
             policy_hint: "strict".to_string(),
             max_text_length: Some(4),
+            max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
         });
 
