@@ -28,6 +28,203 @@ use std::io::Write;
 #[cfg(feature = "std")]
 use std::sync::{Arc, Mutex};
 
+// ── Tamper-evidence chain (EX.4 / threat T-8) ───────────────────────────────
+//
+// The durable JSONL log is append-only but, on its own, not tamper-evident: a
+// host-privileged attacker could edit, reorder, or truncate entries and leave
+// no trace. When `ANIMA_AUDIT_HMAC_KEY` is set, every persisted line is also
+// chained into a detached `<log>.hmac` sidecar:
+//
+//     mac_i = HMAC-SHA256(key, mac_{i-1} ‖ line_i)        (mac_0 = 32 zero bytes)
+//
+// Each MAC commits to the entire prefix of the log, so any modification,
+// reordering, insertion, or truncation breaks verification from that point on
+// — unless the attacker also knows the key. The main JSONL stays byte-identical
+// (the console tailer is unaffected); the sidecar is purely additive. This is
+// the bridge control noted in the threat model: it blocks tampering by anyone
+// without the key, while full assurance against a key-holding host awaits the
+// Stage-4 microVM attestation that seals the chain root.
+
+/// HMAC-SHA256 over a sequence of message parts (RFC 2104), built on the
+/// already-vendored `sha2` crate so no `hmac` dependency is added.
+#[cfg(feature = "std")]
+fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+
+    // Normalise the key to one block: hash if longer, zero-pad if shorter.
+    let mut block_key = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let digest = Sha256::digest(key);
+        block_key[..32].copy_from_slice(&digest);
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= block_key[i];
+        opad[i] ^= block_key[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    for p in parts {
+        inner.update(p);
+    }
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+
+    let mut mac = [0u8; 32];
+    mac.copy_from_slice(&outer.finalize());
+    mac
+}
+
+/// Lowercase-hex encode a 32-byte MAC.
+#[cfg(feature = "std")]
+fn to_hex(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(64);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+/// Decode a 64-char lowercase/uppercase hex string into a 32-byte MAC.
+#[cfg(feature = "std")]
+fn from_hex(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    let bytes = s.as_bytes();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = (bytes[2 * i] as char).to_digit(16)?;
+        let lo = (bytes[2 * i + 1] as char).to_digit(16)?;
+        *slot = (hi * 16 + lo) as u8;
+    }
+    Some(out)
+}
+
+/// The sidecar path for a JSONL log: `<path>.hmac`.
+#[cfg(feature = "std")]
+fn chain_sidecar_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".hmac");
+    std::path::PathBuf::from(s)
+}
+
+/// Read the last MAC from an existing sidecar to resume the chain, or the
+/// genesis value (32 zero bytes) when there is no usable prior MAC.
+#[cfg(feature = "std")]
+fn read_last_chain_mac(chain_path: &std::path::Path) -> [u8; 32] {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(chain_path) else {
+        return [0u8; 32];
+    };
+    let mut last = None;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.trim().is_empty() {
+            last = Some(line);
+        }
+    }
+    last.as_deref().and_then(from_hex).unwrap_or([0u8; 32])
+}
+
+/// Per-log state for the HMAC tamper-evidence sidecar.
+#[cfg(feature = "std")]
+struct IntegrityChain {
+    /// The append-only `.hmac` sidecar file.
+    file: std::fs::File,
+    /// HMAC key (kept in memory for the process lifetime).
+    key: Vec<u8>,
+    /// Running MAC of the chain so far (`mac_{i-1}`), seeded from the existing
+    /// sidecar on open so appends extend an existing chain correctly.
+    prev: [u8; 32],
+}
+
+/// Outcome of verifying a JSONL audit log against its HMAC sidecar.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainVerification {
+    /// Every line verifies against the chain; `entries` lines checked.
+    Ok {
+        /// Number of audit lines covered by the chain.
+        entries: usize,
+    },
+    /// The log and sidecar disagree on length (truncation or a dropped MAC).
+    LengthMismatch {
+        /// Lines in the `.jsonl` log.
+        jsonl_lines: usize,
+        /// Lines in the `.hmac` sidecar.
+        chain_lines: usize,
+    },
+    /// The MAC at `index` does not match the recomputed value — the line (or an
+    /// earlier one) was altered, reordered, or the wrong key was supplied.
+    Tampered {
+        /// Zero-based line index of the first divergence.
+        index: usize,
+    },
+    /// The sidecar line at `index` is not a 64-char hex MAC.
+    MalformedChainLine {
+        /// Zero-based line index of the malformed MAC.
+        index: usize,
+    },
+}
+
+/// Recompute the HMAC chain over `jsonl_path` and compare it against the MACs
+/// recorded in `chain_path`, reporting the first divergence if any.
+///
+/// This is the read-side counterpart to the sidecar written when
+/// `ANIMA_AUDIT_HMAC_KEY` is configured; it lets an operator (or a CI job)
+/// confirm a persisted audit log has not been tampered with since capture.
+#[cfg(feature = "std")]
+pub fn verify_audit_chain(
+    jsonl_path: impl AsRef<std::path::Path>,
+    chain_path: impl AsRef<std::path::Path>,
+    key: &[u8],
+) -> std::io::Result<ChainVerification> {
+    use std::io::BufRead;
+
+    let read_lines = |p: &std::path::Path| -> std::io::Result<Vec<String>> {
+        let f = std::fs::File::open(p)?;
+        std::io::BufReader::new(f).lines().collect()
+    };
+
+    let jsonl = read_lines(jsonl_path.as_ref())?;
+    let chain = read_lines(chain_path.as_ref())?;
+
+    if jsonl.len() != chain.len() {
+        return Ok(ChainVerification::LengthMismatch {
+            jsonl_lines: jsonl.len(),
+            chain_lines: chain.len(),
+        });
+    }
+
+    let mut prev = [0u8; 32];
+    for (i, (line, recorded)) in jsonl.iter().zip(chain.iter()).enumerate() {
+        let Some(recorded_mac) = from_hex(recorded) else {
+            return Ok(ChainVerification::MalformedChainLine { index: i });
+        };
+        let mac = hmac_sha256(key, &[prev.as_slice(), line.as_bytes()]);
+        if mac != recorded_mac {
+            return Ok(ChainVerification::Tampered { index: i });
+        }
+        prev = mac;
+    }
+
+    Ok(ChainVerification::Ok {
+        entries: jsonl.len(),
+    })
+}
+
 /// A single observable lifecycle event.
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
@@ -396,6 +593,11 @@ pub struct AuditLog {
     /// prevent performance degradation from repeatedly locking a broken sink.
     #[cfg(feature = "std")]
     sink_failed: Arc<std::sync::atomic::AtomicBool>,
+    /// Optional HMAC tamper-evidence sidecar, shared across clones so every
+    /// handle extends the same chain. `None` unless `ANIMA_AUDIT_HMAC_KEY` (or
+    /// [`AuditLog::with_file_hmac`]) configured one.
+    #[cfg(feature = "std")]
+    integrity: Option<Arc<Mutex<IntegrityChain>>>,
 }
 
 impl std::fmt::Debug for AuditLog {
@@ -406,7 +608,8 @@ impl std::fmt::Debug for AuditLog {
         {
             use std::sync::atomic::Ordering;
             d.field("has_file_sink", &self.file_sink.is_some())
-                .field("sink_failed", &self.sink_failed.load(Ordering::Relaxed));
+                .field("sink_failed", &self.sink_failed.load(Ordering::Relaxed))
+                .field("has_integrity_chain", &self.integrity.is_some());
         }
         d.finish()
     }
@@ -422,6 +625,8 @@ impl Clone for AuditLog {
             // all clones — no broken-fd thundering herd.
             #[cfg(feature = "std")]
             sink_failed: self.sink_failed.clone(),
+            #[cfg(feature = "std")]
+            integrity: self.integrity.clone(),
         }
     }
 }
@@ -441,6 +646,8 @@ impl AuditLog {
             file_sink: None,
             #[cfg(feature = "std")]
             sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "std")]
+            integrity: None,
         }
     }
 
@@ -456,6 +663,40 @@ impl AuditLog {
             entries: Vec::new(),
             file_sink: Some(Arc::new(Mutex::new(file))),
             sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            integrity: None,
+        })
+    }
+
+    /// Like [`with_file`](Self::with_file) but also opens an HMAC tamper-evidence
+    /// sidecar at `<path>.hmac`, keyed by `key`, that chains every persisted
+    /// line (threat T-8).  Use [`verify_audit_chain`] to check it later.
+    ///
+    /// If a sidecar already exists, its last MAC seeds the running chain so
+    /// appends extend the existing chain rather than restarting it.
+    #[cfg(feature = "std")]
+    pub fn with_file_hmac(path: impl AsRef<std::path::Path>, key: &[u8]) -> std::io::Result<Self> {
+        let path = path.as_ref();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+
+        let chain_path = chain_sidecar_path(path);
+        let prev = read_last_chain_mac(&chain_path);
+        let chain_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&chain_path)?;
+
+        Ok(Self {
+            entries: Vec::new(),
+            file_sink: Some(Arc::new(Mutex::new(file))),
+            sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            integrity: Some(Arc::new(Mutex::new(IntegrityChain {
+                file: chain_file,
+                key: key.to_vec(),
+                prev,
+            }))),
         })
     }
 
@@ -498,7 +739,16 @@ impl AuditLog {
                     );
                 }
             }
-            match Self::with_file(&path) {
+            // When an HMAC key is configured, chain the log into a tamper-
+            // evidence sidecar; otherwise open the plain durable sink.
+            let key = std::env::var("ANIMA_AUDIT_HMAC_KEY")
+                .ok()
+                .filter(|k| !k.is_empty());
+            let opened = match &key {
+                Some(k) => Self::with_file_hmac(&path, k.as_bytes()),
+                None => Self::with_file(&path),
+            };
+            match opened {
                 Ok(log) => return log,
                 Err(e) => eprintln!(
                     "anima-audit: failed to open audit file {}: {e} — falling back to in-memory",
@@ -531,19 +781,32 @@ impl AuditLog {
             if !self.sink_failed.load(Ordering::Relaxed) {
                 if let Some(sink) = &self.file_sink {
                     match serde_json::to_string(&entry) {
-                        Ok(line) => match sink.lock() {
-                            Ok(mut f) => {
-                                let write_ok = writeln!(f, "{line}").is_ok() && f.flush().is_ok();
-                                if !write_ok {
-                                    eprintln!("anima-audit: write/flush to file sink failed — sink disabled");
-                                    self.sink_failed.store(true, Ordering::Relaxed);
+                        Ok(line) => {
+                            let wrote = match sink.lock() {
+                                Ok(mut f) => {
+                                    let write_ok =
+                                        writeln!(f, "{line}").is_ok() && f.flush().is_ok();
+                                    if !write_ok {
+                                        eprintln!("anima-audit: write/flush to file sink failed — sink disabled");
+                                        self.sink_failed.store(true, Ordering::Relaxed);
+                                    }
+                                    write_ok
                                 }
+                                Err(_) => {
+                                    eprintln!(
+                                        "anima-audit: file sink mutex poisoned — sink disabled"
+                                    );
+                                    self.sink_failed.store(true, Ordering::Relaxed);
+                                    false
+                                }
+                            };
+                            // Extend the HMAC chain only after the line is durably
+                            // written, so the sidecar never commits to a line the
+                            // log itself is missing.
+                            if wrote {
+                                self.extend_chain(&line);
                             }
-                            Err(_) => {
-                                eprintln!("anima-audit: file sink mutex poisoned — sink disabled");
-                                self.sink_failed.store(true, Ordering::Relaxed);
-                            }
-                        },
+                        }
                         Err(e) => {
                             // Serialisation failures are entry-specific (e.g. NaN/Inf in a
                             // GateDecision field) — skip only this entry rather than disabling
@@ -555,6 +818,33 @@ impl AuditLog {
             }
         }
         self.entries.push(entry);
+    }
+
+    /// Append one MAC to the HMAC tamper-evidence sidecar, advancing the chain.
+    /// A no-op when no integrity sidecar is configured.
+    #[cfg(feature = "std")]
+    fn extend_chain(&self, line: &str) {
+        use std::sync::atomic::Ordering;
+        let Some(integ) = &self.integrity else {
+            return;
+        };
+        match integ.lock() {
+            Ok(mut st) => {
+                let mac = hmac_sha256(&st.key, &[st.prev.as_slice(), line.as_bytes()]);
+                let hex = to_hex(&mac);
+                let chain_ok = writeln!(st.file, "{hex}").is_ok() && st.file.flush().is_ok();
+                if chain_ok {
+                    st.prev = mac;
+                } else {
+                    eprintln!("anima-audit: write/flush to HMAC sidecar failed — sink disabled");
+                    self.sink_failed.store(true, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                eprintln!("anima-audit: HMAC sidecar mutex poisoned — sink disabled");
+                self.sink_failed.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Borrows the full entry sequence.
@@ -570,5 +860,186 @@ impl AuditLog {
     /// Returns true when no entries have been recorded.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "std"))]
+mod integrity_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Unique temp path so parallel tests never collide (no tempfile dev-dep).
+    fn temp_log_path(tag: &str) -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let unique = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "anima-audit-{tag}-{}-{nanos}-{unique}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    /// Remove a log and its sidecar after a test.
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(chain_sidecar_path(path));
+    }
+
+    fn entry(id: &str) -> AuditEntry {
+        AuditEntry::SleepEntered {
+            agent_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_test_case_1() {
+        // RFC 4231 §4.2: key = 0x0b × 20, data = "Hi There".
+        let key = [0x0bu8; 20];
+        let mac = hmac_sha256(&key, &[b"Hi There"]);
+        assert_eq!(
+            to_hex(&mac),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn multi_part_hmac_equals_concatenated_message() {
+        // The chain feeds (prev ‖ line) as two parts; that must equal hashing
+        // the single concatenated buffer.
+        let key = b"chain-key";
+        let split = hmac_sha256(key, &[b"abc", b"def"]);
+        let joined = hmac_sha256(key, &[b"abcdef"]);
+        assert_eq!(split, joined);
+    }
+
+    #[test]
+    fn chain_verifies_for_untampered_log() {
+        let path = temp_log_path("ok");
+        let key = b"operator-secret";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open");
+            for i in 0..5 {
+                log.push(entry(&format!("agent-{i}")));
+            }
+        }
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(result, ChainVerification::Ok { entries: 5 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn chain_detects_a_tampered_entry() {
+        let path = temp_log_path("tamper");
+        let key = b"k";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open");
+            log.push(entry("alpha"));
+            log.push(entry("bravo"));
+            log.push(entry("charlie"));
+        }
+        // Rewrite the middle line in place — the kind of edit a host-privileged
+        // attacker would make to erase an action from the trail.
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = original.lines().map(String::from).collect();
+        lines[1] = serde_json::to_string(&entry("EVIL")).unwrap();
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(result, ChainVerification::Tampered { index: 1 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn chain_detects_truncation() {
+        let path = temp_log_path("trunc");
+        let key = b"k";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open");
+            log.push(entry("one"));
+            log.push(entry("two"));
+            log.push(entry("three"));
+        }
+        // Drop the last log line but keep the sidecar — a classic "cut the tail
+        // off the record" attack.
+        let original = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<&str> = original.lines().take(2).collect();
+        std::fs::write(&path, format!("{}\n", kept.join("\n"))).unwrap();
+
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(
+            result,
+            ChainVerification::LengthMismatch {
+                jsonl_lines: 2,
+                chain_lines: 3,
+            }
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn verification_fails_under_the_wrong_key() {
+        let path = temp_log_path("wrongkey");
+        {
+            let mut log = AuditLog::with_file_hmac(&path, b"right-key").expect("open");
+            log.push(entry("solo"));
+        }
+        let result =
+            verify_audit_chain(&path, chain_sidecar_path(&path), b"wrong-key").expect("verify");
+        assert_eq!(result, ChainVerification::Tampered { index: 0 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn malformed_sidecar_line_is_reported() {
+        let path = temp_log_path("malformed");
+        let key = b"k";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open");
+            log.push(entry("x"));
+        }
+        std::fs::write(chain_sidecar_path(&path), "not-a-valid-hex-mac\n").unwrap();
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(result, ChainVerification::MalformedChainLine { index: 0 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn chain_resumes_correctly_across_reopen() {
+        let path = temp_log_path("resume");
+        let key = b"persistent-key";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open 1");
+            log.push(entry("first"));
+            log.push(entry("second"));
+        }
+        // Reopen the same paths: the chain must seed `prev` from the existing
+        // sidecar so appended entries extend (not restart) the chain.
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key).expect("open 2");
+            log.push(entry("third"));
+        }
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(result, ChainVerification::Ok { entries: 3 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn plain_with_file_writes_no_sidecar() {
+        let path = temp_log_path("plain");
+        {
+            let mut log = AuditLog::with_file(&path).expect("open");
+            log.push(entry("nochain"));
+        }
+        assert!(
+            !chain_sidecar_path(&path).exists(),
+            "with_file must not create an HMAC sidecar"
+        );
+        cleanup(&path);
     }
 }
