@@ -318,8 +318,11 @@ impl ConsoleServer {
                 // Echo the accepted guidance into the event feed so every
                 // connected operator sees what was injected (and by implication,
                 // that it is now subject to the gate, not executed directly).
-                let detail = if input.force.is_some() {
-                    format!("[FORCED:Critical] {}", truncate(&input.text, 200))
+                let detail = if let Some(reason) = input.force.as_deref() {
+                    format!(
+                        "[FORCED:Critical] (Reason: {reason}) {}",
+                        truncate(&input.text, 200)
+                    )
                 } else {
                     format!(
                         "[{}] {}",
@@ -542,16 +545,16 @@ mod tests {
         let resp = http_request(addr, &raw);
         assert!(resp.contains("202 Accepted"), "resp: {resp}");
 
-        let pkt = bridge.next_prioritized_packet().expect("forced packet enqueued");
+        let pkt = bridge
+            .next_prioritized_packet()
+            .expect("forced packet enqueued");
         assert_eq!(pkt.priority, SensoryPriority::Critical);
         assert_eq!(
             pkt.gate_override_reason.as_deref(),
             Some("on-call escalation"),
             "gate_override_reason must carry the force value"
         );
-        assert!(
-            matches!(&pkt.packet, senses::SensoryPacket::Text(t) if t.contains("rollback"))
-        );
+        assert!(matches!(&pkt.packet, senses::SensoryPacket::Text(t) if t.contains("rollback")));
     }
 
     #[test]

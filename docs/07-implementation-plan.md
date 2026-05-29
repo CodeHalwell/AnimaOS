@@ -1238,13 +1238,19 @@ not a controller.  Nothing in Stage 6 gives a human direct kernel access;
 operator guidance is always subject to policy bounds, the defence layer,
 and the Striatal Gate before any task is admitted.
 
-### Epic E6 — Operator Console ✅
+### Epic E6 — Operator Console 🟡
 
 **Scope.** One protocol, two transports: the same `console-proto` NDJSON
 types work over HTTP/SSE on the container target and over COM1 serial on
 the microVM.  Includes the `anima-console` client (TUI + tap + send),
 the `anima-hosted serve` subcommand, and the audited operator-force
 override path (E6.6).
+
+**Note on S6.5.** The microVM Phase-1 transport (S6.5) is deferred
+because it requires a `virtio-net` driver that does not yet exist in the
+QEMU CI environment.  All four exit criteria are met without S6.5; that
+story will close as a follow-on once `virtio-net` lands.  The epic is
+therefore 🟡 (partially complete) rather than ✅.
 
 **Dependencies.** E5.2 (Striatal Gate, for GateOverride), E3.3 (SensoryBridge
 for guidance ingress), EX.2 (audit log for gate decision recording).
@@ -1275,12 +1281,17 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
   carries over unchanged; only the transport changes.
 - S6.6 Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced`
   on the vita side. ✅ (`crates/senses/src/lib.rs` — `PrioritizedPacket::gate_override_reason:
-  Option<String>` field; `SensoryBridge::packetize_text_forced()` applies policy
-  bounds then sets the field at `Critical` priority; `crates/console/src/server.rs` —
-  `serve_guidance()` routes `input.force.is_some()` through `packetize_text_forced`;
-  `crates/vita/src/lib.rs` — somatic loop detects `gate_override_reason`, evaluates
-  the gate with `GateOverride::OperatorForced { reason }`, and calls `record_gate_decision()`
-  before admitting the task; 5 new tests covering the end-to-end path)
+  Option<String>` field; `SensoryBridge::packetize_text_forced()` validates that
+  the reason is non-empty, non-whitespace, and ≤ 512 bytes, then applies policy
+  bounds and enqueues at `Critical` priority; `crates/console/src/server.rs` —
+  `serve_guidance()` routes `input.force.is_some()` through `packetize_text_forced`
+  and includes the reason in the event-feed audit echo;
+  `crates/vita/src/lib.rs` — `LifecycleManager::next_sensory_task_id` persists the
+  task-ID counter across loop calls so gate-decision event IDs are globally unique;
+  somatic loop detects `gate_override_reason`, evaluates the gate with
+  `GateOverride::OperatorForced { reason }`, checks `decision.invoke` before admitting
+  the task, and calls `record_gate_decision()`; 9 new tests covering the end-to-end
+  path plus reason validation and ID uniqueness)
 
 **Exit criteria.**
 1. The container console is reachable from `cargo run --bin anima-hosted -- serve`
@@ -1296,9 +1307,15 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
    in `console::server::tests`; `packetize_text_forced_sets_gate_override_reason_and_critical_priority`
    in `senses::tests`)
 4. Policy bounds still apply to forced guidance — the operator channel is
-   treated as potentially compromised. ✅
-   (`packetize_text_forced_still_enforces_policy_bounds` in `senses::tests`;
-   `post_guidance_rejects_policy_violation` in `console::server::tests`)
+   treated as potentially compromised; `reason` is validated non-empty and
+   ≤ 512 bytes; event IDs are globally unique across loop restarts. ✅
+   (`packetize_text_forced_still_enforces_policy_bounds`,
+   `packetize_text_forced_rejects_empty_reason`,
+   `packetize_text_forced_rejects_whitespace_only_reason`,
+   `packetize_text_forced_rejects_oversized_reason` in `senses::tests`;
+   `post_guidance_rejects_policy_violation` in `console::server::tests`;
+   `forced_packets_across_two_loop_calls_produce_distinct_gate_event_ids` in
+   `vita::lib::tests`)
 
 ---
 

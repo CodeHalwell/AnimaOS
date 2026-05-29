@@ -154,6 +154,13 @@ pub struct LifecycleManager {
     /// callers (signal handlers, stress monitors, timeouts) can trip the
     /// running task via [`LifecycleManager::cancel_current_task`].
     task_cancel: Arc<Mutex<CancellationToken>>,
+    /// Monotonically increasing counter for sensory-derived task IDs.
+    ///
+    /// Persisted on the lifecycle (not reset per `somatic_execution_loop` call)
+    /// so that gate-decision audit entries carry unique event IDs even when the
+    /// loop is called multiple times on the same `LifecycleManager`.
+    /// Starts at `2^63` to avoid collisions with caller-supplied task IDs.
+    next_sensory_task_id: u64,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
@@ -237,6 +244,7 @@ impl LifecycleManager {
             backend,
             audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            next_sensory_task_id: 1u64 << 63,
             max_iterations,
             iterations: 0,
             last_pressure_level: memory::MemoryPressureEvent::Normal,
@@ -543,10 +551,6 @@ pub async fn somatic_execution_loop(
     lifecycle: &mut LifecycleManager,
     monitor: &HomeostaticMonitor,
 ) -> Result<(), LifecycleError> {
-    // Sensory-derived task IDs start at 2^63 to avoid collisions with
-    // caller-supplied IDs which conventionally use the lower half.
-    let mut sensory_task_id: u64 = 1u64 << 63;
-
     loop {
         // ── 1. Starvation-prevention boost ───────────────────────────────────
         lifecycle.scheduler.check_and_boost(&mut lifecycle.agenda);
@@ -568,6 +572,9 @@ pub async fn somatic_execution_loop(
             // before admitting the task.  The override always forces invoke=true
             // at Frontier cost class; neutral homeostatic signals are used because
             // the somatic loop hasn't yet sampled the sensor bundle for this tick.
+            let task_id = lifecycle.next_sensory_task_id;
+            lifecycle.next_sensory_task_id = lifecycle.next_sensory_task_id.wrapping_add(1);
+
             if let Some(reason) = pkt.gate_override_reason.as_deref() {
                 let event = EventFeatures {
                     urgency: 1.0,
@@ -580,7 +587,7 @@ pub async fn somatic_execution_loop(
                 let override_hint = GateOverride::OperatorForced {
                     reason: reason.to_owned(),
                 };
-                let event_id = format!("sensory-{sensory_task_id}");
+                let event_id = format!("sensory-{task_id}");
                 let decision = gate.decide(&event_id, &event, &signals, &override_hint);
                 record_gate_decision(
                     &mut lifecycle.audit,
@@ -589,12 +596,12 @@ pub async fn somatic_execution_loop(
                     &event,
                     &signals,
                 );
+                if !decision.invoke {
+                    continue;
+                }
             }
 
-            lifecycle
-                .agenda
-                .push(Task::new(sensory_task_id, tier, prompt));
-            sensory_task_id = sensory_task_id.wrapping_add(1);
+            lifecycle.agenda.push(Task::new(task_id, tier, prompt));
         }
 
         // ── 3. Policy update ──────────────────────────────────────────────────
@@ -918,7 +925,13 @@ mod tests {
 
         // An audited GateDecision entry with override_active=true must be present.
         let gate_entry = m.audit.entries().iter().find(|e| {
-            matches!(e, AuditEntry::GateDecision { override_active: true, .. })
+            matches!(
+                e,
+                AuditEntry::GateDecision {
+                    override_active: true,
+                    ..
+                }
+            )
         });
         assert!(
             gate_entry.is_some(),
@@ -955,6 +968,53 @@ mod tests {
         assert!(
             !has_gate_entry,
             "a normal packet must not produce a GateDecision audit entry"
+        );
+    }
+
+    #[test]
+    fn forced_packets_across_two_loop_calls_produce_distinct_gate_event_ids() {
+        // E6.6 fix: the next_sensory_task_id counter is persisted on
+        // LifecycleManager so that gate event IDs remain unique when
+        // somatic_execution_loop is called multiple times on the same manager.
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        let mut m = manager("agent-unique-ids", Some(2));
+
+        // First loop call: one forced packet.
+        m.senses
+            .packetize_text_forced("first command", "reason-one")
+            .expect("valid");
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // Second loop call: another forced packet.
+        m.max_iterations = Some(2);
+        m.iterations = 0;
+        m.senses
+            .packetize_text_forced("second command", "reason-two")
+            .expect("valid");
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // Collect all GateDecision event_ids from the audit log.
+        let ids: Vec<String> = m
+            .audit
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                if let AuditEntry::GateDecision { event_id, .. } = e {
+                    Some(event_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "expected two GateDecision entries; got: {ids:?}"
+        );
+        assert_ne!(
+            ids[0], ids[1],
+            "event IDs must be distinct across loop calls; both were {:?}",
+            ids[0]
         );
     }
 

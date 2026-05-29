@@ -247,12 +247,28 @@ impl SensoryBridge {
     /// - `text` is empty.
     /// - `text.len()` exceeds [`HumanGuidance::max_text_length`] (when set).
     /// - `text` starts with one of [`HumanGuidance::blocked_prefixes`].
+    /// - `reason` is empty or whitespace-only (overrides must be auditable).
+    /// - `reason.len()` exceeds 512 bytes (prevents unbounded audit entries).
     pub fn packetize_text_forced(
         &self,
         text: impl Into<String>,
         reason: impl Into<String>,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "force override reason must not be empty".into(),
+            });
+        }
+        if reason.len() > 512 {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: format!(
+                    "force override reason length {} exceeds limit 512",
+                    reason.len()
+                ),
+            });
+        }
         let bounds = self.active_bounds.lock().expect("poisoned").clone();
 
         if text.is_empty() {
@@ -281,7 +297,7 @@ impl SensoryBridge {
             .push_back(PrioritizedPacket {
                 packet: SensoryPacket::Text(text),
                 priority: SensoryPriority::Critical,
-                gate_override_reason: Some(reason.into()),
+                gate_override_reason: Some(reason),
             });
         Ok(())
     }
@@ -538,6 +554,35 @@ mod tests {
             .packetize_text_forced("INJECT: evil", "override reason")
             .unwrap_err();
         assert!(matches!(err2, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_empty_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge.packetize_text_forced("command", "").unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_whitespace_only_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_text_forced("command", "   \t  ")
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_oversized_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let long_reason = "x".repeat(513);
+        let err = bridge
+            .packetize_text_forced("command", long_reason)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
         assert!(!bridge.has_packets());
     }
 
