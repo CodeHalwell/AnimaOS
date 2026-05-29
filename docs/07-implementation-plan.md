@@ -1226,6 +1226,99 @@ degradation demo).
 
 ---
 
+## Stage 6 — Operator Interface
+
+The human-facing realisation of AnimaOS's "human-as-a-sense" model: a
+transport-agnostic wire protocol, a container HTTP/SSE console, microVM
+serial framing, and an audited operator-force override path.  The full
+design and security rationale lives in `docs/11-operator-interface.md`.
+
+The stage sequencing respects the invariant that the human is a *sense*,
+not a controller.  Nothing in Stage 6 gives a human direct kernel access;
+operator guidance is always subject to policy bounds, the defence layer,
+and the Striatal Gate before any task is admitted.
+
+### Epic E6 — Operator Console 🟡
+
+**Scope.** One protocol, two transports: the same `console-proto` NDJSON
+types work over HTTP/SSE on the container target and over COM1 serial on
+the microVM.  Includes the `anima-console` client (TUI + tap + send),
+the `anima-hosted serve` subcommand, and the audited operator-force
+override path (E6.6).
+
+**Note on S6.5.** The microVM Phase-1 transport (S6.5) is deferred
+because it requires a `virtio-net` driver that does not yet exist in the
+QEMU CI environment.  All four exit criteria are met without S6.5; that
+story will close as a follow-on once `virtio-net` lands.  The epic is
+therefore 🟡 (partially complete) rather than ✅.
+
+**Dependencies.** E5.2 (Striatal Gate, for GateOverride), E3.3 (SensoryBridge
+for guidance ingress), EX.2 (audit log for gate decision recording).
+
+**Stories.**
+- S6.1 `console-proto`: shared `no_std` wire types + NDJSON framing;
+  manual↔serde round-trip test. ✅ (`crates/console-proto/src/lib.rs` —
+  `OperatorInput`, `OperatorEvent` with 7 variants; `to_ndjson()` + `parse_input_line()`
+  for the kernel; serde helpers behind the `json` feature; `PROTOCOL_VERSION = 1`;
+  `drain_lines` shared buffer splitter; `manual_ndjson_round_trips_through_serde`
+  asserts byte-for-byte interop between the no_std kernel and serde clients)
+- S6.2 Container console: hand-rolled HTTP/SSE server + `POST /guidance` in
+  the `console` crate; `anima-hosted serve`. ✅ (`crates/console/src/server.rs` —
+  `ConsoleServer` over `std::net`; `GET /`, `GET /events` SSE, `POST /guidance`,
+  `GET /healthz`; bearer-token auth; snapshot replay on connect; heartbeat keep-alive;
+  `kernels/hosted/src/main.rs` — `cmd_serve()` boots agent + console)
+- S6.3 Operator UIs: `anima-console` TUI (pure ANSI) + embedded browser
+  dashboard. ✅ (`crates/console/src/bin/anima-console.rs` — `tui`, `tap`, `send`
+  subcommands; `crates/console/src/dashboard.rs` — self-contained HTML+JS; zero
+  third-party HTTP deps)
+- S6.4 microVM Phase 0: `ANIMA_TLM`/`ANIMA_IN` serial framing + `anima-console
+  serial` host bridge; `E6.4_CONSOLE_DONE` boot marker. ✅
+  (`kernels/microvm/src/operator_console.rs` — `emit()` / `poll_guidance()`;
+  Phase 7 of `kernel_boot_task` drives the Phase-0 demo; `E6.4_CONSOLE_DONE`
+  written to COM1; CI `microvm-boot` job asserts the marker)
+- S6.5 microVM Phase 1: `console-proto` over `smoltcp` + TLS (gated on
+  `virtio-net`). ☐ future — requires the `virtio-net` driver; the protocol
+  carries over unchanged; only the transport changes.
+- S6.6 Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced`
+  on the vita side. ✅ (`crates/senses/src/lib.rs` — `PrioritizedPacket::gate_override_reason:
+  Option<String>` field; `SensoryBridge::packetize_text_forced()` validates that
+  the reason is non-empty, non-whitespace, and ≤ 512 bytes, then applies policy
+  bounds and enqueues at `Critical` priority; `crates/console/src/server.rs` —
+  `serve_guidance()` routes `input.force.is_some()` through `packetize_text_forced`
+  and includes the reason in the event-feed audit echo;
+  `crates/vita/src/lib.rs` — `LifecycleManager::next_sensory_task_id` persists the
+  task-ID counter across loop calls so gate-decision event IDs are globally unique;
+  somatic loop detects `gate_override_reason`, evaluates the gate with
+  `GateOverride::OperatorForced { reason }`, checks `decision.invoke` before admitting
+  the task, and calls `record_gate_decision()`; 9 new tests covering the end-to-end
+  path plus reason validation and ID uniqueness)
+
+**Exit criteria.**
+1. The container console is reachable from `cargo run --bin anima-hosted -- serve`
+   and correctly ingests guidance and streams events. ✅
+   (`post_guidance_lands_in_the_bridge`, `events_stream_delivers_published_events`,
+   `healthz_returns_ok`, `root_serves_dashboard_html` in `console::server::tests`)
+2. The microVM Phase-0 demo completes and the `E6.4_CONSOLE_DONE` marker appears
+   on COM1; CI asserts it. ✅ (CI `microvm-boot` job greps for `E6.4_CONSOLE_DONE`)
+3. Forced operator guidance (`OperatorInput.force` set) produces an audited
+   `GateDecision` entry with `override_active = true` in the vita audit log. ✅
+   (`forced_operator_packet_records_gate_decision_with_override_active_true` in
+   `vita::lib::tests`; `post_guidance_with_force_produces_critical_forced_packet`
+   in `console::server::tests`; `packetize_text_forced_sets_gate_override_reason_and_critical_priority`
+   in `senses::tests`)
+4. Policy bounds still apply to forced guidance — the operator channel is
+   treated as potentially compromised; `reason` is validated non-empty and
+   ≤ 512 bytes; event IDs are globally unique across loop restarts. ✅
+   (`packetize_text_forced_still_enforces_policy_bounds`,
+   `packetize_text_forced_rejects_empty_reason`,
+   `packetize_text_forced_rejects_whitespace_only_reason`,
+   `packetize_text_forced_rejects_oversized_reason` in `senses::tests`;
+   `post_guidance_rejects_policy_violation` in `console::server::tests`;
+   `forced_packets_across_two_loop_calls_produce_distinct_gate_event_ids` in
+   `vita::lib::tests`)
+
+---
+
 ## Stage 4 — Bare-Metal Isolation and Production Verification
 
 Port to the microVM target, integrate `smoltcp` and `rustls`, complete

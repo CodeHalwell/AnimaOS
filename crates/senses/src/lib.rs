@@ -57,6 +57,10 @@ pub struct PrioritizedPacket {
     pub packet: SensoryPacket,
     /// Urgency level assigned at ingestion time.
     pub priority: SensoryPriority,
+    /// When `Some`, the packet was submitted with an operator-force override
+    /// (E6.6).  vita's somatic loop wires this to `GateOverride::OperatorForced`
+    /// and records an audited gate decision before admitting the task.
+    pub gate_override_reason: Option<String>,
 }
 
 // ── Policy bounds ─────────────────────────────────────────────────────────────
@@ -158,6 +162,7 @@ impl SensoryBridge {
             .push_back(PrioritizedPacket {
                 packet: SensoryPacket::Text(text.into()),
                 priority: SensoryPriority::Normal,
+                gate_override_reason: None,
             });
     }
 
@@ -173,6 +178,7 @@ impl SensoryBridge {
             .push_back(PrioritizedPacket {
                 packet: SensoryPacket::Pcm(samples),
                 priority: SensoryPriority::Normal,
+                gate_override_reason: None,
             });
     }
 
@@ -221,6 +227,77 @@ impl SensoryBridge {
             .push_back(PrioritizedPacket {
                 packet: SensoryPacket::Text(text),
                 priority,
+                gate_override_reason: None,
+            });
+        Ok(())
+    }
+
+    /// Validates `text` against the active policy bounds and, if accepted,
+    /// enqueues it at [`SensoryPriority::Critical`] with `gate_override_reason`
+    /// set to `reason`.
+    ///
+    /// This is the E6.6 implementation path for [`console_proto::OperatorInput::force`]:
+    /// vita's somatic loop detects the override reason and records an audited
+    /// `GateOverride::OperatorForced` entry in the audit log before admitting the
+    /// resulting task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SensoryBridgeError::PolicyViolation`] when:
+    /// - `text` is empty.
+    /// - `text.len()` exceeds [`HumanGuidance::max_text_length`] (when set).
+    /// - `text` starts with one of [`HumanGuidance::blocked_prefixes`].
+    /// - `reason` is empty or whitespace-only (overrides must be auditable).
+    /// - `reason.len()` exceeds 512 bytes (prevents unbounded audit entries).
+    pub fn packetize_text_forced(
+        &self,
+        text: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<(), SensoryBridgeError> {
+        let text = text.into();
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "force override reason must not be empty".into(),
+            });
+        }
+        if reason.len() > 512 {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: format!(
+                    "force override reason length {} exceeds limit 512",
+                    reason.len()
+                ),
+            });
+        }
+        let bounds = self.active_bounds.lock().expect("poisoned").clone();
+
+        if text.is_empty() {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "text input must not be empty".into(),
+            });
+        }
+        if let Some(max_len) = bounds.max_text_length {
+            if text.len() > max_len {
+                return Err(SensoryBridgeError::PolicyViolation {
+                    reason: format!("text length {} exceeds policy limit {max_len}", text.len()),
+                });
+            }
+        }
+        for prefix in &bounds.blocked_prefixes {
+            if text.starts_with(prefix.as_str()) {
+                return Err(SensoryBridgeError::PolicyViolation {
+                    reason: format!("text starts with blocked prefix {prefix:?}"),
+                });
+            }
+        }
+
+        self.queue
+            .lock()
+            .expect("poisoned")
+            .push_back(PrioritizedPacket {
+                packet: SensoryPacket::Text(text),
+                priority: SensoryPriority::Critical,
+                gate_override_reason: Some(reason),
             });
         Ok(())
     }
@@ -248,6 +325,7 @@ impl SensoryBridge {
             .push_back(PrioritizedPacket {
                 packet: SensoryPacket::Pcm(samples),
                 priority,
+                gate_override_reason: None,
             });
         Ok(())
     }
@@ -440,6 +518,80 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
         assert!(!bridge.has_packets());
+    }
+
+    // ── Forced packetise (E6.6) ───────────────────────────────────────────────
+
+    #[test]
+    fn packetize_text_forced_sets_gate_override_reason_and_critical_priority() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        bridge
+            .packetize_text_forced("urgent operator command", "on-call engineer override")
+            .expect("valid text should be accepted");
+        let pkt = bridge.next_prioritized_packet().unwrap();
+        assert_eq!(pkt.priority, SensoryPriority::Critical);
+        assert_eq!(
+            pkt.gate_override_reason.as_deref(),
+            Some("on-call engineer override")
+        );
+        assert!(matches!(&pkt.packet, SensoryPacket::Text(t) if t == "urgent operator command"));
+    }
+
+    #[test]
+    fn packetize_text_forced_still_enforces_policy_bounds() {
+        let bridge = SensoryBridge::new(HumanGuidance {
+            policy_hint: "strict".into(),
+            max_text_length: Some(5),
+            blocked_prefixes: vec!["INJECT:".into()],
+        });
+        // Length violation
+        let err = bridge
+            .packetize_text_forced("way too long", "override reason")
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        // Blocked prefix
+        let err2 = bridge
+            .packetize_text_forced("INJECT: evil", "override reason")
+            .unwrap_err();
+        assert!(matches!(err2, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_empty_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge.packetize_text_forced("command", "").unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_whitespace_only_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_text_forced("command", "   \t  ")
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_text_forced_rejects_oversized_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let long_reason = "x".repeat(513);
+        let err = bridge
+            .packetize_text_forced("command", long_reason)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn normal_packets_have_no_gate_override_reason() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        bridge.packetize_text("hello");
+        let pkt = bridge.next_prioritized_packet().unwrap();
+        assert_eq!(pkt.gate_override_reason, None);
     }
 
     // ── Queue inspection ─────────────────────────────────────────────────────

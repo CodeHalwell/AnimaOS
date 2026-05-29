@@ -301,30 +301,38 @@ impl ConsoleServer {
             );
         };
 
-        // An operator "force" escalates urgency to Critical and is recorded;
-        // a true audited GateOverride::OperatorForced is a vita-side concern
-        // (the gate already supports it) and is the documented follow-up.
-        let priority = if input.force.is_some() {
-            SensoryPriority::Critical
+        // E6.6: when `force` is set, route through `packetize_text_forced` so
+        // vita's somatic loop can record an audited GateOverride::OperatorForced
+        // entry.  Policy bounds still apply — the operator is a potentially-
+        // compromised channel (threat model §5 in 11-operator-interface.md).
+        let result = if let Some(reason) = input.force.as_deref() {
+            self.bridge
+                .packetize_text_forced(input.text.clone(), reason)
         } else {
-            to_sensory_priority(input.priority)
+            self.bridge
+                .packetize_text_checked(input.text.clone(), to_sensory_priority(input.priority))
         };
 
-        match self
-            .bridge
-            .packetize_text_checked(input.text.clone(), priority)
-        {
+        match result {
             Ok(()) => {
                 // Echo the accepted guidance into the event feed so every
                 // connected operator sees what was injected (and by implication,
                 // that it is now subject to the gate, not executed directly).
+                let detail = if let Some(reason) = input.force.as_deref() {
+                    format!(
+                        "[FORCED:Critical] (Reason: {reason}) {}",
+                        truncate(&input.text, 200)
+                    )
+                } else {
+                    format!(
+                        "[{}] {}",
+                        priority_label(to_sensory_priority(input.priority)),
+                        truncate(&input.text, 200)
+                    )
+                };
                 self.hub.publish(OperatorEvent::Audit {
                     kind: "OperatorGuidance".to_string(),
-                    detail: format!(
-                        "[{}] {}",
-                        priority_label(priority),
-                        truncate(&input.text, 200)
-                    ),
+                    detail,
                 });
                 write_json(out, 202, "Accepted", br#"{"ok":true}"#)
             }
@@ -521,6 +529,32 @@ mod tests {
             resp.contains("422"),
             "expected policy rejection, got: {resp}"
         );
+    }
+
+    #[test]
+    fn post_guidance_with_force_produces_critical_forced_packet() {
+        // E6.6: POST /guidance with "force" set must produce a forced packet
+        // (gate_override_reason set, priority Critical) via packetize_text_forced.
+        let (addr, _hub, bridge) = start();
+        let body = r#"{"text":"deploy the rollback","force":"on-call escalation"}"#;
+        let raw = format!(
+            "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &raw);
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+
+        let pkt = bridge
+            .next_prioritized_packet()
+            .expect("forced packet enqueued");
+        assert_eq!(pkt.priority, SensoryPriority::Critical);
+        assert_eq!(
+            pkt.gate_override_reason.as_deref(),
+            Some("on-call escalation"),
+            "gate_override_reason must carry the force value"
+        );
+        assert!(matches!(&pkt.packet, senses::SensoryPacket::Text(t) if t.contains("rollback")));
     }
 
     #[test]
