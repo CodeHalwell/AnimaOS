@@ -20,15 +20,19 @@
 //! - An optional bearer token gates every route except `/healthz`. Browsers
 //!   using `EventSource` can't set headers, so the token is also accepted as a
 //!   `?token=` query parameter for `GET /events`.
+//! - Failed token attempts are rate-limited per source IP: an address is
+//!   locked out (HTTP 429) after [`MAX_AUTH_FAILURES`] failures within
+//!   [`AUTH_FAILURE_WINDOW`], throttling brute-force guessing of a weak token.
 //! - Inbound guidance is validated against the agent's `HumanGuidance` policy
 //!   bounds by `packetize_text_checked` before it ever enters the queue, and is
 //!   then still arbitrated by the Striatal Gate. The console cannot preempt the
 //!   kernel.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use console_proto::{json, OperatorEvent, Priority};
 use senses::{SensoryBridge, SensoryBridgeError, SensoryPriority};
@@ -68,11 +72,69 @@ impl ServerConfig {
     }
 }
 
+/// Maximum failed bearer-token attempts from one source IP within
+/// [`AUTH_FAILURE_WINDOW`] before that IP is temporarily locked out.
+const MAX_AUTH_FAILURES: usize = 5;
+
+/// Trailing window over which failed-auth attempts are counted. The lockout
+/// naturally clears this long after the last counted failure.
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Per-source-IP failed-auth tracker that throttles bearer-token brute force.
+///
+/// A sliding window of failure timestamps is kept per IP; once an IP reaches
+/// [`MAX_AUTH_FAILURES`] within [`AUTH_FAILURE_WINDOW`] it is locked out until
+/// the window slides past those failures. Rejected-while-locked attempts are
+/// *not* recorded, so an attacker cannot extend their own lockout indefinitely
+/// (nor lock out a spoofed victim forever).
+#[derive(Default)]
+struct AuthRateLimiter {
+    failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+}
+
+impl AuthRateLimiter {
+    /// Drop failure timestamps for `ip` that have aged out of the window,
+    /// removing the entry entirely when none remain.
+    fn prune(map: &mut HashMap<IpAddr, Vec<Instant>>, ip: IpAddr, now: Instant) {
+        if let Some(v) = map.get_mut(&ip) {
+            v.retain(|t| now.duration_since(*t) < AUTH_FAILURE_WINDOW);
+            if v.is_empty() {
+                map.remove(&ip);
+            }
+        }
+    }
+
+    /// Whether `ip` is currently locked out.
+    fn is_locked(&self, ip: IpAddr) -> bool {
+        let mut map = self.failures.lock().expect("poisoned");
+        Self::prune(&mut map, ip, Instant::now());
+        map.get(&ip).is_some_and(|v| v.len() >= MAX_AUTH_FAILURES)
+    }
+
+    /// Record a failed attempt. Returns `true` only on the transition that
+    /// first reaches the lockout threshold, so callers can audit-log it once.
+    fn record_failure(&self, ip: IpAddr) -> bool {
+        let mut map = self.failures.lock().expect("poisoned");
+        let now = Instant::now();
+        Self::prune(&mut map, ip, now);
+        let v = map.entry(ip).or_default();
+        let was_below = v.len() < MAX_AUTH_FAILURES;
+        v.push(now);
+        was_below && v.len() >= MAX_AUTH_FAILURES
+    }
+
+    /// Clear an IP's failure history after a successful auth.
+    fn record_success(&self, ip: IpAddr) {
+        self.failures.lock().expect("poisoned").remove(&ip);
+    }
+}
+
 /// The operator console HTTP/SSE server.
 pub struct ConsoleServer {
     hub: Arc<ConsoleHub>,
     bridge: SensoryBridge,
     config: ServerConfig,
+    limiter: AuthRateLimiter,
 }
 
 /// Map a protocol priority onto the `senses` priority enum.
@@ -96,6 +158,7 @@ impl ConsoleServer {
             hub,
             bridge,
             config,
+            limiter: AuthRateLimiter::default(),
         }
     }
 
@@ -137,6 +200,7 @@ impl ConsoleServer {
     }
 
     fn handle(&self, stream: TcpStream) -> std::io::Result<()> {
+        let peer_ip = stream.peer_addr().map(|a| a.ip()).ok();
         let mut reader = BufReader::new(stream.try_clone()?);
 
         // ── Request line ──────────────────────────────────────────────────
@@ -183,14 +247,57 @@ impl ConsoleServer {
         }
 
         // ── Auth (everything except the health probe) ──────────────────────
-        if path != "/healthz" && !self.authorised(auth_header.as_deref(), &query) {
-            return write_response(
-                &mut out,
-                401,
-                "Unauthorized",
-                "text/plain; charset=utf-8",
-                b"unauthorized\n",
-            );
+        if path != "/healthz" {
+            // Throttling only matters when a token actually gates access; an
+            // open loopback server never produces an auth failure to count.
+            let enforce = self.config.token.is_some();
+
+            // Reject locked-out sources before even inspecting the credential,
+            // so a brute-force loop hits a wall rather than a constant-time
+            // token comparison it can keep hammering.
+            if enforce {
+                if let Some(ip) = peer_ip {
+                    if self.limiter.is_locked(ip) {
+                        return write_response(
+                            &mut out,
+                            429,
+                            "Too Many Requests",
+                            "text/plain; charset=utf-8",
+                            b"too many failed authentication attempts; retry later\n",
+                        );
+                    }
+                }
+            }
+
+            if !self.authorised(auth_header.as_deref(), &query) {
+                if enforce {
+                    if let Some(ip) = peer_ip {
+                        if self.limiter.record_failure(ip) {
+                            // One-shot audit entry on the lockout transition.
+                            self.hub.publish(OperatorEvent::Audit {
+                                kind: "AuthLockout".to_string(),
+                                detail: format!(
+                                    "source {ip} locked out after {MAX_AUTH_FAILURES} failed console auth attempts"
+                                ),
+                            });
+                        }
+                    }
+                }
+                return write_response(
+                    &mut out,
+                    401,
+                    "Unauthorized",
+                    "text/plain; charset=utf-8",
+                    b"unauthorized\n",
+                );
+            }
+
+            // A successful auth clears any prior failure streak for this IP.
+            if enforce {
+                if let Some(ip) = peer_ip {
+                    self.limiter.record_success(ip);
+                }
+            }
         }
 
         match (method.as_str(), path.as_str()) {
@@ -663,6 +770,76 @@ mod tests {
             "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         );
         assert!(resp.contains("200 OK"));
+    }
+
+    #[test]
+    fn repeated_failed_auth_locks_out_the_source() {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("t"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: Some("sekret".into()),
+            },
+        );
+        let (addr, _h) = server.spawn().unwrap();
+
+        let bad =
+            "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\nConnection: close\r\n\r\n";
+
+        // The first MAX_AUTH_FAILURES bad attempts are answered with 401.
+        for i in 0..MAX_AUTH_FAILURES {
+            let resp = http_request(addr, bad);
+            assert!(resp.contains("401"), "attempt {i} should be 401: {resp}");
+        }
+
+        // The next attempt is locked out with 429 — even with the *correct*
+        // token, proving the lockout is checked before the credential.
+        let resp = http_request(
+            addr,
+            "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sekret\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp.contains("429"),
+            "should be locked out after {MAX_AUTH_FAILURES} failures: {resp}"
+        );
+    }
+
+    #[test]
+    fn successful_auth_resets_the_failure_streak() {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("t"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: Some("sekret".into()),
+            },
+        );
+        let (addr, _h) = server.spawn().unwrap();
+
+        let bad =
+            "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\nConnection: close\r\n\r\n";
+        let good =
+            "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sekret\r\nConnection: close\r\n\r\n";
+
+        // Stay one short of the threshold, then succeed (resets the counter)…
+        for _ in 0..MAX_AUTH_FAILURES - 1 {
+            assert!(http_request(addr, bad).contains("401"));
+        }
+        assert!(http_request(addr, good).contains("200 OK"));
+
+        // …so a fresh run of bad attempts is again answered with 401, not 429.
+        for _ in 0..MAX_AUTH_FAILURES - 1 {
+            let resp = http_request(addr, bad);
+            assert!(
+                resp.contains("401"),
+                "streak should have reset after success: {resp}"
+            );
+        }
     }
 
     #[test]
