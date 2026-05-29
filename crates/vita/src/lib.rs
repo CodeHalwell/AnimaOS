@@ -563,6 +563,34 @@ pub async fn somatic_execution_loop(
                 SensoryPacket::Text(t) => t.clone(),
                 SensoryPacket::Pcm(samples) => format!("[PCM {} samples]", samples.len()),
             };
+
+            // E6.6: operator-force override — record an audited gate decision
+            // before admitting the task.  The override always forces invoke=true
+            // at Frontier cost class; neutral homeostatic signals are used because
+            // the somatic loop hasn't yet sampled the sensor bundle for this tick.
+            if let Some(reason) = pkt.gate_override_reason.as_deref() {
+                let event = EventFeatures {
+                    urgency: 1.0,
+                    novelty: 0.5,
+                    semantic_class: SemanticClass::OperatorCommand,
+                    user_facing: true,
+                };
+                let signals = HomeostaticSignals::neutral();
+                let gate = ThresholdGate::with_defaults();
+                let override_hint = GateOverride::OperatorForced {
+                    reason: reason.to_owned(),
+                };
+                let event_id = format!("sensory-{sensory_task_id}");
+                let decision = gate.decide(&event_id, &event, &signals, &override_hint);
+                record_gate_decision(
+                    &mut lifecycle.audit,
+                    &lifecycle.agent_id,
+                    &decision,
+                    &event,
+                    &signals,
+                );
+            }
+
             lifecycle
                 .agenda
                 .push(Task::new(sensory_task_id, tier, prompt));
@@ -866,6 +894,68 @@ mod tests {
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
         assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 2);
+    }
+
+    #[test]
+    fn forced_operator_packet_records_gate_decision_with_override_active_true() {
+        // E6.6: a packet submitted via packetize_text_forced must cause vita's
+        // somatic loop to emit a GateDecision audit entry with override_active=true.
+        let mut m = manager("agent-forced", Some(2));
+        m.senses
+            .packetize_text_forced("deploy immediately", "on-call escalation")
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // The task should have been dispatched at Critical (tier 0).
+        assert_eq!(
+            m.scheduler.dispatched_tasks.len(),
+            1,
+            "forced packet should produce one dispatched task"
+        );
+        assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 0);
+
+        // An audited GateDecision entry with override_active=true must be present.
+        let gate_entry = m.audit.entries().iter().find(|e| {
+            matches!(e, AuditEntry::GateDecision { override_active: true, .. })
+        });
+        assert!(
+            gate_entry.is_some(),
+            "audit log must contain a GateDecision with override_active=true; entries: {:?}",
+            m.audit.entries()
+        );
+
+        // The reasoning should mention the operator-force override.
+        if let Some(AuditEntry::GateDecision { reasoning, .. }) = gate_entry {
+            assert!(
+                reasoning.contains("operator-forced override"),
+                "reasoning should reference the operator-forced override; got: {reasoning}"
+            );
+        }
+    }
+
+    #[test]
+    fn normal_packet_does_not_record_gate_decision_in_somatic_loop() {
+        // Non-forced packets must NOT produce a GateDecision entry; the gate
+        // is only consulted when an explicit operator-force override is present.
+        let mut m = manager("agent-normal-no-gate", Some(2));
+        m.senses
+            .packetize_text_checked("routine query", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let has_gate_entry = m
+            .audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::GateDecision { .. }));
+        assert!(
+            !has_gate_entry,
+            "a normal packet must not produce a GateDecision audit entry"
+        );
     }
 
     #[test]
