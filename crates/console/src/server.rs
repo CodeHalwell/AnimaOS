@@ -524,6 +524,7 @@ mod tests {
         let bridge = SensoryBridge::new(HumanGuidance {
             policy_hint: "strict".into(),
             max_text_length: Some(4),
+            max_pcm_samples: None,
             blocked_prefixes: vec![],
         });
         let server = ConsoleServer::new(

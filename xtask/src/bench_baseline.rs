@@ -101,40 +101,56 @@ pub struct BenchResult {
     pub variance_ns: u64,
 }
 
+/// Outcome of parsing Criterion's `--output-format bencher` output.
+pub struct ParsedBench {
+    /// Successfully parsed benchmark measurements.
+    pub results: Vec<BenchResult>,
+    /// Lines that *looked* like a measurement (began with `test ` and contained
+    /// `bench:`) but could not be parsed. A non-empty list means Criterion's
+    /// output shape may have drifted and the gate could be running blind, so
+    /// callers should surface it rather than silently passing.
+    pub skipped: Vec<String>,
+}
+
 /// Parse Criterion's `--output-format bencher` output.
 ///
 /// Expected line format:
 /// ```text
 /// test <name> ... bench: <n> ns/iter (+/- <n>)
 /// ```
-/// Lines that do not match this pattern are silently skipped.
-pub fn parse_bencher_output(input: &str) -> Vec<BenchResult> {
+/// Unrelated lines (headers, blank lines, comments) are ignored. Lines that
+/// announce themselves as a measurement (`test … bench:`) but fail to parse are
+/// collected into [`ParsedBench::skipped`] so a format drift cannot silently
+/// shrink the comparison set.
+pub fn parse_bencher_output(input: &str) -> ParsedBench {
     let mut results = Vec::new();
+    let mut skipped = Vec::new();
 
     for line in input.lines() {
         let line = line.trim();
-        // Must start with "test " and contain "bench:"
+        // Only lines that claim to be a measurement are candidates; anything
+        // else is unrelated noise and is not flagged.
         if !line.starts_with("test ") || !line.contains("bench:") {
             continue;
         }
 
         // Extract the test name: between "test " and " ... bench:"
         let after_test = &line["test ".len()..];
-        let bench_pos = match after_test.find("... bench:") {
-            Some(p) => p,
-            None => continue,
+        let Some(bench_pos) = after_test.find("... bench:") else {
+            skipped.push(line.to_string());
+            continue;
         };
         let name = after_test[..bench_pos].trim().to_string();
 
         // Extract "N ns/iter (+/- M)" from after "bench:"
-        let after_bench = &after_test[bench_pos + "... bench:".len()..]
-            .trim()
-            .to_string();
-        // after_bench looks like: "1234 ns/iter (+/- 56)"
+        let after_bench = after_test[bench_pos + "... bench:".len()..].trim();
         let ns_part = after_bench.split("ns/iter").next().unwrap_or("").trim();
         let ns_per_iter: u64 = match ns_part.replace([',', '_'], "").parse() {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(_) => {
+                skipped.push(line.to_string());
+                continue;
+            }
         };
 
         // Extract variance from "(+/- N)"
@@ -153,7 +169,26 @@ pub fn parse_bencher_output(input: &str) -> Vec<BenchResult> {
         });
     }
 
-    results
+    ParsedBench { results, skipped }
+}
+
+/// Emit a warning when benchmark-looking lines failed to parse, so a silent
+/// format drift surfaces in CI logs instead of quietly shrinking the gate.
+fn warn_on_skipped(parsed: &ParsedBench, input: &Path) {
+    if parsed.skipped.is_empty() {
+        return;
+    }
+    eprintln!(
+        "⚠️  {} line(s) in {} looked like benchmark measurements but could not \
+         be parsed — Criterion's `--output-format bencher` shape may have \
+         changed. The gate is comparing only {} parsed result(s):",
+        parsed.skipped.len(),
+        input.display(),
+        parsed.results.len(),
+    );
+    for line in &parsed.skipped {
+        eprintln!("     skipped: {line}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +287,9 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
 
     let input = fs::read_to_string(&args.input)
         .with_context(|| format!("reading input {}", args.input.display()))?;
-    let results = parse_bencher_output(&input);
+    let parsed = parse_bencher_output(&input);
+    warn_on_skipped(&parsed, &args.input);
+    let results = parsed.results;
 
     if results.is_empty() {
         anyhow::bail!(
@@ -309,7 +346,9 @@ pub fn run_update(args: UpdateArgs) -> Result<()> {
 
     let input = fs::read_to_string(&args.input)
         .with_context(|| format!("reading input {}", args.input.display()))?;
-    let results = parse_bencher_output(&input);
+    let parsed = parse_bencher_output(&input);
+    warn_on_skipped(&parsed, &args.input);
+    let results = parsed.results;
 
     if results.is_empty() {
         bail!(
@@ -365,8 +404,13 @@ some random line without bench output
 
     #[test]
     fn parses_bencher_output_correctly() {
-        let results = parse_bencher_output(SAMPLE_BENCHER_OUTPUT);
+        let parsed = parse_bencher_output(SAMPLE_BENCHER_OUTPUT);
+        let results = parsed.results;
         assert_eq!(results.len(), 4);
+        assert!(
+            parsed.skipped.is_empty(),
+            "well-formed output must not flag any skipped lines"
+        );
         assert_eq!(results[0].name, "task_agenda/push/100");
         assert_eq!(results[0].ns_per_iter, 1234);
         assert_eq!(results[0].variance_ns, 56);
@@ -376,8 +420,30 @@ some random line without bench output
 
     #[test]
     fn empty_input_yields_no_results() {
-        assert!(parse_bencher_output("").is_empty());
-        assert!(parse_bencher_output("# just a comment\n").is_empty());
+        assert!(parse_bencher_output("").results.is_empty());
+        assert!(parse_bencher_output("# just a comment\n")
+            .results
+            .is_empty());
+    }
+
+    #[test]
+    fn benchmark_looking_but_unparseable_lines_are_flagged_not_dropped() {
+        // A line that announces itself as a measurement (`test … bench:`) but
+        // whose number can't be parsed signals a Criterion output-format drift.
+        // It must surface in `skipped` rather than vanish, which would let the
+        // gate silently shrink its comparison set and pass blind.
+        let input = "\
+test good/bench ... bench:        100 ns/iter (+/- 5)
+test drifted/bench ... bench:    not-a-number ns/iter
+test mangled bench: 200 ns/iter (+/- 1)
+running 3 tests
+";
+        let parsed = parse_bencher_output(input);
+        assert_eq!(parsed.results.len(), 1, "only the well-formed line parses");
+        assert_eq!(parsed.results[0].name, "good/bench");
+        assert_eq!(parsed.skipped.len(), 2, "two malformed measurement lines");
+        assert!(parsed.skipped.iter().any(|l| l.contains("drifted")));
+        assert!(parsed.skipped.iter().any(|l| l.contains("mangled")));
     }
 
     #[test]
