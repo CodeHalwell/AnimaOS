@@ -1,0 +1,90 @@
+name: Attach SBOMs to Release
+
+# EX.4 — Publish CycloneDX 1.5 SBOMs as release assets whenever a GitHub
+# Release is created.  This closes the final remaining EX.4 item:
+#
+#   "Publish SBOMs to a Dependency-Track instance or attach to GitHub
+#    Releases once Stage 4 closes."
+#
+# The SBOM generation logic mirrors the `sbom` job in `ci.yml` so the two
+# artefact sets are byte-comparable.  The only difference here is that the
+# generated files are uploaded directly to the release rather than as a
+# workflow artefact.
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write  # upload-release-asset requires write access
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  sbom-release:
+    name: Generate and attach SBOMs to release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # ------------------------------------------------------------------
+      # cargo-cyclonedx generates a bom.cdx.json next to each Cargo.toml
+      # that is part of a workspace.  We run it three times — root workspace,
+      # xtask, and microvm — to cover every Cargo manifest in the repository.
+      # ------------------------------------------------------------------
+      - name: Cache cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-sbom-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sbom-registry-
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked --version "^0.5"
+
+      - name: Generate SBOMs — root workspace
+        run: cargo cyclonedx --format json --all
+
+      - name: Generate SBOMs — xtask
+        run: cargo cyclonedx --format json --manifest-path xtask/Cargo.toml
+
+      - name: Generate SBOMs — microvm kernel
+        run: cargo cyclonedx --format json --manifest-path kernels/microvm/Cargo.toml
+
+      # ------------------------------------------------------------------
+      # Collect every bom.cdx.json produced above into a flat staging dir,
+      # using the source directory name as a prefix to avoid collisions.
+      # ------------------------------------------------------------------
+      - name: Collect SBOMs into staging directory
+        run: |
+          mkdir -p sbom-release
+          find . -maxdepth 6 -name 'bom.cdx.json' \
+            -not -path './sbom-release/*' \
+            -not -path './target/*' | while read -r f; do
+              # Convert path to a safe flat name: replace "/" and "." with "-"
+              label=$(dirname "$f" | sed 's|^\./||; s|/|-|g; s|\.|-|g')
+              cp "$f" "sbom-release/${label}-bom.cdx.json"
+          done
+          echo "Collected SBOMs:"
+          ls -1 sbom-release/
+
+      # ------------------------------------------------------------------
+      # Upload each collected SBOM as a release asset.  The GH_TOKEN is
+      # automatically provided by GitHub Actions; the release tag comes from
+      # the triggering event.
+      # ------------------------------------------------------------------
+      - name: Upload SBOMs to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          for sbom in sbom-release/*.cdx.json; do
+            echo "Uploading $sbom to release $tag …"
+            gh release upload "$tag" "$sbom" --clobber
+          done
+          echo "All SBOMs attached to release $tag."
