@@ -1989,6 +1989,24 @@ CI, and produce a security review at the end of each stage.
   SBOMs are now attached to releases; Dependency-Track ingestion is a
   separate ops task outside the code delivery scope of this epic.
 
+**Ongoing dependency maintenance (EX.4 rolling):**
+- ✅ `sha2` bumped from `0.10` → `0.11` in `crates/vita` (Dependabot PR #65);
+  workspace Cargo.lock updated; all 186 vita tests pass under the new
+  `digest 0.11` / `hybrid-array` substrate.
+- ✅ `der` bumped from `0.7` → `0.8` in `kernels/microvm` (Dependabot PR #67);
+  `Cargo.lock` updated with `der 0.8.0` alongside the retained `der 0.7.10`
+  for `p256 0.13` transitive deps (ecdsa, pkcs8, sec1, spki).
+- ✅ GitHub Actions version bumps applied (Dependabot PR #64):
+  `EmbarkStudios/cargo-deny-action` SHA refresh (v2),
+  `actions/checkout` v4 → v6.0.2, `actions/cache` v4 → v5.0.5,
+  `actions/upload-artifact` v4 → v7.0.1, `actions/download-artifact` v4 → v8.
+- ⬜ `rand_core` bump from `0.6` → `0.10` in `kernels/microvm` (Dependabot PR #66):
+  **deferred** — `p256 0.13` and its transitive deps (`ff`, `group`, `primeorder`)
+  depend on `rand_core 0.6`; a split two-version tree would break the
+  `EphemeralSecret::random(&mut rng)` call in `tls.rs`. Resolving this requires
+  upgrading `p256` to a release that targets `rand_core ≥ 0.9` as a
+  coordinated ecosystem bump.
+
 ---
 
 ## Parallelisation Notes
