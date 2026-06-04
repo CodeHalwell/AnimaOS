@@ -24,7 +24,7 @@ serde_json = { workspace = true }
 # (EX.4 / threat T-8). default-features = false keeps the (future) no_std path
 # clean, and the dep is pulled in only by the `std` feature so the microVM
 # image budget is never touched.
-sha2 = { version = "0.10", default-features = false, optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
