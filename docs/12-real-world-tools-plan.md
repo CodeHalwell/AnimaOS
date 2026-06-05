@@ -2,6 +2,9 @@
 
 > **Status:** Proposed (scoping). Target epic: **E6 — Embodiment**.
 > Branch: `claude/llm-tools-animaos-vuXRK`.
+> Companion: [13 — Local LLM Provider Ecosystem](./13-local-llm-providers.md)
+> (E7) supplies the *brains* that E6's tools give *hands*. The chat/tool-calling
+> trait extension (E6 S6.4 §) is shared with E7 §5.
 
 ## 0. Goal
 
