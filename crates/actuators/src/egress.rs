@@ -216,6 +216,12 @@ fn parse_scheme_host(url: &str) -> Option<(String, String)> {
     let authority = rest.split('/').next().unwrap_or(rest);
     let authority = authority.split('?').next().unwrap_or(authority);
     let authority = authority.split('#').next().unwrap_or(authority);
+    // Strip userinfo (e.g. `user:pass@host`) to prevent bypass of SSRF/blocklist checks.
+    let authority = if let Some(at) = authority.find('@') {
+        &authority[at + 1..]
+    } else {
+        authority
+    };
     // Strip port: for IPv6 literals `[::1]:8080` strip `:port` after `]`;
     // for plain hostnames/IPv4 strip last `:port`.
     let host = if authority.starts_with('[') {
@@ -263,8 +269,8 @@ fn ssrf_check(host: &str) -> Option<EgressDenialReason> {
         }
     }
     // Try IPv6
-    if let Ok(addr) = host.parse::<Ipv6Addr>() {
-        if addr.is_loopback() || addr.is_unspecified() {
+    if let Ok(addr) = strip_brackets(host).parse::<Ipv6Addr>() {
+        if is_private_ipv6(&addr) {
             return Some(EgressDenialReason::SsrfPrivateAddress {
                 address: host.to_string(),
             });
@@ -283,6 +289,30 @@ fn is_private_ipv4(addr: &Ipv4Addr) -> bool {
         // Cloud metadata IP (169.254.169.254) is already covered by is_link_local,
         // but we call it out explicitly for clarity.
         || *addr == Ipv4Addr::new(169, 254, 169, 254)
+}
+
+/// Returns `true` for loopback, unspecified, link-local, or unique-local IPv6.
+///
+/// Covers:
+/// - `::1` (loopback)
+/// - `::` (unspecified)
+/// - `fe80::/10` (link-local)
+/// - `fc00::/7` (unique-local: `fc00::` and `fd00::` ranges)
+fn is_private_ipv6(addr: &Ipv6Addr) -> bool {
+    if addr.is_loopback() || addr.is_unspecified() {
+        return true;
+    }
+    let segs = addr.segments();
+    let first = segs[0];
+    // Link-local: fe80::/10  (first 10 bits = 1111 1110 10)
+    if first & 0xffc0 == 0xfe80 {
+        return true;
+    }
+    // Unique-local: fc00::/7  (first 7 bits = 1111 110)
+    if first & 0xfe00 == 0xfc00 {
+        return true;
+    }
+    false
 }
 
 /// `true` when `host` equals `pattern` or is a subdomain of `.pattern`.
@@ -436,5 +466,49 @@ mod tests {
         } else {
             panic!("expected denial");
         }
+    }
+
+    // ── Userinfo bypass (regression: CVE-class SSRF) ──────────────────────────
+
+    #[test]
+    fn userinfo_at_sign_does_not_bypass_ssrf_check() {
+        // https://user:pass@127.0.0.1/ — real host is 127.0.0.1 (loopback).
+        assert!(guard()
+            .check_url("https://user:pass@127.0.0.1/")
+            .is_denied());
+    }
+
+    #[test]
+    fn userinfo_does_not_bypass_blocklist() {
+        let g = EgressGuard::default().with_blocklisted_host("evil.com");
+        // https://good.com@evil.com/ — real host is evil.com.
+        assert!(g.check_url("https://good.com@evil.com/").is_denied());
+    }
+
+    // ── IPv6 private ranges ───────────────────────────────────────────────────
+
+    #[test]
+    fn ipv6_unique_local_fc_is_denied() {
+        assert!(guard().check_url("https://[fc00::1]/").is_denied());
+    }
+
+    #[test]
+    fn ipv6_unique_local_fd_is_denied() {
+        assert!(guard()
+            .check_url("https://[fd12:3456:789a::1]/")
+            .is_denied());
+    }
+
+    #[test]
+    fn ipv6_link_local_is_denied() {
+        assert!(guard().check_url("https://[fe80::1]/").is_denied());
+    }
+
+    #[test]
+    fn ipv6_public_is_allowed() {
+        // 2001:4860:4860::8888 is Google's public DNS — should be allowed.
+        assert!(guard()
+            .check_url("https://[2001:4860:4860::8888]/")
+            .is_allowed());
     }
 }

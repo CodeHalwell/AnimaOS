@@ -159,15 +159,16 @@ impl SearchProvider for SearxngProvider {
 
         // Build the SearXNG API URL.
         // GET /search?q=<query>&format=json&categories=<cat>&pageno=1
+        // Encode per RFC 3986 over UTF-8 bytes, not UTF-32 code points.
         let encoded_query: String = query
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                    c.to_string()
-                } else if c == ' ' {
+            .bytes()
+            .map(|b| {
+                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                    (b as char).to_string()
+                } else if b == b' ' {
                     "+".to_string()
                 } else {
-                    format!("%{:02X}", c as u32)
+                    format!("%{b:02X}")
                 }
             })
             .collect();
@@ -331,7 +332,7 @@ impl ToolDriver for WebSearchTool {
         let results = self
             .provider
             .search(&req.query, req.max_results, &req.categories)
-            .map_err(|e| ToolInvocationError::ExecutionFailed(e))?;
+            .map_err(ToolInvocationError::ExecutionFailed)?;
 
         // Serialise results.
         serde_json::to_vec(&results)

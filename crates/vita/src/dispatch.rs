@@ -87,10 +87,9 @@ impl<D: ToolDispatcher> EgressAwareDispatcher<D> {
     /// Call this after each cortex invocation completes to move the egress
     /// entries into the main lifecycle audit log.
     pub fn flush_audit(&self, log: &mut AuditLog) {
-        if let Ok(mut buf) = self.audit_buffer.lock() {
-            for entry in buf.drain(..) {
-                log.push(entry);
-            }
+        let mut buf = self.audit_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in buf.drain(..) {
+            log.push(entry);
         }
     }
 }
@@ -159,6 +158,12 @@ fn extract_url_from_args(args: &str) -> Option<String> {
 /// This satisfies E7 S7.0.4: "no secrets ever appear in the audit log."
 pub fn redact_url(url: &str) -> String {
     const SENSITIVE: &[&str] = &["key", "token", "secret", "auth", "password", "api"];
+
+    fn is_sensitive(s: &str) -> bool {
+        let lower = s.to_lowercase();
+        SENSITIVE.iter().any(|pat| lower.contains(pat))
+    }
+
     if !url.contains('?') {
         return url.to_string();
     }
@@ -166,9 +171,11 @@ pub fn redact_url(url: &str) -> String {
     let redacted: Vec<String> = query
         .split('&')
         .map(|pair| {
-            if let Some((k, _v)) = pair.split_once('=') {
-                let k_lower = k.to_lowercase();
-                if SENSITIVE.iter().any(|s| k_lower.contains(s)) {
+            if let Some((k, v)) = pair.split_once('=') {
+                // Redact if the key name is sensitive OR the value itself
+                // contains a nested sensitive key=value pattern (e.g. a
+                // redirect URL carrying api_key= in its own query string).
+                if is_sensitive(k) || is_sensitive(v) {
                     return format!("{k}=[REDACTED]");
                 }
             }

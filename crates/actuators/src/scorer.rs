@@ -151,13 +151,10 @@ impl ToolScorer for LexicalScorer {
 ///
 /// Punctuation and digits are treated as delimiters and discarded.
 fn tokenise(text: &str) -> Vec<String> {
-    let mut terms: Vec<String> = text
-        .split(|c: char| !c.is_alphabetic())
+    text.split(|c: char| !c.is_alphabetic())
         .filter(|w| !w.is_empty())
         .map(|w| w.to_lowercase())
-        .collect();
-    terms.sort_unstable();
-    terms
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

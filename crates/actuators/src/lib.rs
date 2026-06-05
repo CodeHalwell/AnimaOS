@@ -5,11 +5,11 @@
 //! # Structure
 //!
 //! - [`egress`]     — [`EgressGuard`]: URL/scheme validation, SSRF protection,
-//!                   host allow/deny lists.
+//!   host allow/deny lists.
 //! - [`scorer`]     — [`ToolScorer`] trait + [`LexicalScorer`] (BM25-style) +
-//!                   [`FixtureScorer`] for hermetic tests.
+//!   [`FixtureScorer`] for hermetic tests.
 //! - [`web_search`] — [`WebSearchTool`]: `ToolDriver` implementation over a
-//!                   [`SearchProvider`] abstraction (fixture and SearXNG impls).
+//!   [`SearchProvider`] abstraction (fixture and SearXNG impls).
 //!
 //! All modules are `std`-only. The crate is not added to any `no_std` target.
 //!
