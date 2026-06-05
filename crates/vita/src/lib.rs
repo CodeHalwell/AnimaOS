@@ -7,6 +7,8 @@ pub mod audit;
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
+#[cfg(feature = "std")]
+pub mod dispatch;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
@@ -48,6 +50,8 @@ pub use router::{
 };
 #[cfg(feature = "std")]
 pub use sensors::AuditSignalPublisher;
+#[cfg(feature = "std")]
+pub use dispatch::{redact_url, EgressAwareDispatcher};
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
 
 #[cfg(not(feature = "std"))]

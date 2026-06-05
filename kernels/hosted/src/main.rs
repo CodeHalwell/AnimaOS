@@ -343,6 +343,26 @@ fn print_audit(manager: &LifecycleManager) {
                      (eviction more aggressive under pressure)"
                 );
             }
+            // E7 — Embodiment egress audit entries
+            AuditEntry::EgressRequested { tool_id, url } => {
+                println!("  🌐 egress_requested tool={tool_id} url={url}");
+            }
+            AuditEntry::EgressBlocked { tool_id, url, reason } => {
+                println!("  🚫 egress_blocked tool={tool_id} url={url} reason={reason:?}");
+            }
+            // E7 — Tool selection audit entry
+            AuditEntry::ToolSelection {
+                agent_id,
+                candidates_scored,
+                kept,
+                tau_rel,
+                ..
+            } => {
+                println!(
+                    "  🔍 tool_selection agent={agent_id} scored={candidates_scored} \
+                     kept={kept} tau_rel={tau_rel:.2}"
+                );
+            }
         }
     }
 }
