@@ -190,6 +190,66 @@ NF4 base, so the method choice splits by merge path:
   after requantisation so silent degradation is caught before promotion. Record
   the method + merge path in the model's provenance (E10 S10.6).
 
+- **S7.4.7 — Adaptation eval harness (the LoRA-vs-HRA decider).** A reproducible
+  bench that *earns* a method's adoption per domain rather than assuming it,
+  honouring the report's caveat that a well-tuned LoRA often matches HRA
+  in-distribution. Reuses AnimaOS's existing eval idioms — n-run statistical
+  comparison (cf. `xtask demo --kind graceful`'s two-proportion z-test) and a
+  needle-style probe (cf. `kv-controller` `NeedleBenchmarkConfig`).
+
+  - **Candidates under matched budget.** Train each method (QLoRA baseline,
+    HyperAdapt, HiRA/BoHA, HRP) on the same data with matched steps/params, so
+    the comparison is fair.
+  - **Four metrics, not one.** (1) *Task success* on a held-out slice of the
+    domain (the agent's own episodic data for self-experience runs);
+    (2) *OOD generalisation* on a shifted held-out set; (3) *retention /
+    anti-forgetting* on a frozen "core competencies" probe set (cf.
+    `xtask demo --kind retention`) — critical for the continual loop;
+    (4) *merge fidelity* = the S7.4.6 precision-delta after requantisation.
+  - **Adoption rule.** Promote HRA over the LoRA baseline only when it clears a
+    configurable **margin threshold** on (1)+(2) **without** regressing (3)
+    beyond tolerance. Otherwise keep LoRA. The winning scores are written into
+    the adapter's metadata (S7.4.8) so selection is evidence-based, and the run
+    is gated by defence eval before any promotion (E10 S10.5).
+  - **Hermetic by default.** Fixture datasets + recorded scores for CI; live
+    training runs are env-gated, exactly like the inference backends.
+
+- **S7.4.8 — Adapter library & dynamic mounting.** A registry of saved,
+  task-scoped adapters the agent can **mount on demand** instead of baking one
+  monolithic model — so a small base model + a shelf of cheap specialists covers
+  many domains.
+
+  - **A serving distinction falls straight out of the merge maths.** Only
+    LoRA-format / structurally-clean adapters are **cheaply hot-mountable** by
+    the runtimes (vLLM native multi-LoRA via per-request `lora_request`;
+    llama.cpp `--lora` hot-load). Hadamard HRA (HiRA/BoHA) yields a *dense* `ΔW`
+    with no mountable adapter format — it must be **baked into a model variant**
+    (S7.4.6 Hadamard path). So the library is two-tier:
+
+    | Tier | Produced by | Served as | Swap granularity |
+    |---|---|---|---|
+    | **Mountable adapter** | LoRA/QLoRA, HRP (→LoRA), HyperAdapt* | hot-loaded onto a live base (vLLM/llama.cpp) | **per task/request** |
+    | **Baked variant** | HiRA/BoHA, OHoRA, full merges | a distinct GGUF model | per route/model |
+
+    *HyperAdapt's `S₁·W₀·S₂` scaling is a clean transform but not a stock LoRA
+    format; mount it where the runtime allows a custom apply, otherwise bake.
+
+  - **`AdapterLibrary`.** Lives at `~/.anima/<agent_id>/adapters/`; each entry
+    carries metadata: base model + quant, method, **domain/description**,
+    provenance (E10 S10.6), and the S7.4.7 eval scores.
+  - **Task → adapter selection reuses E6.** Embed each adapter's `description`
+    and select by task similarity with the same `length_robust_filter` that
+    picks tools and skills — one selector across tools, skills, *and* adapters.
+    The router (E5.3) thus gains an `AdapterSelector` alongside `ModelSelector`.
+  - **Composition & limits.** Allow mounting a small set concurrently where the
+    runtime supports it (vLLM), with a homeostatic cap (mounting cost feeds the
+    E5.7 signals) and a circuit-breaker-style fallback to the bare base model if
+    an adapter misbehaves.
+  - **Self-improvement closes here.** The dreaming-phase loop (E10 S10.5)
+    deposits new adapters into this library; routine tasks then mount the right
+    specialist automatically — the agent grows a *shelf of competencies* rather
+    than overwriting one model.
+
 ## 4. Route → backend mapping
 
 E5.3's `ModelSelector` gains a config-driven mapping so an operator binds tiers
@@ -199,7 +259,14 @@ to whatever they run locally, e.g.:
 frontier    → vllm (large model)        | or hosted Anthropic (E6 default)
 mid-tier    → lmstudio / llamacpp-server
 cheap-local → ollama (small instinct model) | litert on NPU
+             └─ + task-specific adapter hot-mounted from the library (S7.4.8)
 ```
+
+Backend selection (which base model) and adapter selection (which specialist to
+mount) are two stages: the `ModelSelector` binds the tier to a base; an
+`AdapterSelector` then mounts zero or more library adapters for the specific
+task. The cheap-local tier is the prime beneficiary — a tiny base plus a mounted
+specialist often matches a much larger generalist on the task at hand.
 
 The mapping lives in config, validated at startup (reuse the E5.3
 route-validation discipline), never hard-coded.
@@ -240,8 +307,11 @@ S6.4 should share it.** Sequence E7 Phase 0–1 alongside E6 Phase 4.
 2. **S7.2** — HF (mostly the TGI preset; sidecar only if needed).
 3. **S7.3** — native FFI runtimes (llama.cpp in-process, then LiteRT-LM) for
    server-less/edge.
-4. **S7.4** — Unsloth adaptation, starting as a standalone job; the dreaming
-   hook is a separate research spike.
+4. **S7.4** — Unsloth adaptation: QLoRA job (S7.4.1–.3) → eval harness
+   (S7.4.7, the LoRA-vs-HRA decider) → HRA methods + dual merge/quant pipeline
+   (S7.4.4–.6) → adapter library + dynamic mounting (S7.4.8). The dreaming hook
+   (S7.4.3) and weight-level self-improvement stay a gated research spike. Build
+   the eval harness *before* adopting any HRA method so adoption is evidence-led.
 
 ## 8. Risks & open questions
 
@@ -263,6 +333,14 @@ S6.4 should share it.** Sequence E7 Phase 0–1 alongside E6 Phase 4.
   path risks precision drift. Mitigate with the §S7.4.6 precision-delta check,
   keep QLoRA the default, and adopt HRA per-method only where eval shows a real
   margin on the agent's own domain.
+- **Adapter mounting support varies:** vLLM has mature multi-LoRA; llama.cpp
+  hot-load is improving; Ollama adapter mounting is more static (model-variant
+  oriented). Treat dynamic mounting as a vLLM/llama.cpp capability flag, with a
+  bake-to-variant fallback (S7.4.6) where the runtime can't hot-mount.
+- **Adapter sprawl / forgetting interactions:** a growing self-authored adapter
+  shelf needs the S7.4.7 retention metric in the loop and library hygiene
+  (dedup, deprecate, kill-switch via E10 S10.6) so specialists don't silently
+  conflict or rot.
 
 ## 9. Rough effort
 
@@ -274,3 +352,5 @@ S6.4 should share it.** Sequence E7 Phase 0–1 alongside E6 Phase 4.
 | S7.3 native FFI runtimes | L |
 | S7.4 Unsloth pipeline (LoRA/QLoRA) | M (+ research spike) |
 | S7.4.4–.6 HRA methods + merge/quant pipeline | M (HyperAdapt/HRP first; Hadamard + TeRA research) |
+| S7.4.7 adaptation eval harness (LoRA-vs-HRA decider) | M (reuses existing demo/needle idioms) |
+| S7.4.8 adapter library + dynamic mounting | M (vLLM multi-LoRA first; bake-to-variant fallback) |
