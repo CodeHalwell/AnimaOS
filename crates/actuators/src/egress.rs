@@ -245,6 +245,10 @@ fn parse_scheme_host(url: &str) -> Option<(String, String)> {
             authority.to_string()
         }
     };
+    // Deny empty authority (e.g. `https:///path` has no host).
+    if host.is_empty() {
+        return None;
+    }
     Some((scheme, host))
 }
 

@@ -167,7 +167,13 @@ pub fn redact_url(url: &str) -> String {
     if !url.contains('?') {
         return url.to_string();
     }
-    let (base, query) = url.split_once('?').unwrap();
+    // Split off the fragment first — fragments are not sent to the server but
+    // could carry secrets that would otherwise survive into the audit log.
+    let (url_no_frag, _fragment) = url.split_once('#').unwrap_or((url, ""));
+    if !url_no_frag.contains('?') {
+        return url_no_frag.to_string();
+    }
+    let (base, query) = url_no_frag.split_once('?').unwrap();
     let redacted: Vec<String> = query
         .split('&')
         .map(|pair| {

@@ -191,6 +191,7 @@ impl SearchProvider for SearxngProvider {
         // This feature path is only activated outside CI (env-gated tests).
         #[cfg(feature = "live")]
         {
+            let max_results = _max_results; // bring into scope for this block
             use reqwest::blocking::Client;
             let client = Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
@@ -328,10 +329,13 @@ impl ToolDriver for WebSearchTool {
             return Err(ToolInvocationError::InvalidPayload);
         }
 
+        // Enforce schema contract: max_results must be in [1, 20].
+        let max_results = req.max_results.clamp(1, 20);
+
         // Execute the search.
         let results = self
             .provider
-            .search(&req.query, req.max_results, &req.categories)
+            .search(&req.query, max_results, &req.categories)
             .map_err(ToolInvocationError::ExecutionFailed)?;
 
         // Serialise results.
