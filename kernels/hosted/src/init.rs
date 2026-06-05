@@ -44,7 +44,9 @@ pub struct OnboardingState {
 ///
 /// Resolves to `~/.anima/<agent_id>/onboarding.json`.
 pub fn default_state_path(agent_id: &str) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".anima")
         .join(agent_id)
@@ -71,6 +73,11 @@ pub fn save_state(path: &Path, state: &OnboardingState) -> io::Result<()> {
     let json = serialise_state(state);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json)?;
+    // On Windows, `rename` fails if the destination already exists.
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -230,6 +237,9 @@ fn step_identity(state: &mut OnboardingState, agent_id: &str, interactive: bool)
 
         // Write fact through the existing IdentityMemory path.
         let path = vita::IdentityMemory::default_path(agent_id);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let mut identity =
             vita::IdentityMemory::open(&path).unwrap_or_else(|_| vita::IdentityMemory::in_memory());
         let mut log = vita::AuditLog::new();
@@ -300,12 +310,17 @@ fn infer_backend_env_value(rec: &str) -> &'static str {
 ///
 /// - `agent_id` identifies the agent state directory (`~/.anima/<agent_id>/`).
 /// - `non_interactive` forces non-interactive mode regardless of TTY detection.
-pub fn run_init(agent_id: &str, non_interactive: bool) {
+/// - `reset` discards any existing onboarding state and restarts the wizard.
+pub fn run_init(agent_id: &str, non_interactive: bool, reset: bool) {
     let state_path = default_state_path(agent_id);
-    let mut state = load_state(&state_path).unwrap_or_default();
+    let mut state = if reset {
+        OnboardingState::default()
+    } else {
+        load_state(&state_path).unwrap_or_default()
+    };
     state.schema_version = 1;
 
-    if state.complete {
+    if !reset && state.complete {
         println!(
             "\nOnboarding already complete for agent `{agent_id}`.\n\
              Re-run with `--reset` to start over, or edit identity with:\n\

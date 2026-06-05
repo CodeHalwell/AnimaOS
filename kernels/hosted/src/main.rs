@@ -809,7 +809,8 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("init") {
         let non_interactive = args.iter().any(|a| a == "--non-interactive");
-        init::run_init("anima", non_interactive);
+        let reset = args.iter().any(|a| a == "--reset");
+        init::run_init("anima", non_interactive, reset);
         return;
     }
 

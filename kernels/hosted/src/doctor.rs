@@ -148,9 +148,8 @@ fn detect_ram_gib_platform() -> Option<u32> {
     Some(((kb + (512 * 1024)) / (1024 * 1024)) as u32) // round to nearest GiB
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn detect_ram_gib_platform() -> Option<u32> {
-    // macOS / other: use sysctl
     let output = Command::new("sysctl")
         .args(["-n", "hw.memsize"])
         .output()
@@ -162,6 +161,27 @@ fn detect_ram_gib_platform() -> Option<u32> {
     Some(((bytes + (512 * 1024 * 1024)) / (1024 * 1024 * 1024)) as u32)
 }
 
+#[cfg(target_os = "windows")]
+fn detect_ram_gib_platform() -> Option<u32> {
+    let output = Command::new("powershell")
+        .args([
+            "-Command",
+            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+        ])
+        .output()
+        .ok()?;
+    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    Some(((bytes + (512 * 1024 * 1024)) / (1024 * 1024 * 1024)) as u32)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn detect_ram_gib_platform() -> Option<u32> {
+    None
+}
+
 // ── Provider detection ────────────────────────────────────────────────────────
 
 /// Status of a detected or configured LLM provider.
@@ -169,8 +189,8 @@ fn detect_ram_gib_platform() -> Option<u32> {
 pub struct ProviderStatus {
     /// Short name, e.g. `"ollama"`.
     pub name: &'static str,
-    /// The URL that was probed, e.g. `"http://localhost:11434"`.
-    pub url: &'static str,
+    /// The address that was probed, e.g. `"127.0.0.1:11434"` or a custom env URL.
+    pub url: String,
     /// TCP connect succeeded — server is listening.
     pub reachable: bool,
     /// Relevant env var is set (API key or custom URL), regardless of reachability.
@@ -231,19 +251,32 @@ pub fn detect_providers() -> Vec<ProviderStatus> {
     let probe_timeout = Duration::from_millis(500);
     let mut results = Vec::new();
 
-    // Local servers: TCP connect probe
-    for &(name, addr, env_key, tier) in PROVIDER_PROBES {
-        let reachable = addr
+    // Local servers: TCP connect probe.  When a custom URL env var is set,
+    // extract the host:port from it so the probe hits the configured address.
+    for &(name, default_addr, env_key, tier) in PROVIDER_PROBES {
+        let mut addr_str = default_addr.to_string();
+        let mut configured = false;
+        if let Some(k) = env_key {
+            if let Ok(val) = std::env::var(k) {
+                if !val.is_empty() {
+                    configured = true;
+                    // Strip scheme prefix, then take only the host:port segment.
+                    let stripped = val
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://");
+                    let host_port = stripped.split('/').next().unwrap_or(stripped);
+                    addr_str = host_port.to_string();
+                }
+            }
+        }
+        let reachable = addr_str
             .parse::<SocketAddr>()
             .ok()
             .map(|sa| TcpStream::connect_timeout(&sa, probe_timeout).is_ok())
             .unwrap_or(false);
-        let configured = env_key
-            .map(|k| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false))
-            .unwrap_or(false);
         results.push(ProviderStatus {
             name,
-            url: addr,
+            url: addr_str,
             reachable,
             configured,
             tier,
@@ -256,9 +289,9 @@ pub fn detect_providers() -> Vec<ProviderStatus> {
         results.push(ProviderStatus {
             name,
             url: if name == "anthropic" {
-                "api.anthropic.com"
+                "api.anthropic.com".to_string()
             } else {
-                "api.openai.com"
+                "api.openai.com".to_string()
             },
             reachable: false, // not probed
             configured,
@@ -294,15 +327,17 @@ pub fn recommend(gpu: &GpuInfo, providers: &[ProviderStatus]) -> TierRecommendat
                 .find(|p| p.reachable && p.name == "lmstudio")
         });
 
-    // Best hosted API provider: prefer anthropic
-    let api_provider = providers
+    // Best frontier provider: prefer configured API keys, then fall back to a
+    // reachable vLLM instance which is probed specifically for the frontier tier.
+    let frontier_provider = providers
         .iter()
         .find(|p| p.configured && p.name == "anthropic")
         .or_else(|| {
             providers
                 .iter()
                 .find(|p| p.configured && p.name == "openai")
-        });
+        })
+        .or_else(|| providers.iter().find(|p| p.reachable && p.name == "vllm"));
 
     let cheap_local = if let Some(p) = local_provider {
         match p.name {
@@ -319,18 +354,18 @@ pub fn recommend(gpu: &GpuInfo, providers: &[ProviderStatus]) -> TierRecommendat
         "mock (no local provider; install Ollama)".to_string()
     };
 
-    let (mid_tier, frontier) = if let Some(p) = api_provider {
-        let api = p.name.to_string();
+    let (mid_tier, frontier) = if let Some(p) = frontier_provider {
+        let provider_name = p.name.to_string();
         (
             local_provider
-                .map(|lp| format!("{} (or {})", lp.name, api))
-                .unwrap_or_else(|| api.clone()),
-            api,
+                .map(|lp| format!("{} (or {})", lp.name, provider_name))
+                .unwrap_or_else(|| provider_name.clone()),
+            provider_name,
         )
     } else {
         notes.push(
-            "No hosted-API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY \
-             for frontier routing."
+            "No hosted-API key or local frontier provider (vLLM) found. \
+             Set ANTHROPIC_API_KEY or OPENAI_API_KEY for frontier routing."
                 .to_string(),
         );
         let fallback = local_provider
@@ -500,7 +535,7 @@ mod tests {
     fn provider_status_reachable_shows_green_tick() {
         let p = ProviderStatus {
             name: "ollama",
-            url: "127.0.0.1:11434",
+            url: "127.0.0.1:11434".to_string(),
             reachable: true,
             configured: false,
             tier: "cheap-local",
@@ -514,7 +549,7 @@ mod tests {
     fn provider_status_unreachable_shows_red_cross() {
         let p = ProviderStatus {
             name: "vllm",
-            url: "127.0.0.1:8000",
+            url: "127.0.0.1:8000".to_string(),
             reachable: false,
             configured: false,
             tier: "frontier",
@@ -528,7 +563,7 @@ mod tests {
     fn provider_status_configured_shows_env_hint() {
         let p = ProviderStatus {
             name: "ollama",
-            url: "127.0.0.1:11434",
+            url: "127.0.0.1:11434".to_string(),
             reachable: false,
             configured: true,
             tier: "cheap-local",
@@ -548,14 +583,14 @@ mod tests {
         let providers = vec![
             ProviderStatus {
                 name: "ollama",
-                url: "127.0.0.1:11434",
+                url: "127.0.0.1:11434".to_string(),
                 reachable: true,
                 configured: false,
                 tier: "cheap-local",
             },
             ProviderStatus {
                 name: "anthropic",
-                url: "api.anthropic.com",
+                url: "api.anthropic.com".to_string(),
                 reachable: false,
                 configured: true,
                 tier: "frontier",
