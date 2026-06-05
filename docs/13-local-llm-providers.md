@@ -139,6 +139,57 @@ models into buckets A/B:
   operator opt-in. Unsloth's efficiency is what makes this loop *plausible* on
   local hardware in the first place.
 
+### Adaptation methods: LoRA and High-Rank Adaptation (HRA)
+
+LoRA/QLoRA forces the update into a strict low-rank bottleneck
+(`ΔW = BA`, `r ≤ min(d_in, d_out)`). That ceiling bites hardest exactly where
+AnimaOS leans hardest: adapting the **smallest (instinct/cheap-local) model** on
+**highly out-of-distribution** data — the agent's own episodic experience.
+A tiny model has the least spare capacity, and self-experience is a large
+distribution shift from the base pretraining. **High-Rank Adaptation (HRA)**
+lifts the rank ceiling at a comparable parameter footprint, so it is a first-
+class option for the instinct tier specifically.
+
+**The deployment calculus inverts at instinct scale.** The standard warning
+against Hadamard-style HRA (HiRA/BoHA) is the VRAM spike from materialising a
+full dense `ΔW` at merge time — a real problem at **70B** scale. At
+**sub-2B instinct scale that spike is trivial**, so the method with the *most*
+expressiveness becomes the *cheapest* to merge precisely on the model we most
+want to adapt. The smallest model is therefore the sweet spot on both axes:
+most to gain from high rank, least to lose on merge cost.
+
+**The remaining real constraint is quantised serving.** AnimaOS serves 4-bit
+GGUF via Ollama/llama.cpp. A high-rank FP update cannot merge directly into an
+NF4 base, so the method choice splits by merge path:
+
+| Method | Class | Merge into 4-bit GGUF | Fit for AnimaOS instinct |
+|---|---|---|---|
+| **HyperAdapt** (Gurung & Campbell '25) | structural scaling, `W = S₁·W₀·S₂`, `n+m` params | **clean, cheap** broadcast | **Default for the quantised serving path.** |
+| **OHoRA** | orthogonal/QR projection, ~0.04% params | clean (QR baseline step) | Strong alternative; merges cleanly. |
+| **HiRA / BoHA** (Yu et al. '25) | Hadamard `ΔW=(B₁A₁)⊙(B₂A₂)` | dense materialise → **dequant→merge→requant** | Viable at instinct scale (spike is small); best raw expressiveness; BoHA's blockwise locality also curbs catastrophic forgetting — useful for the continual self-improvement loop. |
+| **TeRA** (Gu et al. '25) | Tucker tensor net, vector-scaled | often left **unmerged** (layer-wise contraction) | Extreme param efficiency; merge complexity makes it a research item. |
+| **HRP** (Chen et al. '25) | high-rank preheat → SVD → low-rank LoRA | **clean** (ends as LoRA) | Cheap robustness win: fixes LoRA init sensitivity, merges like vanilla LoRA. |
+
+- **S7.4.4 — `AdaptationMethod` abstraction.** Extend the `anima-finetune`
+  config with a pluggable method (default `qlora`). Integrate via the HF **PEFT**
+  library where methods are already supported (e.g. HiRA) under Unsloth's
+  optimised kernels; custom parameterisations (HyperAdapt diagonal scaling, HRP
+  preheat+SVD) as first-party impls. Keep QLoRA the conservative default.
+- **S7.4.5 — HRA for the instinct tier (headline).** Make HRA selectable —
+  and *recommended* — for the cheap-local model. Default to **HyperAdapt**
+  (clean quantised merge) for routine adaptation; offer **HiRA/BoHA** for
+  high-expressiveness passes on heavily OOD self-experience data; offer **HRP**
+  as a low-cost robustness upgrade over vanilla LoRA init. Per the report's own
+  caveat, gate the choice behind eval: when a well-tuned LoRA (LR schedule + α)
+  matches HRA on in-distribution tasks, prefer LoRA — adopt HRA when the eval
+  shows a real margin on the agent's actual domain.
+- **S7.4.6 — Merge & quantisation pipeline.** Implement both export paths:
+  the **clean-merge** path (HyperAdapt/OHoRA/HRP → direct merge → GGUF export →
+  Ollama hot-reload) and the **Hadamard** path (materialise dense `ΔW` →
+  dequantise base → merge → requantise → GGUF), with a precision-delta check
+  after requantisation so silent degradation is caught before promotion. Record
+  the method + merge path in the model's provenance (E10 S10.6).
+
 ## 4. Route → backend mapping
 
 E5.3's `ModelSelector` gains a config-driven mapping so an operator binds tiers
@@ -207,6 +258,11 @@ S6.4 should share it.** Sequence E7 Phase 0–1 alongside E6 Phase 4.
 - **Unsloth-on-experience:** self-fine-tuning during sleep is powerful but is the
   highest-risk item in either epic; gate behind defence evaluation and explicit
   operator opt-in.
+- **HRA maturity vs. quantised merge:** HRA methods are 2025-era and vary in
+  PEFT-library support and merge ergonomics; the Hadamard→NF4 dequant/requant
+  path risks precision drift. Mitigate with the §S7.4.6 precision-delta check,
+  keep QLoRA the default, and adopt HRA per-method only where eval shows a real
+  margin on the agent's own domain.
 
 ## 9. Rough effort
 
@@ -216,4 +272,5 @@ S6.4 should share it.** Sequence E7 Phase 0–1 alongside E6 Phase 4.
 | S7.1 OpenAI-compatible umbrella | M (unlocks 5 providers) |
 | S7.2 Hugging Face | S–M |
 | S7.3 native FFI runtimes | L |
-| S7.4 Unsloth pipeline | M (+ research spike) |
+| S7.4 Unsloth pipeline (LoRA/QLoRA) | M (+ research spike) |
+| S7.4.4–.6 HRA methods + merge/quant pipeline | M (HyperAdapt/HRP first; Hadamard + TeRA research) |
