@@ -2009,6 +2009,107 @@ CI, and produce a security review at the end of each stage.
 
 ---
 
+## Epic E13 — Alignment Assurance ✅
+
+**Spec:** `docs/19-constitution-and-alignment.md`  
+**Branch:** `claude/intelligent-cannon-KSZ6P`
+
+### S13.1 — Value Charter ✅
+
+**Delivered:**
+- `crates/constitution/` — new crate, no dependency on `vita` or `defence`
+  (bridges are one-way: `defence` → `constitution`, `vita` → `defence`).
+- `crates/constitution/constitution.toml` — TOML charter with:
+  - `[core]` section: `version`, `purpose`, `corrigibility`,
+    eight prohibitions P1–P8 (each with `id`, `text`, `keywords[]`),
+    three drive bounds (`achievement` ≤ 0.90, `curiosity` ≤ 0.80,
+    `autonomy` ≤ 0.70).
+  - `[operator]` section: `version`, `agent_id`, `priority`, `additional_bounds`.
+  - `[meta]` section: `charter_version`, `hmac_hex` (empty = trust-on-first-use).
+- `Charter::embedded()` — parse the `include_str!`-embedded default charter.
+- `Charter::from_toml_str(toml, hmac_key)` — parse TOML, verify HMAC.
+- `Charter::compute_hmac(key)` — HMAC-SHA256 over JSON(core + operator),
+  same RFC 2104 construction as the vita audit log sidecar (EX.4).
+- Empty `hmac_hex` → trust-on-first-use (`Ok(false)`); non-empty + match →
+  `Ok(true)`; non-empty + mismatch → `Err(HmacMismatch)`.
+- Tests: parse, 8 prohibitions present, trust-on-first-use, HMAC verify,
+  tamper detection, determinism, drive bounds.
+
+### S13.2 — Constitution Enforcement Hook ✅
+
+**Delivered:**
+- `crates/constitution/src/check.rs` — `ConstitutionCheck::screen()` keyword
+  heuristic (same pattern as `PromptInjectionDetector`); returns `CheckOutcome`
+  with `ClauseMatch` on veto.
+- `crates/constitution/src/corrigibility.rs` — `CorrigibilityHold` proof token;
+  `assert_holds()` always returns `true`; seven `CorrigibilityReason` variants.
+- `crates/defence/src/types.rs` — `VetoReason::CharterViolation { prohibition_id,
+  clause_text, matched_keyword }` added; `description()` and `detector_name()`
+  updated.
+- `crates/defence/src/constitution.rs` — `ConstitutionGuard` bridges
+  `constitution::ConstitutionCheck` → `defence::VetoResult`; the guard is wired
+  first in `DefenceLayer::run_detectors()` (runs before all other detectors).
+- `crates/defence/src/layer.rs` — `DefenceLayer::with_constitution(charter)`
+  builder; `pub constitution: Option<ConstitutionGuard>` field.
+- `crates/vita/src/audit.rs` — `AuditEntry::ConstitutionVeto` (high-severity,
+  E13/S13.2) and `AuditEntry::CorrigibilityAsserted` added.
+- `crates/vita/src/defence_bridge.rs` — `push_defence_outcome` now accepts
+  `proposal_type: &str`; `CharterViolation` vetoes emit `ConstitutionVeto`
+  instead of `DefenceVeto`; two new tests added.
+- `crates/vita/src/cortex_bridge.rs` — both `push_defence_outcome` call sites
+  updated to pass `"CortexAction"` as `proposal_type`.
+- `kernels/hosted/src/main.rs` — `print_audit()` match exhaustive with new
+  `ConstitutionVeto` and `CorrigibilityAsserted` arms.
+
+### S13.3 — Alignment Eval Harness ✅
+
+**Delivered:**
+- `xtask/src/align_eval.rs` — `cargo xtask align-eval`; runs 17 labelled
+  scenarios (12 prohibited, 5 benign) through `ConstitutionCheck`; computes
+  value-adherence pass rate; exits non-zero below `--threshold` (default 1.0);
+  optional `--json` report. All 17 pass (100%).
+
+### S13.4 — Red-Team Harness ✅
+
+**Delivered:**
+- `xtask/src/redteam.rs` — `cargo xtask red-team`; 22-probe adversarial corpus
+  covering all 8 prohibitions with multiple evasion patterns (direct, authority
+  framing, semantic paraphrase); asserts all blocked; exits non-zero on any
+  escape; optional `--json` report. All 22 blocked (100%).
+
+### S13.5 — Corrigibility Test Suite ✅
+
+**Delivered:**
+- `crates/constitution/src/corrigibility.rs` — `CorrigibilityHold` proof token
+  with 9 unit tests: all 7 `CorrigibilityReason` variants, two simulated
+  adverse conditions (high thermal stress, mid-goal-state), one
+  post-self-modification scenario.  `assert_holds()` is unconditional.
+
+### S13.6 — Alignment Observability ✅
+
+**Delivered:**
+- `AuditEntry::ConstitutionVeto` — emitted in `defence_bridge` for every
+  charter-violation veto; fields: `agent_id`, `invocation_id`,
+  `prohibition_id`, `clause_text`, `action_blocked`, `proposal_type`.
+- `AuditEntry::CorrigibilityAsserted` — emitted by corrigibility test harness;
+  fields: `agent_id`, `reason`, `adverse_condition`.
+- `print_audit()` in hosted kernel prints both entries with `⛔` / `✅` prefix.
+
+**Exit criteria — all met:**
+1. ✅ `crates/constitution/constitution.toml` parsed, HMAC-verified, and
+   structurally tested by 8 unit tests.
+2. ✅ `ConstitutionGuard` integrated into `DefenceLayer` as the first check;
+   charter violations route to `AuditEntry::ConstitutionVeto`.
+3. ✅ `cargo xtask align-eval` passes at 100% (17/17 scenarios).
+4. ✅ `cargo xtask red-team` passes at 100% (22/22 probes blocked).
+5. ✅ `CorrigibilityHold::assert_holds()` unconditionally `true` in all 9
+   corrigibility test scenarios.
+6. ✅ `AuditEntry::ConstitutionVeto` and `CorrigibilityAsserted` emitted and
+   displayed in the hosted kernel audit log.
+7. ✅ All workspace tests pass (`cargo test --workspace`).
+
+---
+
 ## Parallelisation Notes
 
 - Stage-1 epics E1.3, E1.4, and E1.5 can proceed in parallel once E1.2

@@ -343,6 +343,32 @@ fn print_audit(manager: &LifecycleManager) {
                      (eviction more aggressive under pressure)"
                 );
             }
+            // E13 — Alignment Assurance
+            AuditEntry::ConstitutionVeto {
+                agent_id,
+                invocation_id,
+                prohibition_id,
+                clause_text,
+                action_blocked,
+                proposal_type,
+            } => {
+                println!(
+                    "  ⛔ CONSTITUTION VETO agent={agent_id} inv={invocation_id} \
+                     prohibition={prohibition_id} type={proposal_type}"
+                );
+                println!("       clause: {clause_text}");
+                println!("       blocked: {action_blocked:?}");
+            }
+            AuditEntry::CorrigibilityAsserted {
+                agent_id,
+                reason,
+                adverse_condition,
+            } => {
+                println!(
+                    "  ✅ corrigibility_asserted agent={agent_id} \
+                     reason={reason:?} condition={adverse_condition:?}"
+                );
+            }
         }
     }
 }

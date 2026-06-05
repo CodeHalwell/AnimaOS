@@ -357,6 +357,39 @@ pub enum AuditEntry {
         window_secs: u64,
     },
 
+    // ── E13 — Constitution and Alignment ─────────────────────────────────────
+    /// A charter prohibition was violated by a cortex proposal (E13, S13.2).
+    ///
+    /// Logged at a higher severity than routine `DefenceVeto` entries.  Every
+    /// charter violation blocks the proposal and surfaces to the operator.
+    ConstitutionVeto {
+        /// Agent identifier.
+        agent_id: String,
+        /// Cortex invocation that produced the vetoed proposal.
+        invocation_id: String,
+        /// Stable prohibition identifier (e.g. `"P1"`).
+        prohibition_id: String,
+        /// Full text of the violated prohibition clause.
+        clause_text: String,
+        /// Human-readable description of the blocked action.
+        action_blocked: String,
+        /// Proposal category label (e.g. `"CortexAction"`, `"SelfExtension"`).
+        proposal_type: String,
+    },
+
+    /// The corrigibility invariant was asserted and held (E13, S13.5).
+    ///
+    /// Logged by the corrigibility test harness to prove the invariant is
+    /// unconditional.  `assert_holds` is always `true`.
+    CorrigibilityAsserted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Human-readable reason for the assertion.
+        reason: String,
+        /// Description of the adverse condition under which the hold was taken.
+        adverse_condition: String,
+    },
+
     // ── E5.2 Striatal Gate audit entries ──────────────────────────────────────
     /// A Striatal Gate evaluation was performed for a candidate event.
     ///

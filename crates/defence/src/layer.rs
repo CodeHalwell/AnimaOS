@@ -20,6 +20,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::constitution::ConstitutionGuard;
 use crate::goal_drift::GoalDriftMonitor;
 use crate::injection::PromptInjectionDetector;
 use crate::motor_gate::UnsafeMotorActionGate;
@@ -87,6 +88,8 @@ impl ScreeningOutcome {
 pub struct DefenceLayer {
     /// Configuration.
     pub config: DefenceConfig,
+    /// Constitution guard — highest priority (E13, S13.2).
+    pub constitution: Option<ConstitutionGuard>,
     /// Prompt-injection detector (S5.6.1).
     pub injection: PromptInjectionDetector,
     /// Goal-drift monitor (S5.6.2).
@@ -117,6 +120,7 @@ impl DefenceLayer {
 
         Self {
             config,
+            constitution: None,
             injection: PromptInjectionDetector::new(),
             drift,
             hacking,
@@ -124,6 +128,16 @@ impl DefenceLayer {
             veto_history: Vec::new(),
             attention_demand_count: 0,
         }
+    }
+
+    /// Attaches the constitution guard (E13, S13.2).
+    ///
+    /// When attached, every proposal is screened against the charter *before*
+    /// the mechanical defence rules.  A charter violation is returned as a
+    /// [`VetoReason::CharterViolation`] and the mechanical checks are skipped.
+    pub fn with_constitution(mut self, charter: constitution::Charter) -> Self {
+        self.constitution = Some(ConstitutionGuard::new(charter));
+        self
     }
 
     // ── Public interface ──────────────────────────────────────────────────────
@@ -201,6 +215,14 @@ impl DefenceLayer {
 
     /// Applies all detectors in order and returns the first veto.
     fn run_detectors(&self, proposal: &CortexProposal) -> (VetoResult, &'static str) {
+        // ── Constitution guard (E13) — highest priority ──────────────────────
+        if let Some(guard) = &self.constitution {
+            let r = guard.screen(proposal);
+            if r.is_vetoed() {
+                return (r, "ConstitutionGuard");
+            }
+        }
+
         match &proposal.action {
             // ── ExternalText: injection check only ───────────────────────────
             ActionKind::ExternalText { source, text } => {
