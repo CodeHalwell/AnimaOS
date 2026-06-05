@@ -1,8 +1,8 @@
 # 15 — Communication & Multimodal Presence
 
-> **Status:** Proposed (scoping). Target epic: **E9 — Presence**.
+> **Status:** Proposed (scoping). Target epic: **E10 — Presence**.
 > Branch: `claude/llm-tools-animaos-vuXRK`.
-> Related: E6 (tools), E7 (providers), E8 (onboarding), E10 (skills).
+> Related: E7 (tools), E8 (providers), E9 (onboarding), E11 (skills).
 
 ## 0. Goal
 
@@ -32,9 +32,9 @@ log, exactly as the console does.
 Current modality status: `SensoryPacket` supports `Text` and `Pcm` (16-bit
 audio) — voice has a substrate; **images do not exist yet**.
 
-## 2. Workstreams — Epic E9, stories `S9.x`
+## 2. Workstreams — Epic E10, stories `S10.x`
 
-### S9.1 — Channel gateway framework
+### S10.1 — Channel gateway framework
 
 - A `ChannelGateway` trait + a host process (`anima-comms`) that runs one or
   more channel adapters. Each adapter:
@@ -42,32 +42,32 @@ audio) — voice has a substrate; **images do not exist yet**.
   outbound → subscribes to `OperatorEvent` and renders `AgentMessage`/`State`/
   alerts back to the channel.
 - Reuses the console's decoupling: gateways never touch `vita`.
-- Identity-aware addressing: which human a channel maps to (feeds E8 identity).
+- Identity-aware addressing: which human a channel maps to (feeds E9 identity).
 
-### S9.2 — First channel adapters
+### S10.2 — First channel adapters
 
 - Ship a small set behind a common adapter API. **Recommended first:**
   **Telegram** (simplest bot API, supports text + image + voice notes natively)
   and **Slack** (events API, threads, files). Then **Discord**, **WhatsApp/
   Signal**, **email**, **SMS** as follow-ons.
 - Each adapter is fixture-testable offline (recorded webhook payloads); live
-  mode is env-gated with the channel's token (through the E6 secret-redaction
+  mode is env-gated with the channel's token (through the E7 secret-redaction
   path).
-- Outbound requests go through the **E6 egress guard** (a webhook URL is still
+- Outbound requests go through the **E7 egress guard** (a webhook URL is still
   an outbound action).
 
-### S9.3 — Image modality (afferent + efferent)
+### S10.3 — Image modality (afferent + efferent)
 
 - **In:** add `SensoryPacket::Image { bytes, mime, caption? }` + checked
   packetiser with policy bounds (max size/dims), mirroring the PCM path. Routed
-  to a **vision-capable** model (E7: multimodal vLLM/llama.cpp, or hosted
+  to a **vision-capable** model (E8: multimodal vLLM/llama.cpp, or hosted
   Claude/GPT vision on the frontier route).
-- **Out:** the agent can attach images — screenshots from the E6 browser tool,
+- **Out:** the agent can attach images — screenshots from the E7 browser tool,
   generated diagrams/charts, or annotated results.
-- Vision capability is advertised via the E7 `BackendCapabilities.vision` flag;
+- Vision capability is advertised via the E8 `BackendCapabilities.vision` flag;
   routes without it degrade to "describe the image you received" only.
 
-### S9.4 — Voice modality (STT + TTS)
+### S10.4 — Voice modality (STT + TTS)
 
 - **In:** `Pcm` frames already enqueue; add a **speech-to-text** stage
   (recommend local **whisper.cpp** as the default provider, fixture transcript
@@ -79,13 +79,13 @@ audio) — voice has a substrate; **images do not exist yet**.
   backends are swappable and, like everything else, **local-first** and
   CI-hermetic by default.
 
-### S9.5 — Modality-aware routing & presence
+### S10.5 — Modality-aware routing & presence
 
-- The router (E5.3 / E7 §4) gains modality awareness: image/voice inputs require
+- The router (E5.3 / E8 §4) gains modality awareness: image/voice inputs require
   vision/STT-capable routes; the gate weighs channel + modality into urgency
   (a voice message at 2am vs a batched email differ).
 - "Presence": the agent proactively reaches out on the operator's preferred
-  channel for things that matter (E8 sets the channel; the gate decides *when*
+  channel for things that matter (E9 sets the channel; the gate decides *when*
   to interrupt a human — respecting graceful-degradation-when-absent).
 
 ## 3. Architecture sketch
@@ -97,17 +97,17 @@ audio) — voice has a substrate; **images do not exist yet**.
    anima-comms  ── adapter ──► SensoryBridge   │   OperatorEvent (NDJSON, audit tail)
         │            (afferent, gated)         │        ▲
         │                                      └────────┘
-        ├─ image → SensoryPacket::Image ─► vision route (E7)
+        ├─ image → SensoryPacket::Image ─► vision route (E8)
         └─ voice → STT (whisper.cpp) ─► Text packet ;  AgentMessage ─► TTS (Piper) → voice note
 ```
 
 ## 4. Cross-cutting & dependencies
 
-- **E7** supplies vision/STT/TTS providers (multimodal models, whisper.cpp,
+- **E8** supplies vision/STT/TTS providers (multimodal models, whisper.cpp,
   Piper) — local-first, same factory/health-probe discipline.
-- **E6 egress guard** screens every outbound channel call; **E6 injection
+- **E7 egress guard** screens every outbound channel call; **E7 injection
   detector** screens inbound message content (a chat message is untrusted input).
-- **E8** sets the operator's preferred channel during onboarding.
+- **E9** sets the operator's preferred channel during onboarding.
 - **Safety invariants preserved:** all inbound stays *gated* (never preempts the
   kernel); the agent degrades gracefully when no channel is attached.
 

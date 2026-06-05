@@ -1,10 +1,10 @@
 # 12 — Real-World Tools: Embodiment & Efferent World-Interaction Plan
 
-> **Status:** Proposed (scoping). Target epic: **E6 — Embodiment**.
+> **Status:** Proposed (scoping). Target epic: **E7 — Embodiment**.
 > Branch: `claude/llm-tools-animaos-vuXRK`.
 > Companion: [13 — Local LLM Provider Ecosystem](./13-local-llm-providers.md)
-> (E7) supplies the *brains* that E6's tools give *hands*. The chat/tool-calling
-> trait extension (E6 S6.4 §) is shared with E7 §5.
+> (E8) supplies the *brains* that E7's tools give *hands*. The chat/tool-calling
+> trait extension (E7 S7.4 §) is shared with E8 §5.
 
 ## 0. Goal
 
@@ -77,28 +77,28 @@ and pass every outbound action through the existing safety boundary (the
 
 ## 3. Workstreams
 
-Phased so each phase is independently shippable and testable. **Epic E6**,
-stories `S6.x`.
+Phased so each phase is independently shippable and testable. **Epic E7**,
+stories `S7.x`.
 
-### Phase 0 — Foundations: async + egress safety (`S6.0`)
+### Phase 0 — Foundations: async + egress safety (`S7.0`)
 
 The enabling layer everything else depends on.
 
-- **S6.0.1 — Network driver substrate.** New crate **`crates/actuators`**
+- **S7.0.1 — Network driver substrate.** New crate **`crates/actuators`**
   (std-only, outside the `no_std` core, precedent: `llm-backends`). Provides a
   shared Tokio runtime handle and a `NetworkTool` helper so a sync
   `ToolDriver::invoke` can `block_on` async work. Keeps `praxis` lean and
   `no_std`-clean.
-- **S6.0.2 — Egress guard.** `EgressGuard` module: URL/scheme allow-list
+- **S7.0.2 — Egress guard.** `EgressGuard` module: URL/scheme allow-list
   (`https` only by default), **SSRF protection** (reject private/loopback/
   link-local ranges and cloud metadata IPs `169.254.169.254`), configurable
   domain allow/deny lists, and a per-host token-bucket rate limiter.
-- **S6.0.3 — Motor-gate hook at dispatch.** Extend the vita tool-dispatch loop
+- **S7.0.3 — Motor-gate hook at dispatch.** Extend the vita tool-dispatch loop
   so every call carrying an outbound effect is screened by
   `UnsafeMotorActionGate` **before** `invoke`. Extend `defence::ActionKind`
   with `NetworkRequest { url }` and `BrowserNavigate { url }`. Emit
   `AuditEntry::EgressRequested` / `EgressBlocked`.
-- **S6.0.4 — Config & secrets.** Env-var plumbing
+- **S7.0.4 — Config & secrets.** Env-var plumbing
   (`ANIMA_SEARXNG_URL`, `ANTHROPIC_API_KEY`, `ANIMA_OLLAMA_URL`, etc.) with
   **redaction** in audit/log output. A small typed config struct, no secrets in
   episode summaries.
@@ -108,19 +108,19 @@ fetch through the sync trait; (2) a request to a private IP or blocklisted host
 is rejected pre-execution and audited; (3) no secret ever appears in the audit
 log (asserted by test).
 
-### Phase 1 — `web-search` tool via SearXNG (`S6.1`)
+### Phase 1 — `web-search` tool via SearXNG (`S7.1`)
 
-- **S6.1.1 — `SearchProvider` trait** with two impls: `SearxngProvider`
+- **S7.1.1 — `SearchProvider` trait** with two impls: `SearxngProvider`
   (HTTP `GET {SEARXNG_URL}/search?q=…&format=json`) and `FixtureProvider`
   (replays recorded JSON for CI).
-- **S6.1.2 — `WebSearchTool: ToolDriver`.** Schema
+- **S7.1.2 — `WebSearchTool: ToolDriver`.** Schema
   `{ query: string, max_results?: int, categories?: [string] }`; returns ranked
   JSON `[{title, url, snippet}]`. Routes through the egress guard + circuit
   breaker. Output flagged untrusted.
-- **S6.1.3 — Registration & routing.** Register the tool; add to the **frontier**
+- **S7.1.3 — Registration & routing.** Register the tool; add to the **frontier**
   (and optionally **mid-tier**) route `ToolScope`. Author a high-quality
   `ToolSpec.description` (this is what the semantic scorer embeds).
-- **S6.1.4 — Ops.** Add a `searxng` service to `docker-compose.yml`; document
+- **S7.1.4 — Ops.** Add a `searxng` service to `docker-compose.yml`; document
   setup. CI uses the fixture provider only.
 
 **Exit criteria:** (1) mock-cortex integration test drives a search end-to-end
@@ -128,43 +128,43 @@ against the fixture provider and gets ranked results; (2) live test
 (env-gated, `#[ignore]`) hits a real SearXNG; (3) egress guard + circuit breaker
 exercised by unit tests.
 
-### Phase 2 — `browser` tool via Playwright subprocess (`S6.2`)
+### Phase 2 — `browser` tool via Playwright subprocess (`S7.2`)
 
-- **S6.2.1 — Playwright driver process.** A Node (or Python) Playwright worker
+- **S7.2.1 — Playwright driver process.** A Node (or Python) Playwright worker
   that speaks the **same length-prefixed-JSON-over-UDS** protocol as the cortex.
   Commands: `navigate`, `read_text`/`readable`, `click`, `type`, `get_links`,
   `screenshot`. One long-lived browser context; a page per task.
-- **S6.2.2 — `BrowserBridge`** (in `crates/actuators`), managing the subprocess
+- **S7.2.2 — `BrowserBridge`** (in `crates/actuators`), managing the subprocess
   lifecycle with the existing `ChildGuard` RAII pattern from `cortex_bridge.rs`.
-- **S6.2.3 — `Browser*` ToolDrivers.** `browse`/`navigate`/`extract`. Every
+- **S7.2.3 — `Browser*` ToolDrivers.** `browse`/`navigate`/`extract`. Every
   navigation screened as `ActionKind::BrowserNavigate` (motor gate + egress
   guard on the target URL). Resource limits: max pages, per-action timeout, max
   response bytes.
-- **S6.2.4 — Hermetic tests.** A `MockBrowserDriver` (in-Rust, no Chromium)
+- **S7.2.4 — Hermetic tests.** A `MockBrowserDriver` (in-Rust, no Chromium)
   satisfies CI; a real-Chromium smoke test is env-gated. Document the Node +
   browser install as an **optional capability** (heavier dependency; the
-  fetch/readability fallback from a future `S6.2.x` can serve no-Node installs).
+  fetch/readability fallback from a future `S7.2.x` can serve no-Node installs).
 
 **Exit criteria:** (1) mock-browser integration test performs navigate→extract
 end-to-end; (2) navigation to a blocked host is vetoed and audited;
 (3) subprocess is reaped cleanly on success, error, and timeout.
 
-### Phase 3 — Semantic tool selection (`S6.3`)
+### Phase 3 — Semantic tool selection (`S7.3`)
 
-- **S6.3.1 — `ToolScorer` trait.** `score(query, &[ToolSpec]) -> Vec<ToolCandidate>`.
+- **S7.3.1 — `ToolScorer` trait.** `score(query, &[ToolSpec]) -> Vec<ToolCandidate>`.
   Impls: `EmbeddingScorer` (local model via **fastembed-rs**/candle, e.g.
   `bge-small`/`all-MiniLM`, cosine similarity), plus a deterministic
   `LexicalScorer` (BM25) and `FixtureScorer` for CI.
-- **S6.3.2 — Tool index.** Embed each registered tool's `ToolSpec.description`
+- **S7.3.2 — Tool index.** Embed each registered tool's `ToolSpec.description`
   once at startup; cache vectors; re-embed on registry change.
-- **S6.3.3 — Wire into dispatch.** New stage in `build_routed_request` (or a
+- **S7.3.3 — Wire into dispatch.** New stage in `build_routed_request` (or a
   pre-step in vita dispatch): **start from the route's tier allow-list** →
   score against the task description → `length_robust_filter(tau_rel)` →
   final `ToolSpec` list handed to the cortex. Selection only ever *narrows* the
   tier set.
-- **S6.3.4 — Config & audit.** Per-route `tau_rel` and max-tools cap. New
+- **S7.3.4 — Config & audit.** Per-route `tau_rel` and max-tools cap. New
   `AuditEntry::ToolSelection { candidates_scored, kept, tau_rel }`.
-- **S6.3.5 — Benchmarks.** Reuse the documented benchmark set already in
+- **S7.3.5 — Benchmarks.** Reuse the documented benchmark set already in
   `registry.rs` tests; assert correct selection, determinism, and `tau_rel`
   sweeps.
 
@@ -173,21 +173,21 @@ the cortex receives exactly the relevance-filtered subset; (2) selection is
 deterministic for fixed inputs; (3) the tier boundary is never widened by
 scoring (asserted).
 
-### Phase 4 — Live LLM backends & real cortex tool-calling (`S6.4`)
+### Phase 4 — Live LLM backends & real cortex tool-calling (`S7.4`)
 
-- **S6.4.1 — Anthropic live mode.** Real HTTPS + streaming + tool-use blocks;
+- **S7.4.1 — Anthropic live mode.** Real HTTPS + streaming + tool-use blocks;
   map `ToolSpec` → Anthropic tool schema; parse `tool_use` → `ToolCall`, feed
   `tool_result` back. Egress + key handling via Phase 0.
-- **S6.4.2 — Ollama live mode.** Local HTTP tool-calling (native tool API, with
+- **S7.4.2 — Ollama live mode.** Local HTTP tool-calling (native tool API, with
   a prompt-format fallback for models lacking it). Maps to the cheap-local tier.
-- **S6.4.3 — Real `agent_loop.py`.** Replace the mock plan with an LLM-driven
+- **S7.4.3 — Real `agent_loop.py`.** Replace the mock plan with an LLM-driven
   Plan/Act/Observe/Revise loop that consumes `InvokeRequest.tools`, emits real
   `ToolCall`s, consumes `ToolResponse`, and honours `max_turns`/`max_tool_calls`.
   Backend chosen via the existing `--backend` flag (`anthropic|ollama|mock`).
-- **S6.4.4 — Route → backend wiring.** `ModelSelector::Frontier → anthropic`,
+- **S7.4.4 — Route → backend wiring.** `ModelSelector::Frontier → anthropic`,
   `CheapLocal → ollama`, `MidTier → ` (Ollama-large or Claude Haiku — TBD).
   Pass the backend hint through `InvokeRequest`/spawn.
-- **S6.4.5 — Tests.** Fixture-mode end-to-end stays the CI default; live smoke
+- **S7.4.5 — Tests.** Fixture-mode end-to-end stays the CI default; live smoke
   tests are env-gated.
 
 **Exit criteria:** (1) with fixtures, a routed task runs a multi-step
@@ -224,7 +224,7 @@ cortex ──ToolCall──► vita dispatch
 ```
 
 This lands the egress substrate, the first real tool, and the long-dormant
-semantic filter wired in (BM25 first, embeddings as fast-follow in S6.3.1).
+semantic filter wired in (BM25 first, embeddings as fast-follow in S7.3.1).
 **Playwright (Phase 2)** and **live Anthropic/Ollama (Phase 4)** follow as
 separate PRs to keep review surface manageable.
 

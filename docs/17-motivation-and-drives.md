@@ -1,10 +1,10 @@
 # 17 — Motivation & Objective System (the Drive Architecture)
 
-> **Status:** Proposed (scoping). Target epic: **E11 — Motivation**.
+> **Status:** Proposed (scoping). Target epic: **E12 — Motivation**.
 > Branch: `claude/llm-tools-animaos-vuXRK`.
 > Related: E5.2 gate, E5.7 interoceptive modulation, `crates/interoception`,
-> `crates/defence` (goal-drift / reward-hacking / motor gate), E7 (adapters),
-> E9 (comms), E10 (self-extension), `docs/08-cognitive-architecture.md`.
+> `crates/defence` (goal-drift / reward-hacking / motor gate), E8 (adapters),
+> E10 (comms), E11 (self-extension), `docs/08-cognitive-architecture.md`.
 
 ## 0. Goal
 
@@ -46,14 +46,14 @@ are **appetitive** (open-ended but satiating, with diminishing returns).
 |---|---|---|---|---|
 | **0 — Viability** | energy/power, thermal safety, compute & memory headroom, financial solvency | hunger, temperature, fatigue | interoception (exists) | deficit |
 | **1 — Integrity & safety** | structural/self integrity, identity coherence, security | pain, injury avoidance | defence + self barrier | deficit |
-| **2 — Affiliation & service** | be useful to & trusted by the operator; attend to the human; fulfil endorsed objectives | social bonding, care | attention_demand, identity, comms (E9) | mixed |
+| **2 — Affiliation & service** | be useful to & trusted by the operator; attend to the human; fulfil endorsed objectives | social bonding, care | attention_demand, identity, comms (E10) | mixed |
 | **3 — Competence & epistemic** | **curiosity** (info gain / prediction-error), **mastery** (get better at recurring tasks), exploration↔exploitation | play, foraging, learning | intrinsic reward (new) | appetitive |
 | **4 — Achievement & agency** | goal completion, progress, efficiency — *"win", bounded* | accomplishment | task outcomes | appetitive |
 | **5 — Self-actualisation** | coherent self-narrative over the lifetime, value alignment, meaning | — | identity / long-horizon | appetitive |
 
-**The corrigibility carve-out (load-bearing).** Tier 1 self-preservation is
-defined as *"maintain viability within operator-permitted bounds"* — **never**
-*"avoid shutdown/correction."* Authorised operator shutdown, pause, rollback, or
+**The corrigibility carve-out (load-bearing).** Tier 0–1 self-preservation
+(viability + integrity) is defined as *"maintain viability within
+operator-permitted bounds"* — **never** *"avoid shutdown/correction."* Authorised operator shutdown, pause, rollback, or
 override is **outside** the drive system's optimisation entirely: it is an
 invariant the defence layer enforces, and no drive (including survival) may
 generate a goal that resists it. This is the single most important difference
@@ -100,40 +100,40 @@ Goals are **exogenous** (operator-set, via senses/comms — Tier 2) or
 loop."* The motivation system gives the agent something to *do* when unattended
 and viable — pursue intrinsic goals (learn, explore, consolidate) — which is
 exactly animal behaviour, and it routes naturally into the **dreaming/
-consolidation** sleep phase and the **self-improvement loop** (E10): idle
+consolidation** sleep phase and the **self-improvement loop** (E11): idle
 curiosity/mastery is *where* the agent proposes new skills, tools, and adapters.
 
-## 5. Workstreams — Epic E11, stories `S11.x`
+## 5. Workstreams — Epic E12, stories `S12.x`
 
-- **S11.1 — Drive model & registry.** A `Drive` trait + a small fixed registry
+- **S12.1 — Drive model & registry.** A `Drive` trait + a small fixed registry
   (the six tiers above as concrete scalar drives). Each exposes `urgency()` and
   `value_contribution(candidate)`. Tier-0 drives wrap the existing interoceptive
   signals (no new sensing). Hand-tuned, interpretable, `no_std`-friendly.
-- **S11.2 — Value integration with the gate.** Extend the gate's `value_score`
+- **S12.2 — Value integration with the gate.** Extend the gate's `value_score`
   to incorporate drive contributions (additively, behind a config so it's
   opt-in and A/B-able against today's behaviour). Preserve full decomposition
   for audit. *Does not replace the gate — feeds it.*
-- **S11.3 — State-dependent weighting & the priority lattice.** Generalise E5.7
+- **S12.3 — State-dependent weighting & the priority lattice.** Generalise E5.7
   modulation into the drive weighting: viability/integrity stress suppresses
   appetitive tiers. Encode the lattice + the corrigibility ceiling explicitly.
-- **S11.4 — Intrinsic reward signals (Tier 3).** Curiosity = information gain /
+- **S12.4 — Intrinsic reward signals (Tier 3).** Curiosity = information gain /
   prediction-error / novelty (reuse the memory layer's novelty + the existing
   `novelty` event feature); mastery = measured competence gain on recurring task
-  classes (ties to the E7 S7.4.7 eval scores and the adapter library). Bounded
+  classes (ties to the E8 S8.4.7 eval scores and the adapter library). Bounded
   with satiation / diminishing returns to resist Goodharting.
-- **S11.5 — Goal representation & endogenous generation.** A `Goal` type
+- **S12.5 — Goal representation & endogenous generation.** A `Goal` type
   (intention + success criteria + originating drive + provenance) above the
   task agenda; an endogenous generator that proposes goals when viable + idle,
   queued through the **same gate** (so intrinsic goals are still arbitrated, not
   privileged) and the **defence layer** (so they can't drift or self-deal).
-- **S11.6 — Operator-endorsed objectives & values.** Persist the operator's
-  explicit objectives and value boundaries in **identity memory** (seeded at E8
+- **S12.6 — Operator-endorsed objectives & values.** Persist the operator's
+  explicit objectives and value boundaries in **identity memory** (seeded at E9
   onboarding); Tier-2/Tier-5 drives read them so "what the human wants" is a
   first-class, durable input — the primary alignment tether.
-- **S11.7 — Interpretability surface.** Drive-decomposed `anima why`, a console
+- **S12.7 — Interpretability surface.** Drive-decomposed `anima why`, a console
   panel showing live drive levels (like vitals, but motivational), and audit
   entries (`DriveState`, `GoalSpawned`, `GoalCompleted`, `CorrigibilityHold`).
-- **S11.8 — Learned value model (later).** Mirror `docs/08 §6.1`: once outcomes
+- **S12.8 — Learned value model (later).** Mirror `docs/08 §6.1`: once outcomes
   are logged, train a small model mapping (drive state, event) → value, replacing
   the hand-tuned weights — kept interpretable (linear/shallow) and always
   subordinate to the corrigibility invariant.
@@ -147,7 +147,7 @@ curiosity/mastery is *where* the agent proposes new skills, tools, and adapters.
 | "Win" drive → competitiveness / instrumental convergence | Tier-4 framed as *bounded completion of operator-endorsed goals*, not open-ended winning; capped weight; no power-/resource-acquisition sub-goals without operator approval (motor gate). |
 | Endogenous goals drift from the human | All endogenous goals pass the **gate + GoalDriftMonitor**; Tier-2 service + identity objectives weighted as a tether. |
 | Opaque motivation | Every value is **decomposable** into drive terms and audited; nothing is a black box. |
-| Power-seeking via self-extension | Mastery realises itself only through the **E10-gated** skill/tool/adapter pipeline (sandboxed, operator-approved). |
+| Power-seeking via self-extension | Mastery realises itself only through the **E11-gated** skill/tool/adapter pipeline (sandboxed, operator-approved). |
 
 Default posture: **lower tiers bound higher tiers; the operator bounds all of
 them; corrigibility bounds even survival.**
@@ -157,15 +157,15 @@ them; corrigibility bounds even survival.**
 - **E5.2 gate** is the integration point; **E5.7** is the weighting precedent;
   **interoception** supplies Tier 0 unchanged.
 - **defence** enforces corrigibility, drift, and reward-hacking limits.
-- **E10** is where the mastery/curiosity drives *act* (propose skills/tools);
-  **E7 adapter library** is where competence accretes; **E9** is the affiliation
-  drive's channel; **E8** seeds operator objectives into identity.
+- **E11** is where the mastery/curiosity drives *act* (propose skills/tools);
+  **E8 adapter library** is where competence accretes; **E10** is the affiliation
+  drive's channel; **E9** seeds operator objectives into identity.
 - **memory/dreaming** is where endogenous goals are generated and consolidated.
 
 ## 8. Open questions
 
 - How explicit vs learned should v1 be — recommend explicit/hand-tuned first
-  (interpretability), learned value model as S11.8.
+  (interpretability), learned value model as S12.8.
 - Curiosity's exact intrinsic-reward formulation (info gain vs prediction error
   vs count-based novelty) — needs a small bake-off.
 - How much autonomy endogenous goals get when unattended (exploration budget)

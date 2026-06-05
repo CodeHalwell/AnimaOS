@@ -1,8 +1,8 @@
 # 16 — Skills & Self-Extension
 
-> **Status:** Proposed (scoping). Target epic: **E10 — Self-Extension**.
+> **Status:** Proposed (scoping). Target epic: **E11 — Self-Extension**.
 > Branch: `claude/llm-tools-animaos-vuXRK`.
-> Related: E6 (tools + semantic selection), E7 (providers/Unsloth), E9 (comms),
+> Related: E7 (tools + semantic selection), E8 (providers/Unsloth), E10 (comms),
 > `docs/09-threat-model.md`, `crates/defence`.
 
 ## 0. Goal
@@ -35,7 +35,7 @@ The defining property is **progressive disclosure**:
 
 Skills are **model-invoked** (the model decides when to use one) and composable.
 This maps cleanly onto AnimaOS's existing pieces: progressive disclosure is the
-same shape as the **E6 semantic tool filter** (`length_robust_filter` over
+same shape as the **E7 semantic tool filter** (`length_robust_filter` over
 descriptions), and skill scripts are the same shape as **praxis tools**.
 
 ## 2. Current state (grounding)
@@ -54,27 +54,27 @@ descriptions), and skill scripts are the same shape as **praxis tools**.
 - **Consolidation/"dreaming"** sleep phases (E5.x) are where reflection on
   recurring needs naturally lives.
 
-## 3. Workstreams — Epic E10, stories `S10.x`
+## 3. Workstreams — Epic E11, stories `S11.x`
 
-### S10.1 — Skill registry & progressive disclosure
+### S11.1 — Skill registry & progressive disclosure
 
 - `SkillRegistry` scanning `~/.anima/<agent_id>/skills/**/SKILL.md`. Parse
   frontmatter (`name`, `description`, optional `version`, `capabilities`).
 - Expose **only metadata** to the cortex by default; load the body when a skill
   is selected, and linked files only when the body references them — true
   three-stage progressive disclosure.
-- Skill selection reuses **E6 S6.3**: embed each skill `description`, score
+- Skill selection reuses **E7 S7.3**: embed each skill `description`, score
   against the task, `length_robust_filter` → candidate skills. One scorer serves
   both tools and skills.
 
-### S10.2 — Built-in / bundled skills
+### S11.2 — Built-in / bundled skills
 
 - Ship a starter set authored by us (not the agent): the **onboarding-interview**
-  skill (E8 S8.2), a **web-research** skill (orchestrates E6 search+browse), a
+  skill (E9 S9.2), a **web-research** skill (orchestrates E7 search+browse), a
   **summarise-and-archive** skill (L3), and a **draft-a-tool** meta-skill
-  (feeds S10.4). Bundled, read-only, versioned with the repo.
+  (feeds S11.4). Bundled, read-only, versioned with the repo.
 
-### S10.3 — Agent-registered **skills** (lower risk)
+### S11.3 — Agent-registered **skills** (lower risk)
 
 - The agent authors a new `SKILL.md` (instructions/prompts only — no new
   executable surface). Flow:
@@ -86,7 +86,7 @@ descriptions), and skill scripts are the same shape as **praxis tools**.
 - Provenance + versioning + one-command rollback. Every step audited
   (`AuditEntry::SkillRegistered` / `SkillPromoted` / `SkillRolledBack`).
 
-### S10.4 — Agent-registered **tools** (higher risk)
+### S11.4 — Agent-registered **tools** (higher risk)
 
 - The agent authors a new tool as a **WASM module** run under
   `praxis::WasmSandbox` (never native code). Flow:
@@ -96,23 +96,23 @@ descriptions), and skill scripts are the same shape as **praxis tools**.
   action surface; default is human-in-the-loop, not auto-approve) → register in
   `ToolRegistry` with its own circuit breaker.
 - The new tool's `ToolSpec.description` is embedded so it immediately joins the
-  E6 semantic-selection candidate pool — the loop closes: *the agent extends the
-  very set of tools E6 selects from.*
+  E7 semantic-selection candidate pool — the loop closes: *the agent extends the
+  very set of tools E7 selects from.*
 - Hard constraints: WASM-only, capability bitmask scoped to exactly what the
-  tool declared, egress still through the E6 guard, no filesystem-critical
+  tool declared, egress still through the E7 guard, no filesystem-critical
   access without a verified capability.
 
-### S10.5 — The self-improvement loop
+### S11.5 — The self-improvement loop
 
 - During the **dreaming/consolidation** sleep phase, the agent reflects on the
   episode log (E5.x) for recurring friction ("I keep hand-assembling the same
-  three tool calls"), and proposes a new skill (S10.3) or tool (S10.4) to
+  three tool calls"), and proposes a new skill (S11.3) or tool (S11.4) to
   collapse it. Proposals queue for the next wake's promotion gate.
-- Optional deeper rung: pair with **E7 Unsloth** to fine-tune behaviour the
+- Optional deeper rung: pair with **E8 Unsloth** to fine-tune behaviour the
   same way — but model/weight changes are the strictest-gated of all (separate
   eval, never auto-promoted).
 
-### S10.6 — Capability, provenance & rollback substrate
+### S11.6 — Capability, provenance & rollback substrate
 
 - Every skill/tool carries provenance (`authored_by: builtin | operator | agent`,
   timestamp, source episode) and a declared capability set checked against
@@ -138,11 +138,11 @@ gated, sandboxed where executable, and fully reversible.
 
 ## 5. Cross-cutting & dependencies
 
-- **E6 S6.3** semantic selection is reused verbatim for skill/tool discovery and
-  auto-extended by S10.4.
-- **E6 defence-at-dispatch + egress guard** apply to agent-authored tools.
-- **E8** onboarding ships as a skill (S8.2 ↔ S10.2).
-- **E7 Unsloth** is the weight-level analogue of self-extension (S10.5).
+- **E7 S7.3** semantic selection is reused verbatim for skill/tool discovery and
+  auto-extended by S11.4.
+- **E7 defence-at-dispatch + egress guard** apply to agent-authored tools.
+- **E9** onboarding ships as a skill (S9.2 ↔ S11.2).
+- **E8 Unsloth** is the weight-level analogue of self-extension (S11.5).
 - Reuses `WasmSandbox`, `CircuitBreaker`, `UnsafeMotorActionGate`, `anima-self`,
   and the audit log — minimal net-new safety machinery.
 
@@ -152,5 +152,5 @@ gated, sandboxed where executable, and fully reversible.
 - Tool authoring: cortex-codegen-to-WASM toolchain choice (e.g. compile a
   restricted DSL vs full language → WASM).
 - Where skills live on the bare-metal target (no `~/.anima` filesystem).
-- Whether weight-level self-improvement (S10.5 Unsloth rung) is in-scope for v1
+- Whether weight-level self-improvement (S11.5 Unsloth rung) is in-scope for v1
   or deferred behind a longer safety review.
