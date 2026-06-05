@@ -1703,6 +1703,91 @@ test are all in-tree.
 
 ---
 
+## Stage 7 — Embodiment, Local Inference & Onboarding
+
+Real-world tools, a local-inference provider ecosystem, and a first-run
+experience.  These forward epics build on the somatic core (Stages 1–6)
+and reference `docs/12–14`.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tools for the cortex: web-search (SearXNG), browser
+(Playwright), semantic tool selection, and live Anthropic/Ollama tool-
+calling.  Details in `docs/12-real-world-tools-plan.md`.
+
+**Dependencies.** E5.1 (cortex), E5.2 (gate), E5.3 (router), E2.3 (praxis
+tool registry).
+
+**Stories.**
+- S7.0 Foundations: async network substrate, `EgressGuard` (SSRF + rate
+  limit), motor-gate hook at dispatch, config & secrets. 🟡
+- S7.1 `web-search` tool via SearXNG. 🟡
+- S7.2 `browser` tool via Playwright subprocess. ⬜
+- S7.3 Semantic tool selection (BM25 lexical scorer → `length_robust_filter`
+  wire-in). 🟡
+- S7.4 Live LLM backends & real cortex tool-calling. ⬜
+
+### Epic E8 — Local Inference Ecosystem 🟡
+
+**Scope.** OpenAI-compatible backend umbrella (vLLM, LM Studio, NVIDIA NIM,
+HF TGI, llama.cpp-server), `ChatBackend` trait extension, provider presets,
+native FFI runtimes (llama.cpp, LiteRT-LM), and Unsloth adaptation.
+Details in `docs/13-local-llm-providers.md`.
+
+**Dependencies.** E1.3 (`LlmBackend`).
+
+**Stories.**
+- S8.0 Provider substrate: `BackendCapabilities`, health probes, fixture
+  discipline. 🟡
+- S8.1 `OpenAiCompatibleBackend` umbrella + provider presets. 🟡
+- S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
+- S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜
+- S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
+  library). ⬜
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** Turn first contact with AnimaOS from a developer ritual into a
+guided journey: `anima doctor` preflight, `anima init` wizard, non-NVIDIA/
+CPU/Apple Silicon support, and a unified quickstart document.
+Details in `docs/14-onboarding.md`.
+
+**Dependencies.** E5.5 (identity memory), E6 (serve subcommand).
+E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
+
+**Stories.**
+- S9.1 Guided first-run wizard (`anima init`). ✅
+  (`kernels/hosted/src/init.rs` — `run_init()`, idempotent state machine,
+  non-interactive CI mode; 11 unit tests covering JSON round-trip, save/load,
+  backend inference)
+- S9.2 Conversational identity bootstrap (depends on E7 S7.4 live cortex). ⬜
+- S9.3 Preflight & hardware/provider detection (`anima doctor`). ✅
+  (`kernels/hosted/src/doctor.rs` — GPU detection via `nvidia-smi` /
+  Apple Silicon / CPU-only fallback; RAM via `/proc/meminfo`; provider TCP
+  probes for Ollama/LM Studio/vLLM/llama.cpp; API-key env checks; tier
+  recommendations; 15 unit tests)
+- S9.4 Non-NVIDIA / CPU / Apple Silicon support. 🟡
+  (doctor detects all three; CPU-only and Apple Silicon paths are documented
+  and exercised; Docker profile work deferred)
+- S9.5 Per-tier router dispatch (shared with E8 §4). ⬜
+- S9.6 Bare-metal onboarding story. ⬜
+- S9.7 Unified quickstart doc. ✅ (`docs/getting-started.md`)
+
+**Exit criteria.**
+1. `anima doctor` detects GPU, RAM, local providers, and API keys; exits
+   clean on CI (no live network). ✅
+   (`doctor::tests` — 15 tests; TCP probe uses 500 ms timeout; no network
+   calls in unit tests; `nvidia-smi` absence handled gracefully)
+2. `anima init --non-interactive` runs end-to-end without prompts; state
+   round-trips through `onboarding.json`. ✅
+   (`init::tests` — 11 tests; `save_and_load_round_trips`, non-interactive
+   path exercised)
+3. A new operator can follow `docs/getting-started.md` from clone to running
+   console in five minutes. ✅ (`docs/getting-started.md` covers five
+   hardware paths: NVIDIA GPU, Apple Silicon, CPU-only, Docker, hosted-API)
+
+---
+
 ## Open Decisions
 
 The following decisions are not yet resolved and gate the affected Stage
