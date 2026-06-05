@@ -115,7 +115,8 @@ impl ToolScorer for LexicalScorer {
         let doc_texts: Vec<Vec<String>> = tools.iter().map(|(_, desc)| tokenise(desc)).collect();
         let mut df: HashMap<&str, usize> = HashMap::new();
         for terms in &doc_texts {
-            let unique: std::collections::HashSet<&str> = terms.iter().map(String::as_str).collect();
+            let unique: std::collections::HashSet<&str> =
+                terms.iter().map(String::as_str).collect();
             for t in unique {
                 *df.entry(t).or_insert(0) += 1;
             }
@@ -166,7 +167,10 @@ mod tests {
     use super::*;
 
     const TOOLS: &[(&str, &str)] = &[
-        ("clock", "Returns the current Unix timestamp in milliseconds"),
+        (
+            "clock",
+            "Returns the current Unix timestamp in milliseconds",
+        ),
         ("echo", "Echoes the input payload back to the caller"),
         (
             "web-search",
@@ -194,7 +198,8 @@ mod tests {
 
     #[test]
     fn fixture_scorer_select_narrows_by_tau() {
-        let scorer = FixtureScorer::new([("clock", 1.0_f32), ("echo", 0.9_f32), ("text-io", 0.3_f32)]);
+        let scorer =
+            FixtureScorer::new([("clock", 1.0_f32), ("echo", 0.9_f32), ("text-io", 0.3_f32)]);
         let kept = scorer.select("test", TOOLS, 0.85);
         let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
         assert!(ids.contains(&"clock"));
@@ -270,15 +275,17 @@ mod tests {
     fn select_never_widens_input_set() {
         let scorer = LexicalScorer;
         let subset: &[(&str, &str)] = &[
-            ("clock", "Returns the current Unix timestamp in milliseconds"),
+            (
+                "clock",
+                "Returns the current Unix timestamp in milliseconds",
+            ),
             (
                 "web-search",
                 "Search the web for information using a search engine query",
             ),
         ];
         let kept = scorer.select("search web", subset, 0.5);
-        let input_ids: std::collections::HashSet<&str> =
-            subset.iter().map(|(id, _)| *id).collect();
+        let input_ids: std::collections::HashSet<&str> = subset.iter().map(|(id, _)| *id).collect();
         for c in &kept {
             assert!(
                 input_ids.contains(c.id.as_str()),
@@ -294,7 +301,10 @@ mod tests {
         // The tier allow-list is `["clock", "echo"]`.
         // Even with a perfect score for "web-search", it cannot enter the list.
         let tier_tools: &[(&str, &str)] = &[
-            ("clock", "Returns the current Unix timestamp in milliseconds"),
+            (
+                "clock",
+                "Returns the current Unix timestamp in milliseconds",
+            ),
             ("echo", "Echoes the input payload back to the caller"),
         ];
         let scorer = FixtureScorer::new([
@@ -304,6 +314,9 @@ mod tests {
         ]);
         let kept = scorer.select("search", tier_tools, 0.1);
         let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
-        assert!(!ids.contains(&"web-search"), "web-search must not appear: tier boundary");
+        assert!(
+            !ids.contains(&"web-search"),
+            "web-search must not appear: tier boundary"
+        );
     }
 }

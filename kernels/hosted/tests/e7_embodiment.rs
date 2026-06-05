@@ -77,7 +77,9 @@ fn egress_guard_blocks_private_ip_ssrf() {
     assert!(guard.check_url("https://192.168.0.1/admin").is_denied());
     assert!(guard.check_url("https://10.0.0.1/").is_denied());
     assert!(guard.check_url("https://127.0.0.1:8080/").is_denied());
-    assert!(guard.check_url("https://169.254.169.254/meta-data/").is_denied());
+    assert!(guard
+        .check_url("https://169.254.169.254/meta-data/")
+        .is_denied());
 }
 
 #[test]
@@ -92,12 +94,8 @@ fn egress_aware_dispatcher_emits_egress_requested_for_web_search() {
     let inner = FnDispatcher({
         let registry = registry.clone();
         move |name: &str, args: &str| {
-            let envelope = praxis::ToolEnvelope::new(
-                praxis::Bus::Mcp,
-                name,
-                args.as_bytes().to_vec(),
-                0,
-            );
+            let envelope =
+                praxis::ToolEnvelope::new(praxis::Bus::Mcp, name, args.as_bytes().to_vec(), 0);
             registry
                 .dispatch(&envelope)
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -126,7 +124,10 @@ fn egress_aware_dispatcher_blocks_browser_call_to_private_ip() {
     let result = dispatcher.dispatch("browser", r#"{"url":"https://192.168.1.10/page"}"#);
     assert!(result.is_err(), "private IP should be blocked");
     let msg = result.unwrap_err();
-    assert!(msg.contains("egress-blocked"), "error should say egress-blocked: {msg}");
+    assert!(
+        msg.contains("egress-blocked"),
+        "error should say egress-blocked: {msg}"
+    );
 
     let buf = dispatcher.audit_buffer.lock().unwrap();
     assert_eq!(buf.len(), 1);
@@ -166,7 +167,10 @@ fn api_key_in_url_args_is_redacted_in_audit_log() {
             !json.contains("supersecret"),
             "raw API key must not appear in audit entry: {json}"
         );
-        assert!(json.contains("[REDACTED]"), "redacted placeholder should be present");
+        assert!(
+            json.contains("[REDACTED]"),
+            "redacted placeholder should be present"
+        );
     }
 }
 
@@ -195,12 +199,8 @@ fn mock_cortex_dispatches_web_search_tool_and_returns_results() {
     let dispatcher = FnDispatcher({
         let registry = registry.clone();
         move |name: &str, args: &str| {
-            let envelope = praxis::ToolEnvelope::new(
-                praxis::Bus::Mcp,
-                name,
-                args.as_bytes().to_vec(),
-                0,
-            );
+            let envelope =
+                praxis::ToolEnvelope::new(praxis::Bus::Mcp, name, args.as_bytes().to_vec(), 0);
             registry
                 .dispatch(&envelope)
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -209,9 +209,14 @@ fn mock_cortex_dispatches_web_search_tool_and_returns_results() {
     });
 
     let mut audit = AuditLog::new();
-    let result = bridge.invoke(request, &dispatcher, &mut audit).expect("cortex invocation failed");
+    let result = bridge
+        .invoke(request, &dispatcher, &mut audit)
+        .expect("cortex invocation failed");
 
-    assert!(result.tool_calls_made > 0, "mock cortex should make at least one tool call");
+    assert!(
+        result.tool_calls_made > 0,
+        "mock cortex should make at least one tool call"
+    );
     assert!(!result.episode_summary.is_empty());
 }
 
@@ -232,19 +237,31 @@ fn web_search_tool_returns_fixture_results_as_json() {
 fn web_search_tool_is_registered_in_tool_registry() {
     let registry = build_registry();
     let ids = registry.list();
-    assert!(ids.contains(&"web-search".to_string()), "web-search should be in registry: {ids:?}");
+    assert!(
+        ids.contains(&"web-search".to_string()),
+        "web-search should be in registry: {ids:?}"
+    );
 }
 
 // ── E7 S7.3 — Semantic tool selection ────────────────────────────────────────
 
 const ALL_TOOLS: &[(&str, &str)] = &[
-    ("clock", "Returns the current Unix timestamp in milliseconds"),
-    ("echo", "Echoes the input payload back to the caller unchanged"),
+    (
+        "clock",
+        "Returns the current Unix timestamp in milliseconds",
+    ),
+    (
+        "echo",
+        "Echoes the input payload back to the caller unchanged",
+    ),
     (
         "web-search",
         "Search the web for information using a search engine query. Returns ranked results.",
     ),
-    ("text-io", "Read and write text files on the local filesystem"),
+    (
+        "text-io",
+        "Read and write text files on the local filesystem",
+    ),
 ];
 
 #[test]
@@ -252,20 +269,33 @@ fn lexical_scorer_selects_web_search_for_web_query() {
     let scorer = LexicalScorer;
     let kept = scorer.select("search the web for recent Rust releases", ALL_TOOLS, 0.5);
     let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
-    assert!(ids.contains(&"web-search"), "web-search should be selected for a web query: {ids:?}");
+    assert!(
+        ids.contains(&"web-search"),
+        "web-search should be selected for a web query: {ids:?}"
+    );
 }
 
 #[test]
 fn lexical_scorer_selection_never_widens_tier_allow_list() {
     let tier_tools: &[(&str, &str)] = &[
-        ("clock", "Returns the current Unix timestamp in milliseconds"),
+        (
+            "clock",
+            "Returns the current Unix timestamp in milliseconds",
+        ),
         ("echo", "Echoes the input payload back to the caller"),
     ];
     // Even with very aggressive scorer, only tools in the tier list can appear.
-    let scorer = FixtureScorer::new([("clock", 1.0_f32), ("echo", 0.9_f32), ("web-search", 99.0_f32)]);
+    let scorer = FixtureScorer::new([
+        ("clock", 1.0_f32),
+        ("echo", 0.9_f32),
+        ("web-search", 99.0_f32),
+    ]);
     let kept = scorer.select("search the web", tier_tools, 0.1);
     let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
-    assert!(!ids.contains(&"web-search"), "web-search must not appear — not in tier list");
+    assert!(
+        !ids.contains(&"web-search"),
+        "web-search must not appear — not in tier list"
+    );
 }
 
 #[test]
@@ -304,8 +334,14 @@ fn length_robust_filter_applied_after_scoring_respects_tau_rel() {
     let kept = length_robust_filter(&candidates, 0.5);
     let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
     assert!(ids.contains(&"web-search"));
-    assert!(!ids.contains(&"clock"), "clock score 0.3 < threshold 0.5 should be dropped");
-    assert!(!ids.contains(&"echo"), "echo score 0.1 < threshold 0.5 should be dropped");
+    assert!(
+        !ids.contains(&"clock"),
+        "clock score 0.3 < threshold 0.5 should be dropped"
+    );
+    assert!(
+        !ids.contains(&"echo"),
+        "echo score 0.1 < threshold 0.5 should be dropped"
+    );
 }
 
 // ── Cross-cutting: full pipeline (select → dispatch → audit) ─────────────────
@@ -354,12 +390,8 @@ fn full_e7_pipeline_selects_tool_dispatches_and_audits() {
     let inner = FnDispatcher({
         let registry = registry.clone();
         move |name: &str, args: &str| {
-            let envelope = praxis::ToolEnvelope::new(
-                praxis::Bus::Mcp,
-                name,
-                args.as_bytes().to_vec(),
-                0,
-            );
+            let envelope =
+                praxis::ToolEnvelope::new(praxis::Bus::Mcp, name, args.as_bytes().to_vec(), 0);
             registry
                 .dispatch(&envelope)
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -375,6 +407,10 @@ fn full_e7_pipeline_selects_tool_dispatches_and_audits() {
 
     // 7. Assert audit trail contains ToolSelection + EgressRequested.
     let entries = audit.entries();
-    assert!(entries.iter().any(|e| matches!(e, AuditEntry::ToolSelection { .. })));
-    assert!(entries.iter().any(|e| matches!(e, AuditEntry::EgressRequested { tool_id, .. } if tool_id == "web-search")));
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, AuditEntry::ToolSelection { .. })));
+    assert!(entries.iter().any(
+        |e| matches!(e, AuditEntry::EgressRequested { tool_id, .. } if tool_id == "web-search")
+    ));
 }

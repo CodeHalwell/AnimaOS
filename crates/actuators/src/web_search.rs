@@ -112,12 +112,7 @@ impl SearchProvider for FixtureProvider {
         max_results: usize,
         _categories: &[String],
     ) -> Result<Vec<SearchResult>, String> {
-        Ok(self
-            .fixture
-            .iter()
-            .take(max_results)
-            .cloned()
-            .collect())
+        Ok(self.fixture.iter().take(max_results).cloned().collect())
     }
 }
 
@@ -159,10 +154,7 @@ impl SearchProvider for SearxngProvider {
         // Screen the provider URL via egress guard before making any request.
         let verdict = self.egress_guard.check_url(&self.base_url);
         if let EgressVerdict::Deny(reason) = verdict {
-            return Err(format!(
-                "egress-blocked: {}",
-                reason.description()
-            ));
+            return Err(format!("egress-blocked: {}", reason.description()));
         }
 
         // Build the SearXNG API URL.
@@ -211,8 +203,9 @@ impl SearchProvider for SearxngProvider {
             if !resp.status().is_success() {
                 return Err(format!("searxng returned status {}", resp.status()));
             }
-            let body: serde_json::Value =
-                resp.json().map_err(|e| format!("json decode failed: {e}"))?;
+            let body: serde_json::Value = resp
+                .json()
+                .map_err(|e| format!("json decode failed: {e}"))?;
             return parse_searxng_response(&body, max_results);
         }
 
@@ -282,10 +275,7 @@ impl WebSearchTool {
     /// `egress_guard` is applied to the SearXNG URL before each request.
     /// For the [`FixtureProvider`], the guard is still instantiated but never
     /// triggers a network call.
-    pub fn new(
-        provider: impl SearchProvider + 'static,
-        egress_guard: EgressGuard,
-    ) -> Self {
+    pub fn new(provider: impl SearchProvider + 'static, egress_guard: EgressGuard) -> Self {
         Self {
             provider: std::sync::Arc::new(provider),
             egress_guard,
@@ -330,8 +320,8 @@ impl ToolDriver for WebSearchTool {
 
     fn invoke(&self, payload: &[u8]) -> Result<Vec<u8>, ToolInvocationError> {
         // Parse the request.
-        let req: SearchRequest = serde_json::from_slice(payload)
-            .map_err(|_| ToolInvocationError::InvalidPayload)?;
+        let req: SearchRequest =
+            serde_json::from_slice(payload).map_err(|_| ToolInvocationError::InvalidPayload)?;
 
         if req.query.trim().is_empty() {
             return Err(ToolInvocationError::InvalidPayload);
@@ -447,10 +437,7 @@ mod tests {
 
     #[test]
     fn searxng_provider_blocks_private_base_url() {
-        let provider = SearxngProvider::new(
-            "https://192.168.1.10/searxng",
-            EgressGuard::default(),
-        );
+        let provider = SearxngProvider::new("https://192.168.1.10/searxng", EgressGuard::default());
         let result = provider.search("rust", 5, &[]);
         assert!(result.is_err());
         let msg = result.unwrap_err();
@@ -463,7 +450,9 @@ mod tests {
     #[test]
     fn fixture_results_have_https_urls() {
         let tool = WebSearchTool::with_fixture(sample_fixture());
-        let payload = serde_json::json!({"query": "test"}).to_string().into_bytes();
+        let payload = serde_json::json!({"query": "test"})
+            .to_string()
+            .into_bytes();
         let output = tool.invoke(&payload).unwrap();
         let results: Vec<SearchResult> = serde_json::from_slice(&output).unwrap();
         for r in &results {

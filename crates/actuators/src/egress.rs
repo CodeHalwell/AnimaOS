@@ -220,7 +220,10 @@ fn parse_scheme_host(url: &str) -> Option<(String, String)> {
     // for plain hostnames/IPv4 strip last `:port`.
     let host = if authority.starts_with('[') {
         // IPv6 literal: `[addr]` or `[addr]:port`
-        let end_bracket = authority.find(']').map(|i| i + 1).unwrap_or(authority.len());
+        let end_bracket = authority
+            .find(']')
+            .map(|i| i + 1)
+            .unwrap_or(authority.len());
         authority[..end_bracket].to_string()
     } else {
         // Remove port suffix if present (last colon, but only if it contains
@@ -288,7 +291,8 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     let p = pattern.trim_start_matches('.').trim_end_matches('.');
     h.eq_ignore_ascii_case(p)
         || h.ends_with(&format!(".{p}"))
-        || h.to_lowercase().ends_with(&format!(".{}", p.to_lowercase()))
+        || h.to_lowercase()
+            .ends_with(&format!(".{}", p.to_lowercase()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -312,7 +316,10 @@ mod tests {
     fn http_is_denied_by_default() {
         let v = guard().check_url("http://example.com/search");
         assert!(v.is_denied());
-        assert!(matches!(v, EgressVerdict::Deny(EgressDenialReason::ForbiddenScheme { .. })));
+        assert!(matches!(
+            v,
+            EgressVerdict::Deny(EgressDenialReason::ForbiddenScheme { .. })
+        ));
     }
 
     #[test]
@@ -349,7 +356,9 @@ mod tests {
 
     #[test]
     fn cloud_metadata_ip_is_denied() {
-        assert!(guard().check_url("https://169.254.169.254/latest/meta-data/").is_denied());
+        assert!(guard()
+            .check_url("https://169.254.169.254/latest/meta-data/")
+            .is_denied());
     }
 
     #[test]
@@ -386,18 +395,21 @@ mod tests {
 
     #[test]
     fn allow_list_mode_permits_listed_host() {
-        let g = EgressGuard::default()
-            .with_allowed_hosts(vec!["searxng.example.com".to_string()]);
-        assert!(g.check_url("https://searxng.example.com/search").is_allowed());
+        let g = EgressGuard::default().with_allowed_hosts(vec!["searxng.example.com".to_string()]);
+        assert!(g
+            .check_url("https://searxng.example.com/search")
+            .is_allowed());
     }
 
     #[test]
     fn allow_list_mode_rejects_unlisted_host() {
-        let g = EgressGuard::default()
-            .with_allowed_hosts(vec!["searxng.example.com".to_string()]);
+        let g = EgressGuard::default().with_allowed_hosts(vec!["searxng.example.com".to_string()]);
         let v = g.check_url("https://other.example.com/");
         assert!(v.is_denied());
-        assert!(matches!(v, EgressVerdict::Deny(EgressDenialReason::HostNotAllowed { .. })));
+        assert!(matches!(
+            v,
+            EgressVerdict::Deny(EgressDenialReason::HostNotAllowed { .. })
+        ));
     }
 
     // ── Parsing edge cases ────────────────────────────────────────────────────
@@ -409,7 +421,9 @@ mod tests {
 
     #[test]
     fn url_with_port_is_handled() {
-        assert!(guard().check_url("https://example.com:8443/search").is_allowed());
+        assert!(guard()
+            .check_url("https://example.com:8443/search")
+            .is_allowed());
         assert!(guard().check_url("https://127.0.0.1:8080/").is_denied());
     }
 

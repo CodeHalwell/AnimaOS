@@ -78,10 +78,7 @@ impl<D: ToolDispatcher> EgressAwareDispatcher<D> {
             inner,
             egress_guard,
             audit_buffer: Arc::new(Mutex::new(Vec::new())),
-            network_tool_ids: NETWORK_TOOL_IDS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            network_tool_ids: NETWORK_TOOL_IDS.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -188,7 +185,8 @@ mod tests {
     use super::*;
     use crate::cortex_bridge::FnDispatcher;
 
-    fn passthrough_dispatcher() -> FnDispatcher<impl Fn(&str, &str) -> Result<String, String> + Send + Sync> {
+    fn passthrough_dispatcher(
+    ) -> FnDispatcher<impl Fn(&str, &str) -> Result<String, String> + Send + Sync> {
         FnDispatcher(|name: &str, _args: &str| Ok(format!("result-of-{name}")))
     }
 
@@ -196,7 +194,8 @@ mod tests {
 
     #[test]
     fn non_network_tool_passes_through_with_no_egress_entry() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let result = dispatcher.dispatch("clock", "{}").unwrap();
         assert_eq!(result, "result-of-clock");
         assert!(dispatcher.audit_buffer.lock().unwrap().is_empty());
@@ -206,7 +205,8 @@ mod tests {
 
     #[test]
     fn web_search_without_url_in_args_emits_egress_requested_entry() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let _ = dispatcher.dispatch("web-search", r#"{"query":"rust news"}"#);
         let buf = dispatcher.audit_buffer.lock().unwrap();
         assert_eq!(buf.len(), 1);
@@ -220,7 +220,8 @@ mod tests {
 
     #[test]
     fn browser_with_private_ip_url_is_blocked_and_audited() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let result = dispatcher.dispatch("browser", r#"{"url":"https://192.168.1.1/admin"}"#);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("egress-blocked"));
@@ -236,7 +237,8 @@ mod tests {
 
     #[test]
     fn browser_with_public_url_emits_egress_requested_and_proceeds() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let result = dispatcher.dispatch("browser", r#"{"url":"https://example.com/page"}"#);
         assert!(result.is_ok());
         let buf = dispatcher.audit_buffer.lock().unwrap();
@@ -252,14 +254,18 @@ mod tests {
 
     #[test]
     fn flush_audit_moves_entries_to_log_and_clears_buffer() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let _ = dispatcher.dispatch("web-search", r#"{"query":"test"}"#);
         assert_eq!(dispatcher.audit_buffer.lock().unwrap().len(), 1);
 
         let mut log = AuditLog::new();
         dispatcher.flush_audit(&mut log);
 
-        assert!(dispatcher.audit_buffer.lock().unwrap().is_empty(), "buffer should be empty after flush");
+        assert!(
+            dispatcher.audit_buffer.lock().unwrap().is_empty(),
+            "buffer should be empty after flush"
+        );
         assert_eq!(log.len(), 1, "log should have the flushed entry");
     }
 
@@ -290,7 +296,8 @@ mod tests {
 
     #[test]
     fn secret_in_url_args_never_appears_in_audit_log() {
-        let dispatcher = EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
+        let dispatcher =
+            EgressAwareDispatcher::new(passthrough_dispatcher(), EgressGuard::default());
         let _ = dispatcher.dispatch(
             "browser",
             r#"{"url":"https://example.com/page?api_key=topsecret&q=test"}"#,

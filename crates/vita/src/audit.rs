@@ -574,7 +574,6 @@ pub enum AuditEntry {
     },
 
     // ── E7 — Embodiment audit entries ─────────────────────────────────────────
-
     /// An outbound network request passed egress screening and was dispatched
     /// (E7 S7.0.3).
     ///
