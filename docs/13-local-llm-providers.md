@@ -34,11 +34,17 @@ The eight names are not eight backends. They fall into three buckets:
 |---|---|---|
 | **A. OpenAI-compatible HTTP server** | vLLM, LM Studio, NVIDIA NIM, Hugging Face TGI, llama.cpp `llama-server` | **One** generalized `OpenAiCompatibleBackend` parameterised by base URL + model + capability flags. ~90% of the work is shared. |
 | **B. Native in-process runtime (FFI)** | llama.cpp (via bindings), LiteRT-LM | A `ToolDriver`-style FFI backend that loads a model file directly — no sidecar, true on-device. Heavier build, optional/feature-gated. |
-| **C. Offline adaptation (not a runtime)** | Unsloth | A **fine-tuning pipeline**, not a serving backend. Produces adapters/GGUF that bucket A or B then serve. Ties into AnimaOS "dreaming"/consolidation. |
+| **C. Offline adaptation (not a runtime)** | **Unsloth (primary)** | The **canonical fine-tuning engine** for AnimaOS — not a serving backend. Produces adapters/GGUF that bucket A or B then serve. Ties into AnimaOS "dreaming"/consolidation. |
 
 This means the epic is mostly: **build one OpenAI-compatible backend well**, add
-a couple of native runtimes, and wire Unsloth as a training path — *not* eight
-parallel HTTP clients.
+a couple of native runtimes, and adopt **Unsloth as the default training
+path** — *not* eight parallel HTTP clients.
+
+> **Unsloth is the standard fine-tuning library for AnimaOS.** It is chosen for
+> efficiency: custom Triton kernels give ≈2× faster LoRA/QLoRA training at
+> materially lower VRAM (often single-consumer-GPU viable), with no accuracy
+> loss vs. stock implementations. Any other trainer is the exception, not the
+> default — all first-party adaptation tooling targets Unsloth.
 
 ## 3. Workstreams — Epic E7, stories `S7.x`
 
@@ -109,18 +115,29 @@ Phase 4).
   Feature-gated (`litert`), targets edge/NPU hardware. The most "agent-OS-native"
   runtime: no daemon, no network.
 
-### Phase 4 — Unsloth adaptation pipeline (`S7.4`)
+### Phase 4 — Unsloth adaptation engine (`S7.4`) — **the** fine-tuning path
 
-Unsloth is **training, not serving** — model it as an offline capability:
+Unsloth is the **default, first-party fine-tuning engine** for AnimaOS (see §2).
+It is **training, not serving** — model it as an offline capability that feeds
+models into buckets A/B:
 
-- **S7.4.1 — Fine-tune job.** An xtask/CLI that runs an Unsloth LoRA/QLoRA job
-  (Python) over a curated dataset and exports an adapter + merged GGUF.
-- **S7.4.2 — Consolidation hook (research).** Wire the export source to
-  AnimaOS's episodic memory / "dreaming" consolidation so the agent can fine-tune
-  a small local model on its own experience during sleep cycles, then serve the
-  result via Ollama/llama.cpp/vLLM. **Flagged as a research spike** — significant
-  safety/eval implications (catastrophic forgetting, value drift; route any
-  resulting model through the existing defence eval before promotion).
+- **S7.4.1 — `anima-finetune` job.** An xtask/CLI wrapping an Unsloth LoRA/QLoRA
+  run (Python) over a curated dataset, exporting an adapter + merged GGUF ready
+  for Ollama/llama.cpp/vLLM. This is the canonical adaptation entrypoint, not a
+  one-off script. Standard config surface: base model, dataset, LoRA rank,
+  QLoRA on/off, max steps, export targets.
+- **S7.4.2 — Provider abstraction (thin).** A `FineTuner` trait with Unsloth as
+  the **default and only first-party impl**; the trait exists purely so the
+  pipeline (dataset → train → export → eval → promote) is testable with a mock,
+  not to invite alternative trainers.
+- **S7.4.3 — Consolidation hook (research spike).** Wire the dataset source to
+  AnimaOS's episodic memory / "dreaming" consolidation so the agent fine-tunes a
+  small local model on its own experience during sleep cycles, then serves the
+  result. **Highest-risk item in either epic** — significant safety/eval
+  implications (catastrophic forgetting, value drift); any resulting model must
+  pass the existing defence evaluation before promotion, behind explicit
+  operator opt-in. Unsloth's efficiency is what makes this loop *plausible* on
+  local hardware in the first place.
 
 ## 4. Route → backend mapping
 
