@@ -79,12 +79,19 @@ pub fn detect_gpu() -> GpuInfo {
     if let Some(info) = probe_apple_silicon() {
         return info;
     }
-    GpuInfo { kind: GpuKind::CpuOnly, vram_gib: None, name: None }
+    GpuInfo {
+        kind: GpuKind::CpuOnly,
+        vram_gib: None,
+        name: None,
+    }
 }
 
 fn probe_nvidia_smi() -> Option<GpuInfo> {
     let output = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
 
@@ -137,19 +144,21 @@ fn detect_ram_gib_platform() -> Option<u32> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     // MemTotal:       16384000 kB
     let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-    let kb: u64 = line
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(((kb + (512 * 1024)) / (1024 * 1024)) as u32) // round to nearest GiB
 }
 
 #[cfg(not(target_os = "linux"))]
 fn detect_ram_gib_platform() -> Option<u32> {
     // macOS / other: use sysctl
-    let output = Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
-    let bytes: u64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+    let output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    let bytes: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
     Some(((bytes + (512 * 1024 * 1024)) / (1024 * 1024 * 1024)) as u32)
 }
 
@@ -173,8 +182,16 @@ pub struct ProviderStatus {
 impl ProviderStatus {
     /// Returns a one-line status string for the doctor report.
     pub fn status_line(&self) -> String {
-        let reach = if self.reachable { "✅ REACHABLE  " } else { "❌ NOT FOUND  " };
-        let cfg = if self.configured { " [env configured]" } else { "" };
+        let reach = if self.reachable {
+            "✅ REACHABLE  "
+        } else {
+            "❌ NOT FOUND  "
+        };
+        let cfg = if self.configured {
+            " [env configured]"
+        } else {
+            ""
+        };
         format!("{reach}{}  tier={}{cfg}", self.url, self.tier)
     }
 }
@@ -182,10 +199,25 @@ impl ProviderStatus {
 /// Known local-inference endpoints to probe.
 static PROVIDER_PROBES: &[(&str, &str, Option<&str>, &str)] = &[
     // (name, host:port, env_var_for_configured_hint, tier)
-    ("ollama", "127.0.0.1:11434", Some("ANIMA_OLLAMA_URL"), "cheap-local"),
-    ("lmstudio", "127.0.0.1:1234", Some("ANIMA_LMSTUDIO_URL"), "mid-tier"),
+    (
+        "ollama",
+        "127.0.0.1:11434",
+        Some("ANIMA_OLLAMA_URL"),
+        "cheap-local",
+    ),
+    (
+        "lmstudio",
+        "127.0.0.1:1234",
+        Some("ANIMA_LMSTUDIO_URL"),
+        "mid-tier",
+    ),
     ("vllm", "127.0.0.1:8000", Some("ANIMA_VLLM_URL"), "frontier"),
-    ("llamacpp-server", "127.0.0.1:8080", Some("ANIMA_LLAMACPP_URL"), "mid-tier"),
+    (
+        "llamacpp-server",
+        "127.0.0.1:8080",
+        Some("ANIMA_LLAMACPP_URL"),
+        "mid-tier",
+    ),
 ];
 
 /// Known hosted-API providers (no TCP probe — check env key only).
@@ -209,7 +241,13 @@ pub fn detect_providers() -> Vec<ProviderStatus> {
         let configured = env_key
             .map(|k| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false))
             .unwrap_or(false);
-        results.push(ProviderStatus { name, url: addr, reachable, configured, tier });
+        results.push(ProviderStatus {
+            name,
+            url: addr,
+            reachable,
+            configured,
+            tier,
+        });
     }
 
     // Hosted APIs: env-key check only
@@ -217,7 +255,11 @@ pub fn detect_providers() -> Vec<ProviderStatus> {
         let configured = std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false);
         results.push(ProviderStatus {
             name,
-            url: if name == "anthropic" { "api.anthropic.com" } else { "api.openai.com" },
+            url: if name == "anthropic" {
+                "api.anthropic.com"
+            } else {
+                "api.openai.com"
+            },
             reachable: false, // not probed
             configured,
             tier,
@@ -246,13 +288,21 @@ pub fn recommend(gpu: &GpuInfo, providers: &[ProviderStatus]) -> TierRecommendat
     let local_provider = providers
         .iter()
         .find(|p| p.reachable && (p.name == "ollama" || p.name == "llamacpp-server"))
-        .or_else(|| providers.iter().find(|p| p.reachable && p.name == "lmstudio"));
+        .or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.reachable && p.name == "lmstudio")
+        });
 
     // Best hosted API provider: prefer anthropic
     let api_provider = providers
         .iter()
         .find(|p| p.configured && p.name == "anthropic")
-        .or_else(|| providers.iter().find(|p| p.configured && p.name == "openai"));
+        .or_else(|| {
+            providers
+                .iter()
+                .find(|p| p.configured && p.name == "openai")
+        });
 
     let cheap_local = if let Some(p) = local_provider {
         match p.name {
@@ -283,17 +333,22 @@ pub fn recommend(gpu: &GpuInfo, providers: &[ProviderStatus]) -> TierRecommendat
              for frontier routing."
                 .to_string(),
         );
-        let fallback = local_provider.map(|p| p.name.to_string()).unwrap_or_else(|| "mock".to_string());
+        let fallback = local_provider
+            .map(|p| p.name.to_string())
+            .unwrap_or_else(|| "mock".to_string());
         (fallback.clone(), fallback)
     };
 
     if !gpu.can_run_local_inference() {
-        notes.push(
-            "Limited GPU VRAM: consider quantised models (Q4_K_M or smaller).".to_string(),
-        );
+        notes.push("Limited GPU VRAM: consider quantised models (Q4_K_M or smaller).".to_string());
     }
 
-    TierRecommendation { cheap_local, mid_tier, frontier, notes }
+    TierRecommendation {
+        cheap_local,
+        mid_tier,
+        frontier,
+        notes,
+    }
 }
 
 // ── Full report ───────────────────────────────────────────────────────────────
@@ -313,7 +368,12 @@ pub fn run_doctor() -> DoctorReport {
     let ram_gib = detect_ram_gib();
     let providers = detect_providers();
     let recommendation = recommend(&gpu, &providers);
-    DoctorReport { gpu, ram_gib, providers, recommendation }
+    DoctorReport {
+        gpu,
+        ram_gib,
+        providers,
+        recommendation,
+    }
 }
 
 /// Print the doctor report to stdout in a human-readable format.
@@ -386,33 +446,51 @@ mod tests {
 
     #[test]
     fn gpu_info_cpu_only_summary() {
-        let info = GpuInfo { kind: GpuKind::CpuOnly, vram_gib: None, name: None };
+        let info = GpuInfo {
+            kind: GpuKind::CpuOnly,
+            vram_gib: None,
+            name: None,
+        };
         assert!(info.summary().contains("CPU-only"));
     }
 
     #[test]
     fn nvidia_4gib_can_run_inference() {
-        let info =
-            GpuInfo { kind: GpuKind::Nvidia, vram_gib: Some(4), name: None };
+        let info = GpuInfo {
+            kind: GpuKind::Nvidia,
+            vram_gib: Some(4),
+            name: None,
+        };
         assert!(info.can_run_local_inference());
     }
 
     #[test]
     fn nvidia_2gib_cannot_run_inference() {
-        let info =
-            GpuInfo { kind: GpuKind::Nvidia, vram_gib: Some(2), name: None };
+        let info = GpuInfo {
+            kind: GpuKind::Nvidia,
+            vram_gib: Some(2),
+            name: None,
+        };
         assert!(!info.can_run_local_inference());
     }
 
     #[test]
     fn apple_silicon_can_always_run_inference() {
-        let info = GpuInfo { kind: GpuKind::AppleSilicon, vram_gib: None, name: None };
+        let info = GpuInfo {
+            kind: GpuKind::AppleSilicon,
+            vram_gib: None,
+            name: None,
+        };
         assert!(info.can_run_local_inference());
     }
 
     #[test]
     fn cpu_only_can_run_inference_slowly() {
-        let info = GpuInfo { kind: GpuKind::CpuOnly, vram_gib: None, name: None };
+        let info = GpuInfo {
+            kind: GpuKind::CpuOnly,
+            vram_gib: None,
+            name: None,
+        };
         assert!(info.can_run_local_inference());
     }
 
@@ -462,7 +540,11 @@ mod tests {
 
     #[test]
     fn recommend_with_ollama_and_anthropic_key() {
-        let gpu = GpuInfo { kind: GpuKind::Nvidia, vram_gib: Some(24), name: None };
+        let gpu = GpuInfo {
+            kind: GpuKind::Nvidia,
+            vram_gib: Some(24),
+            name: None,
+        };
         let providers = vec![
             ProviderStatus {
                 name: "ollama",
@@ -487,7 +569,11 @@ mod tests {
 
     #[test]
     fn recommend_no_providers_adds_notes() {
-        let gpu = GpuInfo { kind: GpuKind::CpuOnly, vram_gib: None, name: None };
+        let gpu = GpuInfo {
+            kind: GpuKind::CpuOnly,
+            vram_gib: None,
+            name: None,
+        };
         let providers: Vec<ProviderStatus> = vec![];
         let rec = recommend(&gpu, &providers);
         assert!(rec.cheap_local.contains("mock"));
@@ -496,7 +582,11 @@ mod tests {
 
     #[test]
     fn recommend_low_vram_adds_quantisation_note() {
-        let gpu = GpuInfo { kind: GpuKind::Nvidia, vram_gib: Some(2), name: None };
+        let gpu = GpuInfo {
+            kind: GpuKind::Nvidia,
+            vram_gib: Some(2),
+            name: None,
+        };
         let providers: Vec<ProviderStatus> = vec![];
         let rec = recommend(&gpu, &providers);
         assert!(rec.notes.iter().any(|n| n.contains("VRAM")));

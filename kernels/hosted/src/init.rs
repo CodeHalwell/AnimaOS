@@ -45,7 +45,10 @@ pub struct OnboardingState {
 /// Resolves to `~/.anima/<agent_id>/onboarding.json`.
 pub fn default_state_path(agent_id: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".anima").join(agent_id).join("onboarding.json")
+    PathBuf::from(home)
+        .join(".anima")
+        .join(agent_id)
+        .join("onboarding.json")
 }
 
 /// Load an existing onboarding state from a JSON file, or return a fresh
@@ -56,9 +59,8 @@ pub fn load_state(path: &Path) -> io::Result<OnboardingState> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(OnboardingState::default()),
         Err(e) => return Err(e),
     };
-    parse_state(&text).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "onboarding.json parse error")
-    })
+    parse_state(&text)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "onboarding.json parse error"))
 }
 
 /// Persist the onboarding state atomically (write-to-tmp then rename).
@@ -133,7 +135,11 @@ fn prompt_with_default(msg: &str, default: &str) -> String {
     let mut line = String::new();
     stdin.lock().read_line(&mut line).ok();
     let trimmed = line.trim().to_string();
-    if trimmed.is_empty() { default.to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed
+    }
 }
 
 // ── Wizard steps ──────────────────────────────────────────────────────────────
@@ -156,7 +162,10 @@ fn step_preflight(state: &mut OnboardingState, interactive: bool) -> DoctorRepor
     let report = doctor::run_doctor();
     doctor::print_report(&report);
 
-    let blocking = report.providers.iter().all(|p| !p.reachable && !p.configured);
+    let blocking = report
+        .providers
+        .iter()
+        .all(|p| !p.reachable && !p.configured);
     state.preflight_ok = !blocking;
 
     if blocking && interactive {
@@ -172,11 +181,7 @@ fn step_preflight(state: &mut OnboardingState, interactive: bool) -> DoctorRepor
 }
 
 /// Step 2: Confirm or adjust provider tier bindings.  Updates `state.*_backend`.
-fn step_providers(
-    state: &mut OnboardingState,
-    report: &DoctorReport,
-    interactive: bool,
-) {
+fn step_providers(state: &mut OnboardingState, report: &DoctorReport, interactive: bool) {
     println!("━━━ Step 2 — Provider bindings\n");
     let rec = &report.recommendation;
 
@@ -225,9 +230,8 @@ fn step_identity(state: &mut OnboardingState, agent_id: &str, interactive: bool)
 
         // Write fact through the existing IdentityMemory path.
         let path = vita::IdentityMemory::default_path(agent_id);
-        let mut identity = vita::IdentityMemory::open(&path).unwrap_or_else(|_| {
-            vita::IdentityMemory::in_memory()
-        });
+        let mut identity =
+            vita::IdentityMemory::open(&path).unwrap_or_else(|_| vita::IdentityMemory::in_memory());
         let mut log = vita::AuditLog::new();
         let _ = identity.set_fact("operator_name", &name, &mut log, agent_id);
         if let Err(e) = identity.flush_document() {
@@ -269,9 +273,7 @@ fn step_config_snippet(state: &OnboardingState) {
     println!("  # AnimaOS — E9 onboarding config");
     println!("  export ANIMA_BACKEND={cheap}");
     if frontier != cheap {
-        println!(
-            "  # For frontier routing, the router will use: {frontier}"
-        );
+        println!("  # For frontier routing, the router will use: {frontier}");
     }
     println!();
     println!("  Start the agent:");
@@ -333,7 +335,10 @@ pub fn run_init(agent_id: &str, non_interactive: bool) {
     if let Err(e) = save_state(&state_path, &state) {
         eprintln!("warning: could not save onboarding state ({e})");
     } else {
-        println!("✅ Onboarding complete. State saved to: {}\n", state_path.display());
+        println!(
+            "✅ Onboarding complete. State saved to: {}\n",
+            state_path.display()
+        );
     }
     println!(
         "Your agent is ready. Run `anima-hosted serve` to wake it.\n\
@@ -349,7 +354,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("anima_onboarding_test_{name}_{}.json", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "anima_onboarding_test_{name}_{}.json",
+            std::process::id()
+        ))
     }
 
     // ── State serialisation round-trip ────────────────────────────────────────
@@ -432,7 +440,10 @@ mod tests {
 
     #[test]
     fn infer_backend_env_value_maps_ollama() {
-        assert_eq!(infer_backend_env_value("ollama (GGUF via Ollama)"), "ollama");
+        assert_eq!(
+            infer_backend_env_value("ollama (GGUF via Ollama)"),
+            "ollama"
+        );
     }
 
     #[test]
