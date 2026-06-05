@@ -1,14 +1,14 @@
 # 18 — Forward Epics: Index, Dependencies & Sequencing
 
 > **Status:** Living index. Branch: `claude/llm-tools-animaos-vuXRK`.
-> This catalogues the **proposed forward epics E7–E12** (docs 12–17) that build
+> This catalogues the **proposed forward epics E7–E15** (docs 12–21) that build
 > the autonomous-agent layer on top of the shipped somatic core (E1–E6).
 
 ## 0. Numbering
 
 Shipped epics occupy **E1–E6** (E6 = Operator Console, `docs/11`) plus the
 cross-cutting **EX** series. The forward work continues at **E7** and up. Doc
-file numbers (12–18) are a separate sequence from epic numbers — the table below
+file numbers (12–21) are a separate sequence from epic numbers — the table below
 maps them.
 
 ## 1. The forward epics
@@ -20,7 +20,10 @@ maps them.
 | **E9 — Onboarding** | [14](./14-onboarding.md) | First-run experience | `anima init` wizard, `anima doctor` preflight, conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support, per-tier router dispatch, unified quickstart. |
 | **E10 — Presence** | [15](./15-communication-multimodal.md) | Communication & multimodal | comms-app channel gateways (Telegram/Slack first) over the existing operator seam; text/image/voice as first-class bidirectional modalities (vision, whisper.cpp STT, Piper TTS). |
 | **E11 — Self-Extension** | [16](./16-skills-and-self-extension.md) | Skills & self-improvement | Anthropic Agent Skills model (progressive disclosure); agent-registered skills (prompt-only) and tools (WASM-sandboxed, operator-approved); dreaming-phase self-improvement loop. |
-| **E12 — Motivation** | [17](./17-motivation-and-drives.md) | Drives & objectives | six-tier drive hierarchy (viability → self-actualisation) feeding the Striatal Gate `value_score`; endogenous goal generation; corrigibility invariant above the lattice. |
+| **E12 — Motivation** | [17](./17-motivation-and-drives.md) | Drives & objectives | six-tier drive hierarchy (viability → self-actualisation) feeding the Striatal Gate `value_score`; endogenous goal generation; affect/mood + economic agency; corrigibility invariant above the lattice. |
+| **E13 — Alignment Assurance** | [19](./19-constitution-and-alignment.md) | Constitution + safety harnesses | immutable value charter the agent can't rewrite; constitution-enforcement hook; continuous alignment evals; defence red-team harness; corrigibility test suite. |
+| **E14 — Higher Cognition** | [20](./20-higher-cognition.md) | Cognitive faculties | metacognition & confidence calibration; prospective/temporal memory; personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback. |
+| **E15 — Trust & Lifecycle** | [21](./21-operator-trust-and-lifecycle.md) | Operator trust + agent ops | "while you were away" digest; approval-queue surface; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
 
 ## 2. The shared spine (why these interlock, not stack)
 
@@ -61,7 +64,10 @@ inventing its own. Building these once, well, is the real work:
 Reading it: **E7 + E8 are the foundation** (and share one trait extension);
 **E11 self-extension** sits on E7's selector/sandbox + E8's adapters; **E9/E10**
 are the user-facing layers; **E12 motivation** is the capstone that integrates
-everything into the existing gate.
+everything into the existing gate. **E13–E15 are the assurance & operations
+layer** that must land *before* E11/E12 run at full autonomy: E13 is the value
+foundation everything is checked against, E14 the cognitive faculties, E15 the
+trust/lifecycle tooling.
 
 ## 4. Recommended build sequence
 
@@ -74,10 +80,20 @@ everything into the existing gate.
 3. **Complete E7/E8 cores:** E7 browser (S7.2); E8 native runtimes + Unsloth/HRA
    + adapter library (S8.3–S8.4). Land **per-tier router dispatch** (E9 S9.5 /
    E8 §4) here — many things need it.
-4. **E11 Self-Extension** — reuses E7's selector + sandbox + defence; gated.
-5. **E9 Onboarding + E10 Presence** — user-facing layers on the now-real stack.
-6. **E12 Motivation** — capstone; integrate drives into the gate, wire the
-   dreaming-phase endogenous-goal loop, accrete competence via E8 adapters.
+4. **E13 charter + enforcement (S13.1–S13.2)** — land the value foundation and
+   the constitution-check hook *before* turning on self-modification, so E11/E12
+   have something to be checked against from day one.
+5. **E11 Self-Extension** — reuses E7's selector + sandbox + defence + E13 charter;
+   gated. Bring up **E15 S15.2/S15.4** (approval queue + digital-twin) alongside,
+   since they are the human-in-the-loop surface for E11 promotions.
+6. **E9 Onboarding + E10 Presence** — user-facing layers on the now-real stack;
+   E9 seeds the E13 operator-layer charter.
+7. **E12 Motivation** — capstone; integrate drives + affect + economic agency into
+   the gate, wire the dreaming-phase endogenous-goal loop, accrete competence via
+   E8 adapters. Gated by E13 (charter) and policed by E14 watchdogs.
+8. **E14 cognition + E15 lifecycle (remainder)** — metacognition, temporal
+   memory, knowledge corpus; digest, replay, state migration. Continuous E13
+   evals/red-team/corrigibility run as CI gates throughout.
 
 ## 5. Open cross-epic decisions
 
@@ -87,19 +103,15 @@ everything into the existing gate.
 - Auto-promotion scope for prompt-only skills (E11) vs human-in-the-loop.
 - Mid-tier backend binding (E8 §4): Ollama-large vs Claude Haiku.
 
-## 6. Noted but unscoped (candidate E13+)
+## 6. Noted but unscoped (candidate E16+)
 
-Surfaced during design; **not yet scoped** — flagged so they are not lost:
+Surfaced during design; **not yet scoped** — flagged so they are not lost.
+(The value charter, alignment evals, and cognitive-health items have since been
+scoped into E13–E15.)
 
-- **Value charter / "constitution"** — an immutable value foundation the drive
-  system (E12) and self-extension (E11) are anchored to and **cannot rewrite**.
-  Arguably the most important safety gap once an agent can self-modify *and* has
-  intrinsic drives; the defence layer enforces *mechanical* safety but there is
-  no positive value anchor yet.
-- **Continuous alignment & cognitive-health evaluation** — ongoing verification
-  that the agent stays aligned and cognitively healthy across weeks of
-  self-modification (E11) and drive-driven behaviour (E12); metacognition /
-  confidence calibration.
 - **Trust, human-identity & privacy** — authenticating *which human* is messaging
   (E10 channels), multi-user/relationship model, consent UX, and data governance
-  for an agent brokering a person's private life.
+  for an agent brokering a person's private life. *(Reviewed, deferred.)*
+- **Multi-agent society** — multiple AnimaOS agents cooperating/delegating, or an
+  agent spawning scoped sub-agents over the existing (unused) A2A bus.
+  *(Reviewed, deferred.)*

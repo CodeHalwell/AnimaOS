@@ -56,7 +56,10 @@ build sequence.
 | [`14-onboarding.md`](./14-onboarding.md) | **E9 — Onboarding** | First-run wizard, `anima doctor` preflight, conversational identity bootstrap, non-NVIDIA support, per-tier router dispatch. |
 | [`15-communication-multimodal.md`](./15-communication-multimodal.md) | **E10 — Presence** | Comms-app channel gateways (Telegram/Slack), text/image/voice as first-class bidirectional modalities. |
 | [`16-skills-and-self-extension.md`](./16-skills-and-self-extension.md) | **E11 — Self-Extension** | Anthropic Agent Skills model; agent-registered skills and tools (sandboxed, gated); the self-improvement loop. |
-| [`17-motivation-and-drives.md`](./17-motivation-and-drives.md) | **E12 — Motivation** | Six-tier drive hierarchy feeding the Striatal Gate; endogenous goals; corrigibility invariant. |
+| [`17-motivation-and-drives.md`](./17-motivation-and-drives.md) | **E12 — Motivation** | Six-tier drive hierarchy feeding the Striatal Gate; endogenous goals; affect/mood + economic agency; corrigibility invariant. |
+| [`19-constitution-and-alignment.md`](./19-constitution-and-alignment.md) | **E13 — Alignment Assurance** | Immutable value charter the agent can't rewrite; constitution enforcement; continuous alignment evals; defence red-team + corrigibility test suites. |
+| [`20-higher-cognition.md`](./20-higher-cognition.md) | **E14 — Higher Cognition** | Metacognition & calibration; prospective/temporal memory; personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback. |
+| [`21-operator-trust-and-lifecycle.md`](./21-operator-trust-and-lifecycle.md) | **E15 — Trust & Lifecycle** | "While you were away" digest; approval-queue; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
 | [`18-forward-epics.md`](./18-forward-epics.md) | *(index)* | Forward-epics catalogue: dependency graph, shared-spine primitives, recommended build sequence. |
 
 ## Status

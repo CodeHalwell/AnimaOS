@@ -137,6 +137,22 @@ curiosity/mastery is *where* the agent proposes new skills, tools, and adapters.
   are logged, train a small model mapping (drive state, event) → value, replacing
   the hand-tuned weights — kept interpretable (linear/shallow) and always
   subordinate to the corrigibility invariant.
+- **S12.9 — Affective state (global mood).** A small set of scalar **affect**
+  signals (e.g. valence + arousal/stress) derived as a fast summary of the drive
+  constellation, modulating behaviour globally: caution under stress, more
+  exploration when content and viable. This generalises the codebase's existing
+  *emotional decay* on memories into a system-wide mood that feeds the gate
+  alongside the drives — affect as a compressed read-out of motivational state.
+  Interpretable and audited (`AuditEntry::AffectState`); bounded so mood nudges
+  but never overrides the lattice or corrigibility.
+- **S12.10 — Economic agency.** Make `financial_budget` (and power) an *active*
+  concern, not just a sensed Tier-0 deficit: explicit **cost–benefit per action**
+  (is this worth a frontier call vs cheap-local vs an adapter?), spend allocation
+  across competing goals, and a self-managed budget envelope. Plugs into the
+  gate's existing cost-class decision and the E8 route/adapter selection, so the
+  agent *reasons* about value-for-cost rather than only throttling under pressure.
+  Bounded by operator-set budget limits (existing `FinancialBudgetSensor`) and the
+  charter (E13); no resource-acquisition sub-goals without operator approval.
 
 ## 6. Safety & alignment (non-negotiable)
 
