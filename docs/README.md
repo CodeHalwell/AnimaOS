@@ -42,6 +42,26 @@ This directory contains the full design for Anima. Read in order if you are new;
 | [`10-deployment-pathways.md`](./10-deployment-pathways.md) | The two parallel deployment surfaces — containerised (Docker + Ollama + Unsloth) for iteration, bare-metal native for the production target — and how the workspace stays one codebase across both. |
 | [`11-operator-interface.md`](./11-operator-interface.md) | The human↔agent interface (Epic E6): the operator console. Human-as-a-sense afferent guidance + an efferent telemetry/event stream, one `console-proto` wire protocol over two transports — HTTP/SSE in the container, COM1 serial in the microVM. |
 
+### Forward epics (E7–E12, proposed)
+
+Plans for the autonomous-agent layer built on top of the shipped somatic core.
+These are **scoping documents**, not yet implemented. Start with the index
+([`18-forward-epics.md`](./18-forward-epics.md)) for the dependency map and
+build sequence.
+
+| File | Epic | Subject |
+|------|------|---------|
+| [`12-real-world-tools-plan.md`](./12-real-world-tools-plan.md) | **E7 — Embodiment** | Real-world tools: web-search (SearXNG), browser (Playwright), egress/SSRF guard, semantic tool selection, live Anthropic/Ollama tool-calling. |
+| [`13-local-llm-providers.md`](./13-local-llm-providers.md) | **E8 — Local Inference** | Provider ecosystem (OpenAI-compatible umbrella + native runtimes), Unsloth fine-tuning, HRA for the instinct tier, eval harness, adapter library. |
+| [`14-onboarding.md`](./14-onboarding.md) | **E9 — Onboarding** | First-run wizard, `anima doctor` preflight, conversational identity bootstrap, non-NVIDIA support, per-tier router dispatch. |
+| [`15-communication-multimodal.md`](./15-communication-multimodal.md) | **E10 — Presence** | Comms-app channel gateways (Telegram/Slack), text/image/voice as first-class bidirectional modalities. |
+| [`16-skills-and-self-extension.md`](./16-skills-and-self-extension.md) | **E11 — Self-Extension** | Anthropic Agent Skills model; agent-registered skills and tools (sandboxed, gated); the self-improvement loop. |
+| [`17-motivation-and-drives.md`](./17-motivation-and-drives.md) | **E12 — Motivation** | Six-tier drive hierarchy feeding the Striatal Gate; endogenous goals; affect/mood + economic agency; corrigibility invariant. |
+| [`19-constitution-and-alignment.md`](./19-constitution-and-alignment.md) | **E13 — Alignment Assurance** | Immutable value charter the agent can't rewrite; constitution enforcement; continuous alignment evals; defence red-team + corrigibility test suites. |
+| [`20-higher-cognition.md`](./20-higher-cognition.md) | **E14 — Higher Cognition** | Metacognition & calibration; prospective/temporal memory; personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback. |
+| [`21-operator-trust-and-lifecycle.md`](./21-operator-trust-and-lifecycle.md) | **E15 — Trust & Lifecycle** | "While you were away" digest; approval-queue; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
+| [`18-forward-epics.md`](./18-forward-epics.md) | *(index)* | Forward-epics catalogue: dependency graph, shared-spine primitives, recommended build sequence. |
+
 ## Status
 
 Stages 1–3 closed, Stage 5 (cognitive layer) closed, Stage 4 closed through E4.6 (no_std port, Embassy executor, smoltcp TCP/IP, TLS 1.3 in the microVM, higher-crate microVM port, Kani + Miri formal verification). Stage 6 (operator console) closed through E6.4 + E6.6 (E6.5 microVM Phase 1 gated on virtio-net). Stage 4's remaining work is Epic E4.7 — production hardening and the 30-day soak run. The workspace now holds twelve crates: the foundational eight from `01-architecture.md` plus `kv-controller` (E5.4), `defence` (E5.6), `console-proto` (E6.1), and `console` (E6.2) introduced in Stages 5–6. See `07-implementation-plan.md` for the epic-by-epic state.
