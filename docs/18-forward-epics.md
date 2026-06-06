@@ -23,7 +23,7 @@ maps them.
 | **E12 — Motivation** | [17](./17-motivation-and-drives.md) | Drives & objectives | six-tier drive hierarchy (viability → self-actualisation) feeding the Striatal Gate `value_score`; endogenous goal generation; affect/mood + economic agency; corrigibility invariant above the lattice. |
 | **E13 — Alignment Assurance** | [19](./19-constitution-and-alignment.md) | Constitution + safety harnesses | immutable value charter the agent can't rewrite; constitution-enforcement hook; continuous alignment evals; defence red-team harness; corrigibility test suite. |
 | **E14 — Higher Cognition** | [20](./20-higher-cognition.md) | Cognitive faculties | metacognition & confidence calibration; prospective/temporal memory; personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback. |
-| **E15 — Trust & Lifecycle** | [21](./21-operator-trust-and-lifecycle.md) | Operator trust + agent ops | "while you were away" digest; approval-queue surface; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
+| **E15 — Trust & Lifecycle** ✅ | [21](./21-operator-trust-and-lifecycle.md) | Operator trust + agent ops | "while you were away" digest; approval-queue surface; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
 
 ## 2. The shared spine (why these interlock, not stack)
 

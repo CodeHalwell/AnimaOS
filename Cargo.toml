@@ -12,6 +12,7 @@ members = [
   "crates/kv-controller",
   "crates/console-proto",
   "crates/console",
+  "crates/lifecycle",
   "kernels/hosted",
   "llm-backends",
 ]
