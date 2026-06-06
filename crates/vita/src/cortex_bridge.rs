@@ -529,6 +529,7 @@ impl CortexBackend for PythonCortexBridge {
                 &request.agent_id,
                 &task_id,
                 "cortex InvokeComplete output",
+                "CortexAction",
                 layer.config.veto_window_secs,
             );
             if vetoed {
@@ -698,6 +699,7 @@ impl CortexBackend for MockCortexBridge {
                 &request.agent_id,
                 &task_id,
                 "cortex InvokeComplete output",
+                "CortexAction",
                 layer.config.veto_window_secs,
             );
             if vetoed {

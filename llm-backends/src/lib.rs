@@ -27,11 +27,19 @@
 //! ```
 
 pub mod anthropic;
+pub mod capabilities;
+pub mod chat;
+pub mod compat;
 pub mod factory;
 pub mod ollama;
 pub mod openai;
 
 pub use anthropic::AnthropicBackend;
+pub use capabilities::{BackendCapabilities, ProviderConfig};
+pub use chat::{
+    ChatBackend, ChatMessage, ChatResponse, ChatRole, FinishReason, ToolCall, ToolSpec,
+};
+pub use compat::OpenAiCompatibleBackend;
 pub use factory::{BackendFactory, BackendKind};
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
