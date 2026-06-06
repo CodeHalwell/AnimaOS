@@ -913,8 +913,14 @@ impl CortexBackend for ChatCortexBridge {
 
             // Record the assistant turn that requested the tool call(s). The
             // content may be empty for tool-only turns; preserve it verbatim so
-            // the provider sees a well-formed transcript.
-            messages.push(ChatMessage::assistant(response.content.clone()));
+            // the provider sees a well-formed transcript. The tool_calls MUST be
+            // attached here: OpenAI-compatible providers reject the next request
+            // if the following tool-result messages are not preceded by an
+            // assistant turn declaring the matching tool_calls (by id).
+            messages.push(
+                ChatMessage::assistant(response.content.clone())
+                    .with_tool_calls(response.tool_calls.clone()),
+            );
 
             let mut hit_tool_limit = false;
             for call in &response.tool_calls {

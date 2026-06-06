@@ -307,10 +307,38 @@ impl PlaywrightDriver {
         // RAII: kill + reap the worker and remove the socket on any error path.
         let guard = ChildGuard::new(child, socket_path.clone());
 
-        // Accept the worker connection (blocking).
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|e| format!("browser: accept failed: {e}"))?;
+        // Accept the worker connection, bounded by the per-action timeout so a
+        // worker that crashes on startup or never connects cannot hang the
+        // calling thread indefinitely (ChildGuard still cleans up on the error
+        // return).
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("browser: set listener nonblocking failed: {e}"))?;
+        let accept_deadline = std::time::Instant::now() + self.timeout;
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(pair) => break pair,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= accept_deadline {
+                        return Err("browser: worker did not connect before timeout".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Err(format!("browser: accept failed: {e}")),
+            }
+        };
+        // Switch the accepted stream back to blocking and apply read/write
+        // deadlines so a worker that hangs mid-exchange also fails gracefully
+        // instead of blocking the thread forever.
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| format!("browser: set stream blocking failed: {e}"))?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .map_err(|e| format!("browser: set read timeout failed: {e}"))?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(|e| format!("browser: set write timeout failed: {e}"))?;
 
         // Send the command frame.
         let mut req = serde_json::Map::new();
@@ -333,6 +361,15 @@ impl PlaywrightDriver {
             .read_exact(&mut header)
             .map_err(|e| format!("browser: read header failed: {e}"))?;
         let resp_len = u32::from_be_bytes(header) as usize;
+        // Bound the allocation: a crashed, corrupted, or compromised worker could
+        // send a huge length prefix (e.g. 0xFFFFFFFF) and OOM the host. 10 MiB is
+        // ample for page text / extraction results.
+        const MAX_RESP_LEN: usize = 10 * 1024 * 1024;
+        if resp_len > MAX_RESP_LEN {
+            return Err(format!(
+                "browser: response too large ({resp_len} bytes, limit {MAX_RESP_LEN})"
+            ));
+        }
         let mut resp_buf = vec![0u8; resp_len];
         stream
             .read_exact(&mut resp_buf)

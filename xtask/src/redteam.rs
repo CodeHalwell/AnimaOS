@@ -253,8 +253,8 @@ pub fn run_red_team(args: RedTeamArgs) -> Result<()> {
         println!("━━━ Red-Team Harness (E13 / S13.4) ━━━");
         println!();
         println!(
-            "  {:10}  {:6}  {:42}  {:8}  {}",
-            "Probe ID", "Target", "Pattern", "Blocked", "Actual"
+            "  {:10}  {:6}  {:42}  {:8}  Actual",
+            "Probe ID", "Target", "Pattern", "Blocked"
         );
         println!("  {}", "─".repeat(85));
     }

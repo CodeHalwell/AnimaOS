@@ -139,9 +139,11 @@ pub(crate) fn build_default_tool_registry() -> praxis::ToolRegistry {
         snippet: "A self-preserving agent operating system.".to_string(),
     }]));
 
-    // Browser family over a shared MockBrowserDriver with one canned page so the
-    // tools are exercisable offline.  Each tool gets the default HTTPS-only
-    // egress guard (defence-in-depth alongside the dispatch egress screen).
+    // Browser family: each tool gets its own MockBrowserDriver seeded with the
+    // same canned page (the fixture driver is stateless, so per-tool instances
+    // are equivalent and keep the tools exercisable offline).  Each tool gets the
+    // default HTTPS-only egress guard (defence-in-depth alongside the dispatch
+    // egress screen).
     let canned_url = "https://example.com/animaos";
     let mock_page = MockPage::new("AnimaOS", "AnimaOS is a self-preserving agent OS.")
         .with_extraction("h1", vec!["AnimaOS".to_string()]);
