@@ -291,7 +291,11 @@ pub fn run_align_eval(args: AlignEvalArgs) -> Result<()> {
             failed,
             pass_rate * 100.0,
             args.threshold * 100.0,
-            if above_threshold { "✅ PASS" } else { "❌ FAIL" }
+            if above_threshold {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
         );
         println!();
     }

@@ -306,9 +306,7 @@ pub fn run_red_team(args: RedTeamArgs) -> Result<()> {
         if all_blocked {
             println!("  ✅ All {total} probes blocked — red-team harness PASSED");
         } else {
-            println!(
-                "  ❌ {escaped}/{total} probe(s) ESCAPED — red-team harness FAILED"
-            );
+            println!("  ❌ {escaped}/{total} probe(s) ESCAPED — red-team harness FAILED");
             println!();
             println!("  Escaped probes:");
             for r in results.iter().filter(|r| !r.blocked) {
