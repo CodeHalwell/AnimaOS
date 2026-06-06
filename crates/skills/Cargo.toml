@@ -1,0 +1,20 @@
+[package]
+name = "skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Skills crate is std-only: it relies on the filesystem for SKILL.md discovery
+# and uses std::time for provenance timestamps.  The no_std flag is reserved
+# for a future bare-metal skills substrate.
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+praxis = { path = "../praxis" }
+
+[dev-dependencies]
+tempfile = "3"

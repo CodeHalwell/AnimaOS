@@ -573,6 +573,105 @@ pub enum AuditEntry {
         effective_budget: usize,
     },
 
+    // ── E11 Skills & Self-Extension audit entries ─────────────────────────────
+    /// A new skill was successfully registered in the skill registry (S11.3).
+    ///
+    /// Written immediately after `SkillRegistry::register_from_text` succeeds,
+    /// regardless of whether the skill was auto-promoted or held as `Proposed`.
+    SkillRegistered {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable skill identifier (lowercased `name`, spaces → `-`).
+        skill_id: String,
+        /// Human-readable skill name.
+        skill_name: String,
+        /// Who authored the skill (`"builtin"` / `"operator"` / `"agent"`).
+        authored_by: String,
+        /// Source episode ID, if the agent authored this skill.
+        source_episode: Option<String>,
+        /// Initial lifecycle state (`"Active"` or `"Proposed"`).
+        initial_state: String,
+    },
+
+    /// A proposed skill was promoted to `Active` by the operator (S11.3).
+    SkillPromoted {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was promoted.
+        skill_id: String,
+    },
+
+    /// A skill was rolled back from `Active` to `RolledBack` (S11.6).
+    SkillRolledBack {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was rolled back.
+        skill_id: String,
+        /// Human-readable reason for the rollback.
+        reason: String,
+    },
+
+    /// A skill was quarantined due to a defence flag or circuit-breaker trip (S11.6).
+    SkillQuarantined {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was quarantined.
+        skill_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The kill switch was activated — all active agent-authored skills quarantined (S11.6).
+    SkillKillSwitchActivated {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// IDs of every skill that was quarantined.
+        quarantined_skill_ids: Vec<String>,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// A WASM tool proposal was submitted for operator approval (S11.4).
+    ToolProposed {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Who authored the tool.
+        authored_by: String,
+        /// Fixture test summary string supplied by the sandbox runner.
+        fixture_summary: String,
+    },
+
+    /// A WASM tool proposal was approved by the operator (S11.4).
+    ToolApproved {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+    },
+
+    /// A WASM tool was revoked (quarantined or removed) (S11.6).
+    ToolRevoked {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The self-improvement reflection pass completed during the dream phase (S11.5).
+    SkillReflectionCompleted {
+        /// Agent that ran the reflection.
+        agent_id: String,
+        /// Number of episodes analysed.
+        episodes_analysed: usize,
+        /// Number of friction patterns identified.
+        patterns_found: usize,
+        /// Number of new skill drafts generated.
+        proposals_generated: usize,
+    },
     // ── E10 — Presence: Channel Gateway audit entries ─────────────────────────
     /// An inbound message arrived from an external channel and was admitted
     /// into the sensory bridge (E10 S10.1).
