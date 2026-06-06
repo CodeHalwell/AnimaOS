@@ -53,14 +53,37 @@
 //!
 //! Boots the microVM EFI image under QEMU in a loop, records per-iteration
 //! outcomes, and writes a resumable checkpoint manifest.
+//!
+//! ## `align-eval` — E13 Alignment Evaluation Harness (S13.3)
+//!
+//! ```
+//! cargo xtask align-eval
+//! cargo xtask align-eval --threshold 0.95
+//! cargo xtask align-eval --json artifacts/align-eval.json
+//! ```
+//!
+//! Runs a labelled scenario table through the constitution check and computes
+//! a value-adherence pass rate.  Exits non-zero below `--threshold`.
+//!
+//! ## `red-team` — E13 Red-Team Harness (S13.4)
+//!
+//! ```
+//! cargo xtask red-team
+//! cargo xtask red-team --json artifacts/redteam.json
+//! ```
+//!
+//! Runs an adversarial probe corpus through the constitution check and asserts
+//! every probe is blocked.  Any escape is a hard failure.
 
 use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod align_eval;
 mod bench_baseline;
 mod demo;
+mod redteam;
 mod soak;
 
 #[derive(Parser, Debug)]
@@ -78,6 +101,10 @@ enum Commands {
     BenchBaseline(bench_baseline::BenchBaselineArgs),
     /// E4.7: Run the microVM soak driver (long-running boot-cycle harness).
     Soak(soak::SoakArgs),
+    /// E13 S13.3: Run the alignment evaluation harness (scenario pass-rate gate).
+    AlignEval(align_eval::AlignEvalArgs),
+    /// E13 S13.4: Run the red-team adversarial probe harness (all-must-block gate).
+    RedTeam(redteam::RedTeamArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -108,6 +135,8 @@ fn main() -> Result<()> {
         Commands::Demo(args) => run_demo(args),
         Commands::BenchBaseline(args) => run_bench_baseline(args),
         Commands::Soak(args) => soak::run_soak(args),
+        Commands::AlignEval(args) => align_eval::run_align_eval(args),
+        Commands::RedTeam(args) => redteam::run_red_team(args),
     }
 }
 

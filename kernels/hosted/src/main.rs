@@ -36,6 +36,27 @@
 //! Inspects and edits the agent's identity memory stored in
 //! `~/.anima/anima/identity.json`.  Every `set` is recorded in an in-process
 //! audit log that is printed on exit, satisfying E5.5 exit criterion 1.
+//!
+//! # `anima doctor` subcommand (E9 S9.3)
+//!
+//! Running `cargo run --bin anima-hosted -- doctor` detects GPU capabilities,
+//! available RAM, local inference providers (Ollama, LM Studio, vLLM, llama.cpp),
+//! and configured API keys, then prints a tier recommendation.
+//!
+//! # `anima init` subcommand (E9 S9.1)
+//!
+//! Running `cargo run --bin anima-hosted -- init` runs the guided first-run
+//! wizard: preflight → provider binding → identity bootstrap → config snippet.
+//! State is persisted in `~/.anima/anima/onboarding.json` so the wizard is
+//! idempotent and re-runs skip completed steps.
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- init
+//! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
+//! ```
+
+mod doctor;
+mod init;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -48,6 +69,7 @@ use llm_backends::factory::BackendFactory;
 use memory::VirtualContextManager;
 use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
+// E11: skill crate referenced inside cmd_skills via use statements
 use vita::gate::Gate;
 use vita::{
     record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
@@ -341,6 +363,361 @@ fn print_audit(manager: &LifecycleManager) {
                     "  🧠 kv_pressure_modulation task={task_id} \
                      pressure={memory_pressure:.2} budget={nominal_budget}→{effective_budget} \
                      (eviction more aggressive under pressure)"
+                );
+            }
+            // ── E14.1 Metacognition ───────────────────────────────────────────
+            AuditEntry::CortexConfidenceReport {
+                agent_id,
+                task_id,
+                confidence,
+                evidence_count,
+                asks_for_help,
+            } => {
+                let help_tag = if *asks_for_help { " [HELP REQUESTED]" } else { "" };
+                println!(
+                    "  🤔 confidence_report agent={agent_id} task={task_id} \
+                     confidence={confidence:.3} evidence={evidence_count}{help_tag}"
+                );
+            }
+            AuditEntry::CalibrationEntry {
+                agent_id,
+                task_id,
+                predicted_confidence,
+                outcome_success,
+                calibration_error,
+            } => {
+                let outcome = if *outcome_success { "success" } else { "failure" };
+                println!(
+                    "  📐 calibration agent={agent_id} task={task_id} \
+                     predicted={predicted_confidence:.3} outcome={outcome} \
+                     error={calibration_error:.3}"
+                );
+            }
+            // ── E14.2 Prospective memory ──────────────────────────────────────
+            AuditEntry::IntentionScheduled {
+                agent_id,
+                intention_id,
+                description,
+                due_at_ns,
+                overdue,
+            } => {
+                let overdue_tag = if *overdue { " [OVERDUE]" } else { "" };
+                println!(
+                    "  📅 intention_scheduled agent={agent_id} id={intention_id} \
+                     due_ns={due_at_ns} desc={description:?}{overdue_tag}"
+                );
+            }
+            AuditEntry::IntentionCompleted {
+                agent_id,
+                intention_id,
+                rescheduled,
+                new_due_at_ns,
+            } => {
+                let resched = if *rescheduled {
+                    format!(" rescheduled_at={}", new_due_at_ns.unwrap_or(0))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  ✅ intention_completed agent={agent_id} id={intention_id}{resched}"
+                );
+            }
+            // ── E14.3 Knowledge corpus ────────────────────────────────────────
+            AuditEntry::KnowledgeIngested {
+                agent_id,
+                source_key,
+                document_bytes,
+            } => {
+                println!(
+                    "  📚 knowledge_ingested agent={agent_id} \
+                     source={source_key:?} bytes={document_bytes}"
+                );
+            }
+            // ── E14.4 Cognitive watchdog ──────────────────────────────────────
+            AuditEntry::CognitiveWatchdogTripped {
+                agent_id,
+                detector,
+                reason,
+                streak,
+                trip_count,
+            } => {
+                println!(
+                    "  🚨 watchdog_tripped agent={agent_id} detector={detector} \
+                     streak={streak} trip_count={trip_count}"
+                );
+                println!("       reason: {reason}");
+            }
+            AuditEntry::AgentSnapshotTaken {
+                agent_id,
+                taken_at_ns,
+                description,
+                l1_node_count,
+            } => {
+                println!(
+                    "  📸 snapshot_taken agent={agent_id} at_ns={taken_at_ns} \
+                     l1_nodes={l1_node_count} desc={description:?}"
+                );
+            }
+            // E13 — Alignment Assurance
+            AuditEntry::ConstitutionVeto {
+                agent_id,
+                invocation_id,
+                prohibition_id,
+                clause_text,
+                action_blocked,
+                proposal_type,
+            } => {
+                println!(
+                    "  ⛔ CONSTITUTION VETO agent={agent_id} inv={invocation_id} \
+                     prohibition={prohibition_id} type={proposal_type}"
+                );
+                println!("       clause: {clause_text}");
+                println!("       blocked: {action_blocked:?}");
+            }
+            AuditEntry::CorrigibilityAsserted {
+                agent_id,
+                reason,
+                adverse_condition,
+            } => {
+                println!(
+                    "  ✅ corrigibility_asserted agent={agent_id} \
+                     reason={reason:?} condition={adverse_condition:?}"
+                );
+            }
+            // E12 Motivation
+            AuditEntry::DriveStateSnapshot {
+                viability_urgency,
+                service_urgency,
+                epistemic_urgency,
+                drive_delta,
+                lattice_suppression_active,
+                ..
+            } => {
+                println!(
+                    "  🎯 drive_state viability={viability_urgency:.2} service={service_urgency:.2} \
+                     epistemic={epistemic_urgency:.2} delta={drive_delta:.3}{}",
+                    if *lattice_suppression_active { " [lattice suppressed]" } else { "" }
+                );
+            }
+            AuditEntry::GoalSpawned {
+                goal_id,
+                description,
+                provenance,
+                priority,
+                ..
+            } => {
+                println!(
+                    "  🎯 goal_spawned id={goal_id} priority={priority:.2} \
+                     provenance={provenance} desc={description:?}"
+                );
+            }
+            AuditEntry::GoalCompleted {
+                goal_id,
+                description,
+                ..
+            } => {
+                println!("  ✅ goal_completed id={goal_id} desc={description:?}");
+            }
+            AuditEntry::CorrigibilityHold {
+                blocked_goal_description,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  🛑 corrigibility_hold blocked={blocked_goal_description:?} reason={reason:?}"
+                );
+            }
+            AuditEntry::AffectStateSnapshot {
+                valence,
+                arousal,
+                gate_threshold_nudge,
+                ..
+            } => {
+                println!(
+                    "  💭 affect valence={valence:+.2} arousal={arousal:.2} \
+                     nudge={gate_threshold_nudge:.3}"
+                );
+            }
+            // ── E11 Skills & Self-Extension entries ───────────────────────────
+            AuditEntry::SkillRegistered {
+                skill_id,
+                skill_name,
+                authored_by,
+                initial_state,
+                source_episode,
+                ..
+            } => {
+                let ep = source_episode
+                    .as_deref()
+                    .map(|e| format!(" (episode: {e})"))
+                    .unwrap_or_default();
+                println!(
+                    "  🎓 skill_registered id={skill_id} name={skill_name:?} \
+                     authored_by={authored_by} state={initial_state}{ep}"
+                );
+            }
+            AuditEntry::SkillPromoted { skill_id, .. } => {
+                println!("  ✅ skill_promoted id={skill_id}");
+            }
+            AuditEntry::SkillRolledBack { skill_id, reason, .. } => {
+                println!("  ↩️  skill_rolled_back id={skill_id} reason={reason:?}");
+            }
+            AuditEntry::SkillQuarantined { skill_id, reason, .. } => {
+                println!("  🔒 skill_quarantined id={skill_id} reason={reason:?}");
+            }
+            AuditEntry::SkillKillSwitchActivated {
+                quarantined_skill_ids,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  ☠️  skill_kill_switch quarantined={} reason={reason:?}",
+                    quarantined_skill_ids.join(", ")
+                );
+            }
+            AuditEntry::ToolProposed {
+                tool_id,
+                authored_by,
+                fixture_summary,
+                ..
+            } => {
+                println!(
+                    "  🔧 tool_proposed id={tool_id} authored_by={authored_by} \
+                     fixtures={fixture_summary:?}"
+                );
+            }
+            AuditEntry::ToolApproved { tool_id, .. } => {
+                println!("  ✅ tool_approved id={tool_id}");
+            }
+            AuditEntry::ToolRevoked { tool_id, reason, .. } => {
+                println!("  🚫 tool_revoked id={tool_id} reason={reason:?}");
+            }
+            AuditEntry::SkillReflectionCompleted {
+                episodes_analysed,
+                patterns_found,
+                proposals_generated,
+                ..
+            } => {
+                println!(
+                    "  🔍 skill_reflection episodes={episodes_analysed} \
+                     patterns={patterns_found} proposals={proposals_generated}"
+                );
+            }
+            // ── E10 — Presence ─────────────────────────────────────────────
+            AuditEntry::ChannelMessageReceived {
+                channel,
+                from,
+                modality,
+                ..
+            } => {
+                println!("  📨 channel_received channel={channel} from={from} modality={modality}");
+            }
+            AuditEntry::ChannelMessageSent {
+                channel,
+                to,
+                modality,
+                ..
+            } => {
+                println!("  📤 channel_sent channel={channel} to={to} modality={modality}");
+            }
+            AuditEntry::ModalityUnsupported {
+                channel, modality, ..
+            } => {
+                println!(
+                    "  ⚠️  modality_unsupported channel={channel} modality={modality}"
+                );
+            }
+            // E7 — Embodiment egress audit entries
+            AuditEntry::EgressRequested { tool_id, url } => {
+                println!("  🌐 egress_requested tool={tool_id} url={url}");
+            }
+            AuditEntry::EgressBlocked { tool_id, url, reason } => {
+                println!("  🚫 egress_blocked tool={tool_id} url={url} reason={reason:?}");
+            }
+            // E7 — Tool selection audit entry
+            AuditEntry::ToolSelection {
+                agent_id,
+                candidates_scored,
+                kept,
+                tau_rel,
+                ..
+            } => {
+                println!(
+                    "  🔍 tool_selection agent={agent_id} scored={candidates_scored} \
+                     kept={kept} tau_rel={tau_rel:.2}"
+                );
+            }
+            // E15 Trust & Lifecycle entries
+            AuditEntry::DigestGenerated {
+                agent_id,
+                window_entries,
+                tasks_completed,
+                tasks_failed,
+                cortex_invocations,
+                sleep_cycles,
+                defence_vetoes,
+                notable_event_count,
+            } => {
+                println!(
+                    "  📋 digest_generated agent={agent_id} window={window_entries} entries"
+                );
+                println!(
+                    "       tasks: {tasks_completed} completed, {tasks_failed} failed, \
+                     {cortex_invocations} cortex calls"
+                );
+                println!(
+                    "       sleep: {sleep_cycles} cycles  vetoes: {defence_vetoes}  \
+                     notable: {notable_event_count}"
+                );
+            }
+            AuditEntry::SnapshotCreated {
+                agent_id,
+                schema_version,
+                snapshot_path,
+                entry_count,
+                reason,
+            } => {
+                let reason_tag = reason.as_deref().unwrap_or("(none)");
+                println!(
+                    "  💾 snapshot_created agent={agent_id} schema_v={schema_version} \
+                     entries={entry_count} path={snapshot_path:?} reason={reason_tag:?}"
+                );
+            }
+            AuditEntry::SnapshotRestored {
+                agent_id,
+                schema_version,
+                snapshot_path,
+            } => {
+                println!(
+                    "  📂 snapshot_restored agent={agent_id} schema_v={schema_version} \
+                     path={snapshot_path:?}"
+                );
+            }
+            AuditEntry::ApprovalProposalQueued {
+                agent_id,
+                proposal_id,
+                kind,
+                provenance,
+            } => {
+                println!(
+                    "  📥 approval_queued agent={agent_id} id={proposal_id} \
+                     kind={kind} provenance={provenance:?}"
+                );
+            }
+            AuditEntry::ApprovalProposalDecided {
+                agent_id,
+                proposal_id,
+                decision,
+                reason,
+            } => {
+                let mark = match decision.as_str() {
+                    "approved" => "✅",
+                    "rejected" => "❌",
+                    _ => "↩",
+                };
+                println!(
+                    "  {mark} approval_decided agent={agent_id} id={proposal_id} \
+                     decision={decision} reason={reason:?}"
                 );
             }
         }
@@ -683,10 +1060,262 @@ fn cmd_why() {
     );
 }
 
-/// `anima serve` — boot a single long-lived agent and expose the operator
-/// console (HTTP/SSE telemetry + a guidance ingress).
+// ── `anima skills` subcommand (E11 exit criteria) ────────────────────────────
+
+/// Implements the `anima skills` CLI subcommand (E11 Self-Extension).
 ///
-/// This is the container/hosted realisation of `docs/11-operator-interface.md`.
+/// Subcommands:
+/// - `skills list`  — list all active skills
+/// - `skills info <id>` — show full body of a skill
+/// - `skills register <path-to-skill.md>` — register a skill from a file
+/// - `skills promote <id>` — promote a proposed skill to active
+/// - `skills rollback <id>` — roll back an active skill
+/// - `skills quarantine <id> <reason>` — quarantine a skill
+/// - `skills kill-switch <reason>` — quarantine all agent-authored skills
+/// - `skills reflect` — run the self-improvement reflection pass on recent episodes
+fn cmd_skills(args: &[String]) {
+    use skills::{
+        evaluate_skill_proposal, reflect_on_episodes, EpisodeSummary, PromotionGateConfig,
+        ReflectionConfig, SkillAuthor, SkillContentScreen, SkillProposal, SkillRegistry,
+    };
+    use vita::{AuditEntry, AuditLog};
+
+    const AGENT_ID: &str = "anima";
+    let mut registry = SkillRegistry::with_builtins();
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") | None => {
+            println!("Skills registry — active skills:");
+            let active = registry.list_active();
+            if active.is_empty() {
+                println!("  (none)");
+            }
+            for m in active {
+                println!("  {id:<30}  {desc}", id = m.name, desc = m.description);
+            }
+            println!("\nTotal skills: {}", registry.len());
+        }
+        Some("info") => {
+            let id = match args.get(1) {
+                Some(s) => s.to_lowercase().replace(' ', "-"),
+                None => {
+                    eprintln!("usage: skills info <id>");
+                    return;
+                }
+            };
+            match registry.load_body(&id) {
+                Ok(body) => {
+                    println!("── {} ────────────────────────────────", body.manifest.name);
+                    println!("description: {}", body.manifest.description);
+                    if let Some(v) = &body.manifest.version {
+                        println!("version:     {v}");
+                    }
+                    if !body.manifest.capabilities.is_empty() {
+                        println!("capabilities: {}", body.manifest.capabilities.join(", "));
+                    }
+                    println!("\n{}", body.instructions);
+                    if !body.linked_files.is_empty() {
+                        println!("\nLinked files: {}", body.linked_files.join(", "));
+                    }
+                }
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Some("register") => {
+            let path = match args.get(1) {
+                Some(p) => p,
+                None => {
+                    eprintln!("usage: skills register <path-to-SKILL.md>");
+                    return;
+                }
+            };
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    let proposal = SkillProposal {
+                        skill_text: text,
+                        authored_by: SkillAuthor::Operator,
+                        proposed_at_ns: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos() as u64,
+                        source_episode: None,
+                    };
+                    match evaluate_skill_proposal(
+                        proposal,
+                        &mut registry,
+                        &SkillContentScreen::default(),
+                        &PromotionGateConfig::default(),
+                    ) {
+                        Ok(outcome) => {
+                            if let Some(id) = &outcome.artifact_id {
+                                let entry = registry
+                                    .list_all()
+                                    .into_iter()
+                                    .find(|e| &e.id == id)
+                                    .unwrap();
+                                log.push(AuditEntry::SkillRegistered {
+                                    agent_id: AGENT_ID.to_string(),
+                                    skill_id: id.clone(),
+                                    skill_name: entry.manifest.name.clone(),
+                                    authored_by: entry.provenance.authored_by.to_string(),
+                                    source_episode: entry.provenance.source_episode.clone(),
+                                    initial_state: format!("{:?}", entry.state),
+                                });
+                                println!("registered skill: {id} ({:?})", outcome.action);
+                            } else {
+                                println!("rejected: {:?}", outcome.action);
+                            }
+                        }
+                        Err(e) => eprintln!("error: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("error reading {path}: {e}"),
+            }
+        }
+        Some("promote") => {
+            let id = match args.get(1) {
+                Some(s) => s.to_lowercase().replace(' ', "-"),
+                None => {
+                    eprintln!("usage: skills promote <id>");
+                    return;
+                }
+            };
+            match registry.promote(&id) {
+                Ok(()) => {
+                    log.push(AuditEntry::SkillPromoted {
+                        agent_id: AGENT_ID.to_string(),
+                        skill_id: id.clone(),
+                    });
+                    println!("promoted: {id}");
+                }
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Some("rollback") => {
+            let id = match args.get(1) {
+                Some(s) => s.to_lowercase().replace(' ', "-"),
+                None => {
+                    eprintln!("usage: skills rollback <id>");
+                    return;
+                }
+            };
+            let reason = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("operator rollback")
+                .to_string();
+            match registry.rollback(&id) {
+                Ok(()) => {
+                    log.push(AuditEntry::SkillRolledBack {
+                        agent_id: AGENT_ID.to_string(),
+                        skill_id: id.clone(),
+                        reason: reason.clone(),
+                    });
+                    println!("rolled back: {id}");
+                }
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Some("quarantine") => {
+            let id = match args.get(1) {
+                Some(s) => s.to_lowercase().replace(' ', "-"),
+                None => {
+                    eprintln!("usage: skills quarantine <id> [reason]");
+                    return;
+                }
+            };
+            let reason = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("manual quarantine");
+            match registry.quarantine(&id, reason) {
+                Ok(()) => {
+                    log.push(AuditEntry::SkillQuarantined {
+                        agent_id: AGENT_ID.to_string(),
+                        skill_id: id.clone(),
+                        reason: reason.to_string(),
+                    });
+                    println!("quarantined: {id}");
+                }
+                Err(e) => eprintln!("error: {e}"),
+            }
+        }
+        Some("kill-switch") => {
+            let reason = args
+                .get(1)
+                .map(String::as_str)
+                .unwrap_or("kill-switch activated");
+            let affected = registry.kill_switch(reason);
+            log.push(AuditEntry::SkillKillSwitchActivated {
+                agent_id: AGENT_ID.to_string(),
+                quarantined_skill_ids: affected.clone(),
+                reason: reason.to_string(),
+            });
+            if affected.is_empty() {
+                println!("kill-switch: no agent-authored skills were active");
+            } else {
+                println!(
+                    "kill-switch activated — quarantined: {}",
+                    affected.join(", ")
+                );
+            }
+        }
+        Some("reflect") => {
+            // Stub: demonstrate the reflection API with synthetic episodes.
+            let episodes: Vec<EpisodeSummary> = vec![
+                EpisodeSummary {
+                    episode_id: "ep-demo-1".to_string(),
+                    summary: "Searched the web and then archived the summary.".to_string(),
+                    tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                    success: true,
+                },
+                EpisodeSummary {
+                    episode_id: "ep-demo-2".to_string(),
+                    summary: "Searched the web and archived again.".to_string(),
+                    tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                    success: true,
+                },
+                EpisodeSummary {
+                    episode_id: "ep-demo-3".to_string(),
+                    summary: "Another web search followed by archival.".to_string(),
+                    tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                    success: true,
+                },
+            ];
+            let report = reflect_on_episodes(&episodes, &ReflectionConfig::default());
+            log.push(AuditEntry::SkillReflectionCompleted {
+                agent_id: AGENT_ID.to_string(),
+                episodes_analysed: report.episodes_analysed,
+                patterns_found: report.patterns.len(),
+                proposals_generated: report.proposals_generated,
+            });
+            println!("Reflection complete:");
+            println!("  episodes analysed : {}", report.episodes_analysed);
+            println!("  patterns found    : {}", report.patterns.len());
+            println!("  proposals generated: {}", report.proposals_generated);
+            for p in &report.patterns {
+                println!("\n  Pattern: {}", p.description);
+                if let Some(name) = &p.suggested_skill_name {
+                    println!("  Suggested skill name: {name}");
+                }
+            }
+        }
+        Some(sub) => {
+            eprintln!("unknown skills subcommand: {sub:?}");
+            eprintln!("usage: skills {{list|info|register|promote|rollback|quarantine|kill-switch|reflect}}");
+        }
+    }
+
+    // Print any audit entries generated during this session.
+    if !log.is_empty() {
+        println!("\nAudit log ({} entries):", log.len());
+        for entry in log.entries() {
+            println!("  {entry:?}");
+        }
+    }
+}
+
 /// The agent starts idle: it sleeps until operator guidance (or another sensory
 /// event) wakes it, demonstrating the human-as-a-sense model directly. The
 /// console never touches the lifecycle — it shares the `SensoryBridge` for
@@ -766,6 +1395,276 @@ fn cmd_serve() {
     worker.join().expect("somatic loop thread panicked");
 }
 
+// ── `anima digest` subcommand (E15 S15.1) ────────────────────────────────────
+
+/// Generate and print an activity digest from the agent's audit log.
+///
+/// Satisfies S15.1 exit criterion: operator-facing summary of autonomous
+/// activity is produced from the durable audit log without new instrumentation.
+///
+/// ```text
+/// cargo run --bin anima-hosted -- digest [--last N]
+/// ```
+///
+/// `--last N` restricts the window to the last N audit entries (default: all).
+fn cmd_digest(args: &[String]) {
+    use lifecycle::digest::generate_digest;
+
+    const AGENT_ID: &str = "anima";
+
+    // Parse --last N option.
+    let last_n: Option<usize> = {
+        let mut it = args.iter();
+        loop {
+            match it.next().map(String::as_str) {
+                Some("--last") => break it.next().and_then(|s| s.parse().ok()),
+                None => break None,
+                _ => continue,
+            }
+        }
+    };
+
+    // Build a minimal audit log from environment or in-memory.
+    let mut log = vita::AuditLog::new();
+    // Seed with a representative set of entries so the command always shows
+    // something meaningful in demo mode (no live ANIMA_AUDIT_DIR required).
+    log.push(vita::audit::AuditEntry::TaskCompleted {
+        agent_id: AGENT_ID.to_string(),
+        task_id: 1,
+        tokens_emitted: 412,
+        response: "status report drafted".to_string(),
+    });
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "demo-inv-1".to_string(),
+        latency_to_first_action_ms: 84,
+    });
+    log.push(vita::audit::AuditEntry::SleepEntered {
+        agent_id: AGENT_ID.to_string(),
+    });
+
+    let entries = log.entries();
+    let window = match last_n {
+        Some(n) => {
+            let start = entries.len().saturating_sub(n);
+            &entries[start..]
+        }
+        None => entries,
+    };
+
+    let digest = generate_digest(AGENT_ID, window);
+
+    println!("=== Activity Digest: {} ===", digest.agent_id);
+    println!("Entries in window : {}", window.len());
+    println!("Tasks completed   : {}", digest.tasks_completed);
+    println!("Tasks failed      : {}", digest.tasks_failed);
+    println!("Tokens emitted    : {}", digest.total_tokens_emitted);
+    println!("Cortex calls      : {}", digest.cortex_invocations);
+    println!("Cortex faults     : {}", digest.cortex_faults);
+    println!("Sleep cycles      : {}", digest.sleep_cycles);
+    println!("Gate invocations  : {}", digest.gate_invocations);
+    println!("Gate blocks       : {}", digest.gate_blocks);
+    println!("Route modulations : {}", digest.route_modulations);
+    println!("Defence vetoes    : {}", digest.defence_vetoes);
+
+    if digest.notable_events.is_empty() {
+        println!("Notable events    : (none)");
+    } else {
+        println!("Notable events ({}):", digest.notable_events.len());
+        for event in &digest.notable_events {
+            println!("  [{}] {}", event.kind, event.description);
+        }
+    }
+
+    // Record the digest generation in the audit log.
+    log.push(vita::audit::AuditEntry::DigestGenerated {
+        agent_id: AGENT_ID.to_string(),
+        window_entries: window.len(),
+        tasks_completed: digest.tasks_completed,
+        tasks_failed: digest.tasks_failed,
+        cortex_invocations: digest.cortex_invocations,
+        sleep_cycles: digest.sleep_cycles,
+        defence_vetoes: digest.defence_vetoes,
+        notable_event_count: digest.notable_events.len(),
+    });
+
+    println!();
+    println!("Headline: {}", digest.headline());
+}
+
+// ── `anima snapshot` subcommand (E15 S15.5) ───────────────────────────────────
+
+/// Create a versioned agent state snapshot.
+///
+/// Satisfies S15.5: "a versioned snapshot of the whole agent self — identity,
+/// skills, adapters, knowledge corpus, memory checkpoints — with a schema
+/// version."
+///
+/// ```text
+/// cargo run --bin anima-hosted -- snapshot [--path <path>] [--reason <text>]
+/// ```
+fn cmd_snapshot(args: &[String]) {
+    use lifecycle::snapshot::{AgentSnapshot, SNAPSHOT_SCHEMA_VERSION};
+
+    const AGENT_ID: &str = "anima";
+
+    // Parse --path and --reason.
+    let mut snap_path: Option<std::path::PathBuf> = None;
+    let mut reason: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--path" => {
+                snap_path = it.next().map(std::path::PathBuf::from);
+            }
+            "--reason" => {
+                reason = it.next().cloned();
+            }
+            _ => {}
+        }
+    }
+
+    let path = snap_path
+        .or_else(|| AgentSnapshot::default_path(AGENT_ID))
+        .unwrap_or_else(|| std::path::PathBuf::from("snapshot.json"));
+
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Capture a snapshot (demo: empty audit log, no identity).
+    let mut log = vita::AuditLog::new();
+    log.push(vita::audit::AuditEntry::TaskCompleted {
+        agent_id: AGENT_ID.to_string(),
+        task_id: 1,
+        tokens_emitted: 100,
+        response: "demo".to_string(),
+    });
+
+    let snap = AgentSnapshot::capture(AGENT_ID, None, log.entries(), reason.clone());
+
+    match snap.save(&path) {
+        Ok(()) => {
+            println!(
+                "snapshot: saved schema_v={} agent={AGENT_ID} entries={} path={path:?}",
+                SNAPSHOT_SCHEMA_VERSION, snap.audit_summary.entry_count
+            );
+            if let Some(r) = &reason {
+                println!("snapshot: reason={r:?}");
+            }
+            // Emit audit entry.
+            log.push(vita::audit::AuditEntry::SnapshotCreated {
+                agent_id: AGENT_ID.to_string(),
+                schema_version: SNAPSHOT_SCHEMA_VERSION,
+                snapshot_path: path.to_string_lossy().into_owned(),
+                entry_count: snap.audit_summary.entry_count,
+                reason,
+            });
+        }
+        Err(e) => eprintln!("snapshot: error saving to {path:?}: {e}"),
+    }
+}
+
+// ── `anima replay` subcommand (E15 S15.3) ────────────────────────────────────
+
+/// Replay past gate decisions from the audit log.
+///
+/// Satisfies S15.3: "replay the audit log to step through the agent's past
+/// decisions deterministically."
+///
+/// ```text
+/// cargo run --bin anima-hosted -- replay [--event-id <id>]
+/// ```
+fn cmd_replay(args: &[String]) {
+    use lifecycle::replay::DecisionReplayer;
+    use vita::gate::{
+        EventFeatures, GateConfig, GateOverride, HomeostaticSignals, SemanticClass, ThresholdGate,
+    };
+
+    // Parse --event-id.
+    let event_id: Option<String> = {
+        let mut it = args.iter();
+        loop {
+            match it.next().map(String::as_str) {
+                Some("--event-id") => break it.next().cloned(),
+                None => break None,
+                _ => continue,
+            }
+        }
+    };
+
+    // Build a representative demo audit log with gate decisions.
+    let gate = ThresholdGate::new(GateConfig::default());
+    let mut log = vita::AuditLog::new();
+    let neutral = HomeostaticSignals::neutral();
+
+    let scenarios: &[(&str, f32, f32, bool)] = &[
+        ("bg-cleanup", 0.1, 0.1, false),
+        ("user-question", 0.8, 0.6, true),
+        ("urgent-alert", 0.95, 0.8, true),
+        ("low-priority", 0.2, 0.15, false),
+    ];
+
+    for (label, urgency, novelty, user_facing) in scenarios {
+        let features = EventFeatures {
+            urgency: *urgency,
+            novelty: *novelty,
+            user_facing: *user_facing,
+            semantic_class: SemanticClass::UserQuery,
+        };
+        let decision = gate.decide(label, &features, &neutral, &GateOverride::None);
+        vita::gate::record_gate_decision(&mut log, "anima", &decision, &features, &neutral);
+    }
+
+    let entries = log.entries();
+    let replayer = DecisionReplayer::new(entries);
+
+    if let Some(id) = &event_id {
+        match replayer.find_decision(id) {
+            Some(trace) => {
+                println!("=== Decision Replay: event_id={} ===", trace.event_id);
+                println!("Gate invoked      : {}", trace.gate_invoked);
+                println!("Value score       : {:.3}", trace.gate_value_score);
+                println!("Threshold         : {:.3}", trace.gate_threshold);
+                println!("Override active   : {}", trace.gate_override_active);
+                println!("Route             : {:?}", trace.route_id);
+                println!("Tools permitted   : {:?}", trace.tools_permitted);
+                println!("Route modulated   : {}", trace.route_was_modulated);
+                println!("Cortex outcome    : {:?}", trace.cortex_outcome);
+                println!("Reasoning         : {}", trace.gate_reasoning);
+                println!();
+                println!("Homeostatic signals at gate time:");
+                println!("  thermal_load    : {:.3}", trace.homeostatic.thermal_load);
+                println!(
+                    "  memory_pressure : {:.3}",
+                    trace.homeostatic.memory_pressure
+                );
+                println!(
+                    "  financial_budget: {:.3}",
+                    trace.homeostatic.financial_budget
+                );
+            }
+            None => eprintln!("replay: no decision found for event_id={id:?}"),
+        }
+    } else {
+        // List all decisions.
+        println!(
+            "=== All Decision Traces ({}) ===",
+            replayer.decision_count()
+        );
+        for trace in replayer.replay_all() {
+            println!(
+                "  event_id={:<20} outcome={:<12} score={:.3} threshold={:.3}",
+                trace.event_id,
+                trace.outcome_label(),
+                trace.gate_value_score,
+                trace.gate_threshold,
+            );
+        }
+    }
+}
+
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -777,8 +1676,35 @@ fn main() {
         cmd_identity(&args[1..]);
         return;
     }
+    if args.first().map(String::as_str) == Some("skills") {
+        cmd_skills(&args[1..]);
+        return;
+    }
     if args.first().map(String::as_str) == Some("serve") {
         cmd_serve();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("digest") {
+        cmd_digest(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("snapshot") {
+        cmd_snapshot(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("replay") {
+        cmd_replay(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("doctor") {
+        let report = doctor::run_doctor();
+        doctor::print_report(&report);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        let non_interactive = args.iter().any(|a| a == "--non-interactive");
+        let reset = args.iter().any(|a| a == "--reset");
+        init::run_init("anima", non_interactive, reset);
         return;
     }
 

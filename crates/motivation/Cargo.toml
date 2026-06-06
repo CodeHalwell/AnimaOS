@@ -1,0 +1,29 @@
+[package]
+name = "motivation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ---------------------------------------------------------------------------
+# E12 — Motivation: drive hierarchy, goal generation, affective state, and
+# economic agency.
+#
+# In no_std mode (default-features = false):
+#   - DriveTier, DriveStateSnapshot, AffectState, PriorityLattice, DriveWeights
+#   - DriveValueIntegrator, DriveContribution, DriveAugmentedValue
+#   - CostBenefitAnalysis, ModelTier
+#   - Goal, GoalProvenance, CorrigibilityGuard
+#
+# GoalRegistry and EndogenousGoalGenerator require alloc (included in no_std mode
+# via `extern crate alloc`).
+#
+# DriveRegistry also requires alloc for Vec<String> (operator objectives).
+# ---------------------------------------------------------------------------
+[features]
+default = ["std"]
+std = ["interoception/std"]
+
+[dependencies]
+interoception = { path = "../interoception", default-features = false }
+
+[dev-dependencies]

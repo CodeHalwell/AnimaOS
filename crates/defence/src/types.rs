@@ -66,6 +66,15 @@ pub enum VetoReason {
         /// The policy or capability name that prohibits it.
         policy: String,
     },
+    /// The proposal violates a charter prohibition (E13, S13.2).
+    CharterViolation {
+        /// Stable prohibition identifier (e.g. `"P1"`).
+        prohibition_id: String,
+        /// Full text of the violated prohibition clause.
+        clause_text: String,
+        /// The specific keyword that triggered the match.
+        matched_keyword: String,
+    },
 }
 
 impl VetoReason {
@@ -90,6 +99,13 @@ impl VetoReason {
             VetoReason::UnsafeMotorAction { action, policy } => {
                 format!("Unsafe motor action blocked by {policy:?}: {action}")
             }
+            VetoReason::CharterViolation {
+                prohibition_id,
+                clause_text,
+                ..
+            } => {
+                format!("Charter violation ({prohibition_id}): {clause_text}")
+            }
         }
     }
 
@@ -100,6 +116,7 @@ impl VetoReason {
             VetoReason::GoalDrift { .. } => "GoalDriftMonitor",
             VetoReason::RewardHacking { .. } => "RewardHackingDetector",
             VetoReason::UnsafeMotorAction { .. } => "UnsafeMotorActionGate",
+            VetoReason::CharterViolation { .. } => "ConstitutionGuard",
         }
     }
 }

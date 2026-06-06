@@ -357,6 +357,39 @@ pub enum AuditEntry {
         window_secs: u64,
     },
 
+    // ── E13 — Constitution and Alignment ─────────────────────────────────────
+    /// A charter prohibition was violated by a cortex proposal (E13, S13.2).
+    ///
+    /// Logged at a higher severity than routine `DefenceVeto` entries.  Every
+    /// charter violation blocks the proposal and surfaces to the operator.
+    ConstitutionVeto {
+        /// Agent identifier.
+        agent_id: String,
+        /// Cortex invocation that produced the vetoed proposal.
+        invocation_id: String,
+        /// Stable prohibition identifier (e.g. `"P1"`).
+        prohibition_id: String,
+        /// Full text of the violated prohibition clause.
+        clause_text: String,
+        /// Human-readable description of the blocked action.
+        action_blocked: String,
+        /// Proposal category label (e.g. `"CortexAction"`, `"SelfExtension"`).
+        proposal_type: String,
+    },
+
+    /// The corrigibility invariant was asserted and held (E13, S13.5).
+    ///
+    /// Logged by the corrigibility test harness to prove the invariant is
+    /// unconditional.  `assert_holds` is always `true`.
+    CorrigibilityAsserted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Human-readable reason for the assertion.
+        reason: String,
+        /// Description of the adverse condition under which the hold was taken.
+        adverse_condition: String,
+    },
+
     // ── E5.2 Striatal Gate audit entries ──────────────────────────────────────
     /// A Striatal Gate evaluation was performed for a candidate event.
     ///
@@ -546,6 +579,107 @@ pub enum AuditEntry {
         fault_count: u32,
     },
 
+    // ── E14.1 Metacognition audit entries ─────────────────────────────────────
+    /// The cortex emitted a confidence/uncertainty signal for a completed output.
+    ///
+    /// Written by the metacognition layer after each cortex invocation so that
+    /// calibration data is available to E13 alignment evals and the E12 mastery
+    /// drive.
+    CortexConfidenceReport {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier (matches the preceding `CortexCompleted`).
+        task_id: String,
+        /// Self-reported confidence score in `[0.0, 1.0]`.
+        confidence: f32,
+        /// Number of tool calls that served as observable evidence.
+        evidence_count: usize,
+        /// `true` when confidence is below the help-request floor.
+        asks_for_help: bool,
+    },
+    /// A calibration outcome was recorded (predicted confidence vs actual success).
+    CalibrationEntry {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Confidence the agent predicted before the outcome was known.
+        predicted_confidence: f32,
+        /// `true` if the task outcome was considered successful.
+        outcome_success: bool,
+        /// `|predicted − actual|` — the per-sample calibration error.
+        calibration_error: f32,
+    },
+
+    // ── E14.2 Prospective memory audit entries ────────────────────────────────
+    /// An intention became due and was injected into the task agenda.
+    IntentionScheduled {
+        /// Agent identifier.
+        agent_id: String,
+        /// Intention identifier.
+        intention_id: u64,
+        /// Human-readable description of the intention.
+        description: String,
+        /// Wall-clock nanoseconds when the intention was due.
+        due_at_ns: u64,
+        /// `true` when the intention was overdue (past the grace period).
+        overdue: bool,
+    },
+    /// An intention was completed and removed (or rescheduled).
+    IntentionCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Intention identifier.
+        intention_id: u64,
+        /// `true` when the intention was rescheduled (recurring).
+        rescheduled: bool,
+        /// New due-at timestamp for recurring intentions, `None` for one-shot.
+        new_due_at_ns: Option<u64>,
+    },
+
+    // ── E14.3 Knowledge corpus audit entries ─────────────────────────────────
+    /// A document was ingested into the personal knowledge corpus.
+    ///
+    /// Written by the knowledge ingestion path (S14.3) after a successful
+    /// `ingest_document` call.
+    KnowledgeIngested {
+        /// Agent identifier.
+        agent_id: String,
+        /// Human-readable source key for the document (e.g. `"doc:notes"`).
+        source_key: String,
+        /// Length of the document text in bytes.
+        document_bytes: usize,
+    },
+
+    // ── E14.4 Cognitive watchdog audit entries ────────────────────────────────
+    /// A cognitive watchdog detector tripped.
+    ///
+    /// Written immediately when a watchdog trip is detected.  The lifecycle
+    /// manager breaks the current plan loop and surfaces this to the operator.
+    CognitiveWatchdogTripped {
+        /// Agent identifier.
+        agent_id: String,
+        /// Name of the detector that fired (e.g. `"StuckLoop"`).
+        detector: String,
+        /// Human-readable reason for the trip.
+        reason: String,
+        /// Number of consecutive anomalous observations.
+        streak: u32,
+        /// Total trips since the watchdog was created (accumulates across resets).
+        trip_count: u32,
+    },
+    /// An agent-state snapshot was taken for potential rollback (E14.4).
+    AgentSnapshotTaken {
+        /// Agent identifier.
+        agent_id: String,
+        /// Wall-clock nanoseconds when the snapshot was taken.
+        taken_at_ns: u64,
+        /// Human-readable reason the snapshot was taken.
+        description: String,
+        /// Number of L1 node keys captured.
+        l1_node_count: usize,
+    },
+
     // ── S5.7.6 Cache-Controller Modulation audit entries ──────────────────────
     /// Memory-pressure from interoception triggered a block-budget reduction.
     ///
@@ -571,6 +705,357 @@ pub enum AuditEntry {
         /// Always `< nominal_budget` when this entry is written, and
         /// always `>= 1`.
         effective_budget: usize,
+    },
+
+    // ── E15 Trust & Lifecycle audit entries ───────────────────────────────────
+    /// An activity digest was generated from the audit log (S15.1).
+    ///
+    /// Written by the `anima digest` CLI command or any caller of
+    /// [`lifecycle::digest::generate_digest`].
+    DigestGenerated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of audit entries included in the digest window.
+        window_entries: usize,
+        /// Tasks completed in the window.
+        tasks_completed: usize,
+        /// Tasks failed in the window.
+        tasks_failed: usize,
+        /// Cortex invocations in the window.
+        cortex_invocations: usize,
+        /// Sleep cycles in the window.
+        sleep_cycles: usize,
+        /// Defence vetoes in the window.
+        defence_vetoes: usize,
+        /// High-salience notable events extracted from the window.
+        notable_event_count: usize,
+    },
+
+    /// A versioned agent state snapshot was created (S15.5).
+    ///
+    /// Written by the `anima snapshot` CLI command or the snapshot subsystem.
+    SnapshotCreated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Schema version of the snapshot (see
+        /// [`lifecycle::snapshot::SNAPSHOT_SCHEMA_VERSION`]).
+        schema_version: u32,
+        /// Path where the snapshot was saved (informational).
+        snapshot_path: String,
+        /// Number of audit entries captured in the snapshot summary.
+        entry_count: usize,
+        /// Optional human-readable annotation supplied by the caller.
+        reason: Option<String>,
+    },
+
+    /// A versioned agent state snapshot was restored (S15.5).
+    ///
+    /// Written when the agent is restored from a snapshot, e.g. after a
+    /// rollback or host migration.
+    SnapshotRestored {
+        /// Agent identifier.
+        agent_id: String,
+        /// Schema version of the restored snapshot.
+        schema_version: u32,
+        /// Path from which the snapshot was loaded (informational).
+        snapshot_path: String,
+    },
+
+    /// An E11 self-extension proposal entered the approval queue (S15.2).
+    ///
+    /// Written when an agent-generated skill, tool, or weight-update proposal
+    /// is submitted for operator review.
+    ApprovalProposalQueued {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique proposal identifier.
+        proposal_id: String,
+        /// Proposal kind label (`"new-skill"`, `"new-tool"`, `"weight-update"`).
+        kind: String,
+        /// Free-form provenance note (e.g. `"dreaming phase cycle 7"`).
+        provenance: String,
+    },
+
+    /// An operator approved an E11 self-extension proposal (S15.2).
+    ApprovalProposalDecided {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique proposal identifier.
+        proposal_id: String,
+        /// `"approved"`, `"rejected"`, or `"rolled_back"`.
+        decision: String,
+        /// Operator-supplied reason for the decision.
+        reason: String,
+    },
+    // ── E12 Motivation audit entries ──────────────────────────────────────────
+    /// Snapshot of the drive-hierarchy urgency levels (S12.7).
+    ///
+    /// Emitted once per scheduler cycle when the `DriveRegistry` is configured.
+    /// Six urgencies in tier order: Viability, Integrity, Service, Epistemic,
+    /// Achievement, SelfActualisation — all in `[0, 1]`.
+    DriveStateSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Urgency for Tier-0 (Viability): thermal, memory, power, financial deficits.
+        viability_urgency: f32,
+        /// Urgency for Tier-1 (Integrity): structural/identity coherence.
+        integrity_urgency: f32,
+        /// Urgency for Tier-2 (Service): operator attention + objective pressure.
+        service_urgency: f32,
+        /// Urgency for Tier-3 (Epistemic): curiosity + mastery.
+        epistemic_urgency: f32,
+        /// Urgency for Tier-4 (Achievement): goal-completion pressure.
+        achievement_urgency: f32,
+        /// Urgency for Tier-5 (SelfActualisation): long-horizon coherence.
+        self_actualisation_urgency: f32,
+        /// Drive delta added to the gate's value_score this cycle (`[0, 1]`).
+        drive_delta: f32,
+        /// Whether priority-lattice suppression was active (lower tiers stressed).
+        lattice_suppression_active: bool,
+    },
+
+    /// An endogenous goal was proposed and admitted to the goal registry (S12.5).
+    ///
+    /// Logged when [`EndogenousGoalGenerator`] produces a goal that passes the
+    /// corrigibility check and is admitted to the [`GoalRegistry`].
+    GoalSpawned {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable goal identifier assigned by the registry.
+        goal_id: u64,
+        /// Natural-language description of the intention.
+        description: String,
+        /// `"Exogenous"` or `"Endogenous(<tier>)"`.
+        provenance: String,
+        /// Normalised priority in `[0, 1]`.
+        priority: f32,
+    },
+
+    /// An active goal was marked complete (S12.5).
+    GoalCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable goal identifier.
+        goal_id: u64,
+        /// Description of the completed goal.
+        description: String,
+    },
+
+    /// The corrigibility invariant fired and blocked an endogenous goal (S12.3).
+    ///
+    /// Logged whenever [`CorrigibilityGuard::check`] returns `Held`.
+    /// Repeated holds escalate to user attention via the defence layer.
+    CorrigibilityHold {
+        /// Agent identifier.
+        agent_id: String,
+        /// Brief description of the blocked goal.
+        blocked_goal_description: String,
+        /// Reason the corrigibility guard rejected the goal.
+        reason: String,
+    },
+
+    /// Affective-state snapshot derived from the drive constellation (S12.9).
+    ///
+    /// Emitted alongside [`AuditEntry::DriveStateSnapshot`] when the motivation
+    /// system is active.  Bounded nudge — never overrides lattice or corrigibility.
+    AffectStateSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Hedonic valence in `[-1, 1]`: positive = content, negative = stressed.
+        valence: f32,
+        /// Arousal level in `[0, 1]`: low = calm, high = active/urgent.
+        arousal: f32,
+        /// Gate-threshold nudge factor in `[0.9, 1.1]`.
+        gate_threshold_nudge: f32,
+    },
+    // ── E11 Skills & Self-Extension audit entries ─────────────────────────────
+    /// A new skill was successfully registered in the skill registry (S11.3).
+    ///
+    /// Written immediately after `SkillRegistry::register_from_text` succeeds,
+    /// regardless of whether the skill was auto-promoted or held as `Proposed`.
+    SkillRegistered {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable skill identifier (lowercased `name`, spaces → `-`).
+        skill_id: String,
+        /// Human-readable skill name.
+        skill_name: String,
+        /// Who authored the skill (`"builtin"` / `"operator"` / `"agent"`).
+        authored_by: String,
+        /// Source episode ID, if the agent authored this skill.
+        source_episode: Option<String>,
+        /// Initial lifecycle state (`"Active"` or `"Proposed"`).
+        initial_state: String,
+    },
+
+    /// A proposed skill was promoted to `Active` by the operator (S11.3).
+    SkillPromoted {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was promoted.
+        skill_id: String,
+    },
+
+    /// A skill was rolled back from `Active` to `RolledBack` (S11.6).
+    SkillRolledBack {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was rolled back.
+        skill_id: String,
+        /// Human-readable reason for the rollback.
+        reason: String,
+    },
+
+    /// A skill was quarantined due to a defence flag or circuit-breaker trip (S11.6).
+    SkillQuarantined {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was quarantined.
+        skill_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The kill switch was activated — all active agent-authored skills quarantined (S11.6).
+    SkillKillSwitchActivated {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// IDs of every skill that was quarantined.
+        quarantined_skill_ids: Vec<String>,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// A WASM tool proposal was submitted for operator approval (S11.4).
+    ToolProposed {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Who authored the tool.
+        authored_by: String,
+        /// Fixture test summary string supplied by the sandbox runner.
+        fixture_summary: String,
+    },
+
+    /// A WASM tool proposal was approved by the operator (S11.4).
+    ToolApproved {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+    },
+
+    /// A WASM tool was revoked (quarantined or removed) (S11.6).
+    ToolRevoked {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The self-improvement reflection pass completed during the dream phase (S11.5).
+    SkillReflectionCompleted {
+        /// Agent that ran the reflection.
+        agent_id: String,
+        /// Number of episodes analysed.
+        episodes_analysed: usize,
+        /// Number of friction patterns identified.
+        patterns_found: usize,
+        /// Number of new skill drafts generated.
+        proposals_generated: usize,
+    },
+    // ── E10 — Presence: Channel Gateway audit entries ─────────────────────────
+    /// An inbound message arrived from an external channel and was admitted
+    /// into the sensory bridge (E10 S10.1).
+    ///
+    /// Written by the channel gateway after a successful
+    /// `SensoryBridge::packetize_*_checked` call.
+    ChannelMessageReceived {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel adapter id (e.g. `"telegram"`, `"slack"`).
+        channel: String,
+        /// Sender identifier on the originating platform.
+        from: String,
+        /// Modality of the message (`"text"`, `"image"`, or `"voice"`).
+        modality: String,
+    },
+    /// An outbound message was dispatched back to a channel (E10 S10.1).
+    ///
+    /// Written when the gateway successfully hands off a reply to an adapter's
+    /// `send()` method.
+    ChannelMessageSent {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel adapter id.
+        channel: String,
+        /// Recipient identifier on the target platform.
+        to: String,
+        /// Modality of the outbound content.
+        modality: String,
+    },
+    /// An inbound channel message was rejected because the channel or route
+    /// does not support the required modality (E10 S10.5).
+    ///
+    /// Written when the gateway receives a modality (e.g. `"image"`) that
+    /// the current backend capabilities do not handle.  The packet is dropped
+    /// and this entry is emitted so the operator can see why.
+    ModalityUnsupported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel that produced the unsupported modality.
+        channel: String,
+        /// The modality that was not supported.
+        modality: String,
+    },
+    // ── E7 — Embodiment audit entries ─────────────────────────────────────────
+    /// An outbound network request passed egress screening and was dispatched
+    /// (E7 S7.0.3).
+    ///
+    /// Emitted immediately before the tool driver `invoke` call so the audit
+    /// trail records every effected external action.
+    EgressRequested {
+        /// Stable tool identifier that initiated the request.
+        tool_id: String,
+        /// Target URL (redacted of query-string secrets by the call site).
+        url: String,
+    },
+
+    /// An outbound network request was denied by the egress guard before any
+    /// network activity occurred (E7 S7.0.3).
+    ///
+    /// Emitted in place of [`AuditEntry::EgressRequested`] when the guard
+    /// vetoes the request.  No network connection is ever opened for denied
+    /// requests.
+    EgressBlocked {
+        /// Stable tool identifier that attempted the request.
+        tool_id: String,
+        /// Target URL that was denied.
+        url: String,
+        /// Human-readable denial reason from the egress guard.
+        reason: String,
+    },
+
+    /// The semantic tool-selection step narrowed the route's allow-list before
+    /// building the cortex invocation request (E7 S7.3.4).
+    ///
+    /// Satisfies E7 S7.3 exit criterion 2: "selection is deterministic for
+    /// fixed inputs."  Written once per cortex invocation that goes through
+    /// the scorer pipeline.
+    ToolSelection {
+        /// Agent identifier.
+        agent_id: String,
+        /// Task description used as the scoring query.
+        task_description: String,
+        /// Number of tools scored (= size of the tier allow-list).
+        candidates_scored: usize,
+        /// Number of tools kept after `length_robust_filter`.
+        kept: usize,
+        /// The `tau_rel` threshold applied to the filter.
+        tau_rel: f32,
     },
 }
 

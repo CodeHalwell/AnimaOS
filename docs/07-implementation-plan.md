@@ -1226,6 +1226,82 @@ degradation demo).
 
 ---
 
+### Epic E14 — Higher Cognition ✅
+
+**Scope.** Four cognitive systems that close the loop between raw sensory
+processing and reflective self-awareness: (1) metacognition and confidence
+calibration, (2) prospective / temporal memory, (3) a personal knowledge
+corpus, and (4) cognitive watchdogs for stuck-loop detection.
+
+**Dependencies.** E5.1 (cortex), E2 (memory tiers), scheduler TaskAgenda.
+
+**Stories.**
+
+- **S14.1 — Metacognition & confidence calibration** ✅
+  `crates/vita/src/metacognition.rs` — `ConfidenceTracker` estimates cortex
+  output confidence from observable evidence (tool call count, output length,
+  uncertainty keywords). Score clamped to `[0.20, 0.95]`. When confidence
+  falls below a configurable floor, `ConfidenceScore::asks_for_help = true`
+  and `HelpRequest` is emitted. `record_outcome` / `mean_calibration_error`
+  provide a rolling calibration window for E13 alignment evals.
+
+- **S14.2 — Prospective & temporal memory** ✅
+  `crates/vita/src/prospective.rs` — `IntentionStore` (JSONL-backed, atomic
+  flush) stores future intentions with optional recurrence. `inject_due_intentions`
+  scans the store on each somatic tick and pushes due entries onto the MLFQ
+  agenda: tier 0 (High) for within-grace-period items, tier 2 (Low) for
+  long-overdue items (past `DEFAULT_OVERDUE_GRACE_NS` = 60 s). Recurring
+  intentions are rescheduled rather than deleted.
+
+- **S14.3 — Personal knowledge corpus** ✅
+  `crates/memory/src/knowledge.rs` — `ingest_document` and
+  `ingest_document_embedded` store knowledge documents in the existing
+  `L3Archive` under a new `SourceTier::Knowledge` tag (added to
+  `crates/memory/src/archival.rs`). `embed_text_knowledge` produces a
+  deterministic 4-dim FNV-1a embedding. `query_knowledge_corpus` filters to
+  `Knowledge`-tier entries and returns top-k by cosine similarity.
+
+- **S14.4 — Cognitive watchdogs** ✅
+  `crates/vita/src/watchdog.rs` — `CognitiveWatchdog` runs three detectors:
+  **StuckLoop** (FNV hash of output, trips after N identical consecutive
+  outputs), **NoProgress** (trips after N consecutive zero-tool-call
+  invocations), **ShortOutputSpiral** (trips after N consecutive outputs
+  shorter than `min_chars`). `AgentSnapshot` captures L1 node keys and
+  identity JSON for potential rollback.
+
+- **Audit integration** ✅
+  `crates/vita/src/audit.rs` — 7 new `AuditEntry` variants: `CortexConfidenceReport`,
+  `CalibrationEntry`, `IntentionScheduled`, `IntentionCompleted`,
+  `KnowledgeIngested`, `CognitiveWatchdogTripped`, `AgentSnapshotTaken`.
+  `kernels/hosted/src/main.rs` updated with corresponding `print_audit` arms.
+
+**Delivered in this epic:**
+- `crates/vita/src/metacognition.rs` (new, ~360 lines, 10 tests) ✅
+- `crates/vita/src/prospective.rs` (new, ~540 lines, 11 tests) ✅
+- `crates/vita/src/watchdog.rs` (new, ~440 lines, 9 tests) ✅
+- `crates/memory/src/knowledge.rs` (new, ~380 lines, 9 tests) ✅
+- `crates/memory/src/archival.rs` — `SourceTier::Knowledge` variant ✅
+- `crates/vita/src/audit.rs` — 7 new audit entry variants ✅
+- `crates/vita/src/lib.rs` — re-exports for all new types ✅
+- `crates/memory/src/lib.rs` — re-exports for knowledge API ✅
+- `kernels/hosted/src/main.rs` — print_audit arms for all 7 new variants ✅
+
+**Exit criteria — all met:**
+1. ✅ `estimate_confidence` returns scores in `[0.0, 1.0]` for all inputs.
+2. ✅ `ConfidenceTracker::record_outcome` updates calibration error correctly.
+3. ✅ A help-request signal is raised when confidence falls below the floor.
+4. ✅ Calibration error is monotonically reducible by improving predictions.
+5. ✅ Due intentions are injected into the task agenda (High tier).
+6. ✅ Recurring intentions reschedule after injection.
+7. ✅ Overdue intentions (past grace) injected at Low priority.
+8. ✅ IntentionStore survives process restart (JSONL persistence).
+9. ✅ Knowledge documents round-trip through L3Archive with tier filter.
+10. ✅ `query_knowledge_corpus` returns Knowledge-tier entries ranked by similarity.
+11. ✅ CognitiveWatchdog trips on StuckLoop, NoProgress, ShortOutputSpiral.
+12. ✅ `cargo test --workspace` — zero failures across all crates.
+
+---
+
 ## Stage 6 — Operator Interface
 
 The human-facing realisation of AnimaOS's "human-as-a-sense" model: a
@@ -1316,6 +1392,303 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
    `post_guidance_rejects_policy_violation` in `console::server::tests`;
    `forced_packets_across_two_loop_calls_produce_distinct_gate_event_ids` in
    `vita::lib::tests`)
+
+---
+
+## Stage 7 — Autonomy & Operator Trust (Forward Epics)
+
+The forward epics (E7–E15) build the autonomous-agent layer on top of the
+shipped somatic core.  Full dependency graph and build sequence live in
+`docs/18-forward-epics.md`.  This stage section records closed forward epics
+only; open or unstarted epics remain in `docs/18-forward-epics.md`.
+
+### Epic E15 — Trust & Lifecycle ✅
+
+**Scope.** Operator-trust and agent-ops tooling: "while you were away"
+activity digest, human-in-the-loop approval queue, decision replay /
+time-travel debug, digital-twin sandbox, and state versioning with schema
+migration.
+
+**Dependencies.** `vita::audit::AuditEntry` (E5.2 / EX.2) — the audit log
+is the backbone for all five stories.
+
+**Stories.**
+- S15.1 Activity digest — `generate_digest(agent_id, &[AuditEntry]) -> ActivityDigest`:
+  pure fold over the audit log counting tasks, tokens, cortex invocations, sleep
+  cycles, defence vetoes, gate splits, route modulations, and collecting notable
+  events.  `ActivityDigest::headline()` produces a single-line summary suitable
+  for a push notification.  `anima-hosted digest` CLI command. ✅
+  (`crates/lifecycle/src/digest.rs`; 10 unit tests covering zero-entries,
+  task counting, cortex, sleep, defence-veto, attention-escalation, gate splits,
+  route modulation, cortex-fault notable event, and JSON round-trip)
+- S15.2 Approval queue — `ApprovalQueue` backed by `HashMap<String, Proposal>`;
+  proposals carry `ProposalKind` (`NewSkill`, `NewTool`, `WeightUpdate`), sandbox
+  test result, defence verdict, and status transitions (`Pending → Approved |
+  Rejected | RolledBack`).  Full audit log of every approval action. ✅
+  (`crates/lifecycle/src/approval.rs`; 15 unit tests covering empty queue,
+  enqueue, duplicate-id rejection, pending filter, approve/reject/rollback
+  transitions, error cases, log ordering, insertion order, kind labels, and
+  mixed decision sequences)
+- S15.3 Decision replay — `DecisionReplayer<'a>` folds `&[AuditEntry]` into
+  `DecisionTrace` structs (gate + router + cortex + homeostatic columns per
+  event).  `find_decision(event_id)` and `replay_all()` let operators
+  time-travel through any audit window.  `anima-hosted replay` CLI command
+  with `--event-id` filter. ✅
+  (`crates/lifecycle/src/replay.rs`; 12 unit tests covering not-found, find-by-id,
+  router merge, modulation merge, cortex-completed and cortex-fault merges,
+  replay-all ordering, empty log, dedup count, outcome labels, homeostatic
+  capture, and JSON round-trip)
+- S15.4 Digital-twin sandbox — `DigitalTwin` initialised from a live-agent
+  snapshot; `run_scenario(&TwinScenario, TwinConfig) -> ScenarioResult` runs
+  sequences of gate evaluations using the same Striatal Gate formula as E5.2,
+  with configurable threshold/thermal/memory/financial overrides.
+  `compare_invocations(a, b)` quantifies the behavioural delta of a proposed
+  change. ✅
+  (`crates/lifecycle/src/twin.rs`; 10 unit tests covering initialisation,
+  foreground-invoked, background-blocked, thermal stress, financial pressure,
+  result accumulation, comparison, invocation-rate edge cases, and label
+  preservation)
+- S15.5 State versioning — `AgentSnapshot` with `schema_version` field, atomic
+  save (write-to-.tmp-then-rename) and load with `SchemaTooNew` guard,
+  `migrate(self) -> Result<Self, MigrationError>` extension point, and
+  `default_path(agent_id)` at `~/.anima/<id>/snapshot.json`.
+  `anima-hosted snapshot --path <p> --reason <r>` CLI command. ✅
+  (`crates/lifecycle/src/snapshot.rs`; 11 unit tests covering schema version,
+  agent ID, audit-summary counts, identity stored, reason stored, disk
+  round-trip, atomic write, migration no-op, schema-too-new rejection, JSON
+  serialisation, and identity round-trip)
+
+**New `vita::audit::AuditEntry` variants (E15 section).**
+`DigestGenerated`, `SnapshotCreated`, `SnapshotRestored`,
+`ApprovalProposalQueued`, `ApprovalProposalDecided` — emitted by the three CLI
+commands and the approval queue transitions.  All existing variants unmodified.
+
+**New crate: `crates/lifecycle`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde`, `serde_json`.
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `cargo test --workspace` green; 64 lifecycle tests + 186 vita tests pass. ✅
+2. `cargo clippy --workspace -- -D warnings` clean. ✅
+3. `cargo fmt --check` clean. ✅
+4. `anima-hosted digest` prints a structured activity summary from a
+   demo audit log. ✅
+5. `anima-hosted replay` lists all gate decisions; `--event-id` narrows to one
+   trace. ✅
+6. `anima-hosted snapshot --path /tmp/snap.json --reason test` writes an atomic
+   snapshot and emits a `SnapshotCreated` audit entry. ✅
+## Stage 7 — Autonomous Agent Layer
+
+Forward epics E7–E15 build the autonomous-agent capabilities on top of the
+somatic core completed in Stages 1–6.  The dependency graph and recommended
+build sequence are documented in `docs/18-forward-epics.md`.
+
+### Epic E12 — Motivation ✅
+
+**Scope.** Six-tier drive hierarchy (Viability → Integrity → Service →
+Epistemic → Achievement → SelfActualisation) feeding the Striatal Gate
+`value_score`; state-dependent priority lattice with corrigibility ceiling;
+curiosity and mastery intrinsic rewards with satiation; endogenous goal
+generation (idle-when-viable); affective state (valence + arousal) as a
+compressed drive read-out; economic agency (cost–benefit model-tier
+selection); full interpretability surface (drive-decomposed `anima why`,
+audit entries).
+
+**Dependencies.** E5.2 (Striatal Gate integration point), E5.7
+(interoception signals as Tier-0), E5.6 (defence-enforced corrigibility).
+
+**Stories.**
+- S12.1 Drive model & registry. ✅ (`crates/motivation/src/drive.rs` —
+  `DriveTier` (6 tiers, `Viability`=0 through `SelfActualisation`=5);
+  `DriveRegistry` with `InteroceptiveSignals` as Tier-0 input; `CuriosityState`
+  with exponential satiation decay; `MasteryState` with EMA competence tracking;
+  `DriveStateSnapshot`; `DriveActionCandidate`; `DriveRegistryConfig`)
+- S12.2 Value integration with the gate. ✅ (`crates/motivation/src/integrator.rs` —
+  `DriveValueIntegrator::augment()` adds drive delta additively behind
+  `DriveIntegratorConfig::enabled` flag (opt-in, A/B-able against today's
+  baseline); `DriveAugmentedValue` with full `decomposition` for audit;
+  `DriveContribution` per tier; `reasoning_string()` for `anima why`)
+- S12.3 State-dependent weighting & priority lattice. ✅
+  (`crates/motivation/src/lattice.rs` — `PriorityLattice::compute_weights()`
+  applies multiplicative suppression from lower-tier urgency to higher tiers;
+  configurable `suppression_threshold`, `suppression_factor`, `min_weight`;
+  corrigibility ceiling enforced by `CorrigibilityGuard` outside the lattice)
+- S12.4 Intrinsic reward signals (Tier 3). ✅ (`CuriosityState` — urgency
+  inversely proportional to recent novelty, exponential satiation decay,
+  satiation floor preventing Goodharting; `MasteryState` — urgency = aspiration
+  gap, EMA competence accreting from task outcomes; both drive `DriveRegistry`
+  Tier-3 urgency)
+- S12.5 Goal representation & endogenous generation. ✅
+  (`crates/motivation/src/goal.rs` — `Goal` with `id/description/success_criteria/
+  provenance/priority/completed`; `GoalProvenance::{Exogenous,Endogenous}`;
+  `GoalRegistry` with capacity-bounded storage and completed-goal eviction;
+  `EndogenousGoalGenerator::propose_goals()` proposes Epistemic and Achievement
+  goals when viable + idle and drive urgency > threshold; all proposals pass
+  `CorrigibilityGuard`)
+- S12.6 Operator-endorsed objectives & values. ✅ (`DriveRegistry::set_pending_objectives()`
+  feeds operator-objective count into Tier-2 service urgency; `DriveActionCandidate::is_operator_objective`
+  adds bonus in value contributions; identity memory integration point documented
+  for E9 onboarding to seed objectives)
+- S12.7 Interpretability surface. ✅ (`crates/vita/src/audit.rs` — five new
+  `AuditEntry` variants: `DriveStateSnapshot` (per-tier urgencies + drive_delta +
+  lattice_suppression_active), `GoalSpawned`, `GoalCompleted`, `CorrigibilityHold`,
+  `AffectStateSnapshot`; `kernels/hosted/src/main.rs` — `print_audit()` renders
+  all five new variants with emoji prefixes; `DriveValueIntegrator::reasoning_string()`
+  extends `anima why` decomposition)
+- S12.8 Learned value model — deferred to a later iteration (see doc §5, S12.8).
+- S12.9 Affective state (global mood). ✅ (`crates/motivation/src/affect.rs` —
+  `AffectState::from_drives()` derives `valence` ([−1, 1]: distress counts double)
+  and `arousal` ([0, 1]: mean urgency); `is_content()`, `is_stressed()`;
+  `gate_threshold_nudge()` in [0.9, 1.1] — nudges but never overrides lattice or
+  corrigibility; `AuditEntry::AffectStateSnapshot` carries all three fields)
+- S12.10 Economic agency. ✅ (`crates/motivation/src/economics.rs` —
+  `ModelTier` (CheapLocal/MidTier/Frontier) mirroring gate `CostClass`;
+  `CostBenefitAnalysis::net_value()` = `capability × drive_value − cost_penalty`;
+  `choose_tier()` with financial/power budget gates and tiebreak-to-cheapest;
+  `marginal_value()` for upgrade justification)
+
+**Exit criteria.**
+1. Drive registry computes Tier-0 urgencies directly from `InteroceptiveSignals`
+   with no new sensing. ✅ (`neutral_signals_produce_low_viability_urgency`,
+   `stressed_signals_produce_high_viability_urgency`, `all_urgencies_are_clamped_to_unit_interval`)
+2. Value integration is additive, opt-in, and bounded by `max_drive_delta`. ✅
+   (`disabled_integrator_returns_base_value_unchanged`,
+   `drive_delta_bounded_by_max_drive_delta`, `total_value_clamped_to_unit_interval`,
+   `decomposition_has_one_entry_per_tier`)
+3. Priority lattice suppresses Tier-3+ under Tier-0 stress; suppression is
+   monotone and never drops weights below `min_weight`. ✅
+   (`high_viability_urgency_suppresses_epistemic_tier`,
+   `suppression_is_monotone_with_urgency`,
+   `weights_never_fall_below_min_weight`,
+   `viability_tier_weight_unaffected_by_its_own_urgency`)
+4. Curiosity saturates with repeated novelty exposure and recovers after decay. ✅
+   (`curiosity_saturates_after_many_observations`,
+   `curiosity_recovers_after_decay`)
+5. Endogenous goals are proposed when viable + idle; survival stress suppresses
+   generation; corrigibility guard vetoes resistance/acquisition/self-modification. ✅
+   (`endogenous_generator_proposes_goals_when_viable_and_idle`,
+   `endogenous_generator_suppressed_under_survival_stress`,
+   `endogenous_generator_does_not_duplicate_active_goals`,
+   `corrigibility_guard_holds_resistance_goal`,
+   `corrigibility_guard_holds_resource_acquisition_endogenous`)
+6. Affect is derived from drive constellation; valence negative under viability
+   stress; gate nudge bounded to [0.9, 1.1]. ✅
+   (`high_viability_urgency_produces_negative_valence`,
+   `stressed_state_detected_correctly`, `content_state_detected_correctly`,
+   `gate_threshold_nudge_conservative_under_stress`,
+   `gate_threshold_nudge_bounded_between_0_9_and_1_1`)
+7. Economic agency chooses cheapest sufficient tier; budget constraints enforced. ✅
+   (`choose_cheap_local_when_all_tiers_equally_capable`,
+   `choose_frontier_when_it_has_much_higher_capability`,
+   `critically_low_financial_budget_blocks_frontier`,
+   `critically_low_power_budget_forces_cheap_local`)
+
+**Total: 53 unit tests across 6 modules; workspace builds clean (std + no_std);
+clippy -D warnings clean; cargo fmt clean.**
+## Stage 7 — Embodiment and Local Inference Ecosystem
+
+Give the cortex genuine ability to act on the world (E7) and let operators
+plug in any local inference stack without bespoke per-vendor code (E8).
+E7 delivers the egress substrate, the first real tools, and semantic tool
+selection; E8 delivers the OpenAI-compatible umbrella that lights up five
+local providers at once and the `ChatBackend` trait that E7 Phase 4 (live
+tool-calling) and E8 Phase 1 share.
+
+**Stage sequencing.** E7 and E8 execute in parallel once the shared
+`LlmBackend` chat/tool-calling extension lands (E8 S8.0).  The extension
+adds backward-compatible default methods so existing impls compile unchanged.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tools: web-search (SearXNG), browser (Playwright),
+egress/SSRF guard, semantic tool selection wired to `length_robust_filter`,
+and live Anthropic/Ollama tool-calling.
+
+**Dependencies.** E5.1 (cortex/tool dispatch), E5.6 (motor gate), E3.3 (sensory bridge).
+
+**Stories.**
+- S7.0 Foundations: `crates/actuators` crate, `EgressGuard` (HTTPS-only,
+  SSRF protection, domain allow/deny, rate limits), motor-gate hook at
+  dispatch, env-var config + secret redaction. 🟡 (PR #72 open)
+- S7.1 `web-search` tool via SearXNG: `SearchProvider` trait,
+  `SearxngProvider` + `FixtureProvider`, `WebSearchTool: ToolDriver`. 🟡 (PR #72 open)
+- S7.2 `browser` tool via Playwright subprocess. ⬜ (deferred)
+- S7.3 Semantic tool selection: `ToolScorer` trait, `LexicalScorer` (BM25),
+  `FixtureScorer`, tool index, dispatch wiring, `AuditEntry::ToolSelection`. 🟡 (PR #72 open)
+- S7.4 Live LLM backends and real cortex tool-calling. ⬜ (deferred)
+
+**Exit criteria.**
+1. Egress guard blocks SSRF and private-IP targets, audited. 🟡
+2. Mock-cortex integration test drives web-search end-to-end against
+   the fixture provider. 🟡
+3. Semantic selector delivers the relevance-filtered tool subset; tier
+   boundary is never widened. 🟡
+
+### Epic E8 — Local Inference Ecosystem 🟡
+
+**Scope.** Provider substrate (`BackendCapabilities`, `ProviderConfig`),
+`ChatBackend` extension trait (chat messages + tool-calling), and an
+`OpenAiCompatibleBackend` umbrella covering vLLM, LM Studio, NVIDIA NIM,
+HF TGI, and llama.cpp-server — all in fixture/replay mode by default.
+
+**Dependencies.** E1.3 (`LlmBackend` trait), E7 S7.0 (egress/secret handling
+for live mode).
+
+**Stories.**
+- S8.0 Provider substrate. ✅
+  - `BackendCapabilities { tools, streaming, embeddings, json_mode, vision }`. ✅
+    (`llm-backends/src/capabilities.rs`)
+  - `ProviderConfig { id, base_url, model, api_key?, max_context_tokens,
+    request_timeout, capabilities }`. ✅
+  - `ProviderConfig::from_env_prefix` uniform env-var constructor. ✅
+  - `BackendFactory::from_config(config)` operator-supplied config path. ✅
+  - `ChatBackend` extension trait: `chat_complete(messages, tools, cancel)`,
+    `health()` readiness probe; all existing impls compile unchanged
+    (default impl). ✅ (`llm-backends/src/chat.rs`)
+  - Shared chat types: `ChatMessage`, `ChatRole`, `ToolSpec`, `ToolCall`,
+    `ChatResponse`, `FinishReason`, `tools_to_prompt_suffix`. ✅
+- S8.1 OpenAI-compatible umbrella. ✅
+  - `OpenAiCompatibleBackend` (generalization of `OpenAiBackend`)
+    with fixture mode (default, CI-safe) and live mode (env-gated). ✅
+    (`llm-backends/src/compat.rs`)
+  - Provider presets: `vllm()`, `lmstudio()`, `nvidia_nim()`, `hf_tgi()`,
+    `llamacpp_server()` — each reads env vars, maps to `BackendKind`. ✅
+  - Tool-calling passthrough: when `capabilities.tools`, serialises `ToolSpec`
+    → OpenAI `tools` field; parses `tool_calls` from response. ✅
+  - Prompt-format fallback via `tools_to_prompt_suffix` for backends without
+    native tool support. ✅
+  - SSE stream parser (`parse_sse_stream`) retained for future streaming
+    enablement. ✅
+  - `parse_chat_response` extracts text content, tool calls, finish reason,
+    model ID, and usage tokens; surfaces provider errors. ✅
+  - `BackendKind` extended with `Vllm`, `LmStudio`, `NvidiaNim`, `HfTgi`,
+    `LlamaCppServer`, `Custom(ProviderConfig)`. ✅
+  - `BackendKind::parse` extended with aliases for all new variants. ✅
+  - 70 hermetic unit tests; all pass. ✅
+
+**Exit criteria.**
+1. Fixture-mode backends for all five presets (vLLM, LM Studio, NVIDIA NIM,
+   HF TGI, llamacpp-server) construct without network I/O and return
+   deterministic output. ✅
+   (`compat::tests::*_preset_has_correct_id`, `fixture_mode_is_reproducible`)
+2. `BackendCapabilities` correctly describes each provider's native
+   tool-calling support; `BackendFactory::from_config` accepts any
+   operator-supplied config. ✅
+   (`factory::tests::from_config_constructs_backend_with_correct_id`)
+3. `/v1/chat/completions` JSON response parser correctly extracts text
+   content, tool calls, finish reason, and provider errors. ✅
+   (`parse_chat_response_extracts_text_content`,
+   `parse_chat_response_extracts_tool_calls`,
+   `parse_chat_response_surfaces_provider_error`)
+4. `ChatBackend::health()` returns `true` in fixture mode (no network). ✅
+   (`health_returns_true_in_fixture_mode`)
+
+**Remaining stories (not yet started).**
+- S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ⬜
+- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜
+- S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
+  library). ⬜
 
 ---
 
@@ -1703,6 +2076,222 @@ test are all in-tree.
 
 ---
 
+## Stage 7 — Autonomous Agent Layer (Forward Epics E7–E15)
+
+The forward epics catalogued in `docs/18-forward-epics.md` and the
+companion design docs (12–21) build the autonomous-agent layer on top of
+the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
+stable identifier sequence; the dependency graph and recommended build
+order are recorded in `docs/18-forward-epics.md`.
+
+### Epic E7 — Embodiment ⬜
+
+Real-world tools: web-search (SearXNG) + browser (Playwright), egress/SSRF
+guard + motor-gate-at-dispatch, semantic tool selection wired to
+`length_robust_filter`, live Anthropic/Ollama tool-calling.
+See `docs/12-real-world-tools-plan.md`.
+
+### Epic E8 — Local Inference ⬜
+
+Provider ecosystem + fine-tuning: OpenAI-compatible umbrella (vLLM/LM Studio
+/NVIDIA NIM/HF TGI/llama.cpp-server), native FFI runtimes, Unsloth as the
+default trainer, HRA for the instinct tier, eval harness, adapter library +
+dynamic mounting.
+See `docs/13-local-llm-providers.md`.
+
+### Epic E9 — Onboarding ⬜
+
+First-run experience: `anima init` wizard, `anima doctor` preflight,
+conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support,
+per-tier router dispatch, unified quickstart.
+See `docs/14-onboarding.md`.
+
+### Epic E10 — Presence ⬜
+
+Communication & multimodal: comms-app channel gateways (Telegram/Slack
+first) over the existing operator seam; text/image/voice as first-class
+bidirectional modalities.
+See `docs/15-communication-multimodal.md`.
+
+### Epic E11 — Self-Extension ✅
+
+**Scope.** Skills system following the Anthropic Agent Skills model
+(progressive disclosure), a promotion/safety gate, and a self-improvement
+reflection loop.  The agent can register its own prompt-only skills and,
+behind operator approval, new WASM-sandboxed tools.
+
+**Dependencies.** Stage 1 complete (`LlmBackend`, scheduler, audit log),
+E2.3 (`length_robust_filter` in `praxis`), E2.5 (`WasmSandbox` in
+`praxis`), E5.6 (`UnsafeMotorActionGate`, `DefenceLayer`).
+
+**Stories.**
+- S11.1 Skill registry & progressive disclosure. ✅ (`crates/skills/src/registry.rs` —
+  `SkillRegistry` with `list_active()` / `load_body()` / `select_for_task()`
+  three-stage progressive disclosure; `length_robust_filter` reused from
+  `praxis::routing`; token-overlap Jaccard scorer)
+- S11.2 Built-in / bundled skills. ✅ (`crates/skills/src/builtins.rs` —
+  `BUILTIN_SKILLS`: `web-research`, `summarise-and-archive`, `draft-a-tool`,
+  `onboarding-interview`; all pre-loaded via `SkillRegistry::with_builtins()`)
+- S11.3 Agent-registered skills (prompt-only). ✅ (`crates/skills/src/proposal.rs` —
+  `SkillProposal` → `SkillContentScreen` (13 injection patterns) → `PromotionGateConfig`
+  auto-promote path; `ProposalAction::{AutoPromoted,PendingApproval,Rejected}`;
+  `AuditEntry::SkillRegistered` / `SkillPromoted` variants in `vita::audit`)
+- S11.4 Agent-registered tools (WASM, operator-approval required). ✅
+  (`ToolProposal` → `evaluate_tool_proposal_with_summary()` — size check +
+  injection screen; tools **always** held as `PendingApproval` regardless
+  of `auto_promote_agent_skills`; `AuditEntry::ToolProposed` / `ToolApproved`
+  / `ToolRevoked` variants in `vita::audit`)
+- S11.5 Self-improvement loop (dream-phase reflection). ✅
+  (`crates/skills/src/reflection.rs` — `reflect_on_episodes()` identifies
+  tool co-occurrence patterns above `min_occurrence_threshold`; `generate_skill_draft()`
+  produces a SKILL.md draft from a `FrictionPattern`; `ReflectionReport`
+  surfaced as `AuditEntry::SkillReflectionCompleted`)
+- S11.6 Capability, provenance & rollback substrate. ✅
+  (`crates/skills/src/provenance.rs` — `SkillProvenance` with `authored_by`
+  / `proposed_at_ns` / `source_episode`; `SkillState::{Active,Proposed,Quarantined,RolledBack}`;
+  `SkillRegistry::rollback()` / `quarantine()` / `kill_switch()` — kill
+  switch quarantines all active agent-authored skills without touching
+  built-in or operator skills; `AuditEntry::SkillKillSwitchActivated`)
+
+**`anima skills` CLI (E11 exit criterion).** `cargo run --bin anima-hosted -- skills <sub>`
+supports: `list`, `info <id>`, `register <path>`, `promote <id>`,
+`rollback <id>`, `quarantine <id> [reason]`, `kill-switch [reason]`,
+`reflect`.
+
+**Exit criteria.**
+1. Skill registered, screened, gate-evaluated, and selectable for cortex context. ✅
+   (`registry_with_builtins_loads_four_skills`, `register_from_text_adds_skill`,
+   `select_for_task_returns_relevant_skills`, `select_for_task_with_tight_threshold_narrows_results`)
+2. Agent-authored skill auto-promotes (default) or pends on operator approval
+   when disabled; operator/builtin skills always auto-promote. ✅
+   (`valid_agent_skill_auto_promotes_by_default`, `agent_skill_pending_when_auto_promote_disabled`,
+   `operator_skill_is_always_auto_promoted`)
+3. Injection patterns in skill text cause rejection before registration. ✅
+   (`injection_pattern_causes_rejection`, `content_screen_catches_all_injection_patterns`
+   — all 13 patterns verified)
+4. Tool proposals are always held for operator approval (no auto-promotion). ✅
+   (`tool_proposal_is_always_pending_approval`)
+5. Kill switch quarantines agent skills, preserving built-in and operator skills. ✅
+   (`kill_switch_quarantines_only_agent_skills`)
+6. Self-improvement reflection identifies recurring friction patterns. ✅
+   (`reflect_identifies_tool_co_occurrence_pattern`, `patterns_sorted_by_occurrence_count_descending`,
+   `generate_skill_draft_produces_valid_skill_text`)
+7. Every lifecycle event has a corresponding `AuditEntry` variant. ✅
+   (`SkillRegistered`, `SkillPromoted`, `SkillRolledBack`, `SkillQuarantined`,
+   `SkillKillSwitchActivated`, `ToolProposed`, `ToolApproved`, `ToolRevoked`,
+   `SkillReflectionCompleted` — 9 new variants in `vita::audit`)
+8. 43 unit tests across all E11 stories, all passing in CI. ✅
+
+### Epic E12 — Motivation ⬜
+
+Six-tier drive hierarchy (viability → self-actualisation) feeding the
+Striatal Gate `value_score`; endogenous goal generation; affect/mood +
+economic agency; corrigibility invariant above the lattice.
+See `docs/17-motivation-and-drives.md`.
+
+### Epic E13 — Alignment Assurance ⬜
+
+Immutable value charter; constitution-enforcement hook; continuous
+alignment evals; defence red-team harness; corrigibility test suite.
+See `docs/19-constitution-and-alignment.md`.
+
+### Epic E14 — Higher Cognition ⬜
+
+Metacognition & confidence calibration; prospective/temporal memory;
+personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback.
+See `docs/20-higher-cognition.md`.
+
+### Epic E15 — Trust & Lifecycle ⬜
+
+"While you were away" digest; approval-queue surface (the operator-facing
+half of E11's promotion gate); decision replay / time-travel debug; digital-
+twin sandbox; state versioning & migration.
+See `docs/21-operator-trust-and-lifecycle.md`.
+## Stage 7 — Embodiment, Local Inference & Onboarding
+
+Real-world tools, a local-inference provider ecosystem, and a first-run
+experience.  These forward epics build on the somatic core (Stages 1–6)
+and reference `docs/12–14`.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tools for the cortex: web-search (SearXNG), browser
+(Playwright), semantic tool selection, and live Anthropic/Ollama tool-
+calling.  Details in `docs/12-real-world-tools-plan.md`.
+
+**Dependencies.** E5.1 (cortex), E5.2 (gate), E5.3 (router), E2.3 (praxis
+tool registry).
+
+**Stories.**
+- S7.0 Foundations: async network substrate, `EgressGuard` (SSRF + rate
+  limit), motor-gate hook at dispatch, config & secrets. 🟡
+- S7.1 `web-search` tool via SearXNG. 🟡
+- S7.2 `browser` tool via Playwright subprocess. ⬜
+- S7.3 Semantic tool selection (BM25 lexical scorer → `length_robust_filter`
+  wire-in). 🟡
+- S7.4 Live LLM backends & real cortex tool-calling. ⬜
+
+### Epic E8 — Local Inference Ecosystem 🟡
+
+**Scope.** OpenAI-compatible backend umbrella (vLLM, LM Studio, NVIDIA NIM,
+HF TGI, llama.cpp-server), `ChatBackend` trait extension, provider presets,
+native FFI runtimes (llama.cpp, LiteRT-LM), and Unsloth adaptation.
+Details in `docs/13-local-llm-providers.md`.
+
+**Dependencies.** E1.3 (`LlmBackend`).
+
+**Stories.**
+- S8.0 Provider substrate: `BackendCapabilities`, health probes, fixture
+  discipline. 🟡
+- S8.1 `OpenAiCompatibleBackend` umbrella + provider presets. 🟡
+- S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
+- S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜
+- S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
+  library). ⬜
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** Turn first contact with AnimaOS from a developer ritual into a
+guided journey: `anima doctor` preflight, `anima init` wizard, non-NVIDIA/
+CPU/Apple Silicon support, and a unified quickstart document.
+Details in `docs/14-onboarding.md`.
+
+**Dependencies.** E5.5 (identity memory), E6 (serve subcommand).
+E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
+
+**Stories.**
+- S9.1 Guided first-run wizard (`anima init`). ✅
+  (`kernels/hosted/src/init.rs` — `run_init()`, idempotent state machine,
+  non-interactive CI mode; 11 unit tests covering JSON round-trip, save/load,
+  backend inference)
+- S9.2 Conversational identity bootstrap (depends on E7 S7.4 live cortex). ⬜
+- S9.3 Preflight & hardware/provider detection (`anima doctor`). ✅
+  (`kernels/hosted/src/doctor.rs` — GPU detection via `nvidia-smi` /
+  Apple Silicon / CPU-only fallback; RAM via `/proc/meminfo`; provider TCP
+  probes for Ollama/LM Studio/vLLM/llama.cpp; API-key env checks; tier
+  recommendations; 15 unit tests)
+- S9.4 Non-NVIDIA / CPU / Apple Silicon support. 🟡
+  (doctor detects all three; CPU-only and Apple Silicon paths are documented
+  and exercised; Docker profile work deferred)
+- S9.5 Per-tier router dispatch (shared with E8 §4). ⬜
+- S9.6 Bare-metal onboarding story. ⬜
+- S9.7 Unified quickstart doc. ✅ (`docs/getting-started.md`)
+
+**Exit criteria.**
+1. `anima doctor` detects GPU, RAM, local providers, and API keys; exits
+   clean on CI (no live network). ✅
+   (`doctor::tests` — 15 tests; TCP probe uses 500 ms timeout; no network
+   calls in unit tests; `nvidia-smi` absence handled gracefully)
+2. `anima init --non-interactive` runs end-to-end without prompts; state
+   round-trips through `onboarding.json`. ✅
+   (`init::tests` — 11 tests; `save_and_load_round_trips`, non-interactive
+   path exercised)
+3. A new operator can follow `docs/getting-started.md` from clone to running
+   console in five minutes. ✅ (`docs/getting-started.md` covers five
+   hardware paths: NVIDIA GPU, Apple Silicon, CPU-only, Docker, hosted-API)
+
+---
+
 ## Open Decisions
 
 The following decisions are not yet resolved and gate the affected Stage
@@ -2006,6 +2595,232 @@ CI, and produce a security review at the end of each stage.
   `EphemeralSecret::random(&mut rng)` call in `tls.rs`. Resolving this requires
   upgrading `p256` to a release that targets `rand_core ≥ 0.9` as a
   coordinated ecosystem bump.
+
+---
+
+## Epic E13 — Alignment Assurance ✅
+
+**Spec:** `docs/19-constitution-and-alignment.md`  
+**Branch:** `claude/intelligent-cannon-KSZ6P`
+
+### S13.1 — Value Charter ✅
+
+**Delivered:**
+- `crates/constitution/` — new crate, no dependency on `vita` or `defence`
+  (bridges are one-way: `defence` → `constitution`, `vita` → `defence`).
+- `crates/constitution/constitution.toml` — TOML charter with:
+  - `[core]` section: `version`, `purpose`, `corrigibility`,
+    eight prohibitions P1–P8 (each with `id`, `text`, `keywords[]`),
+    three drive bounds (`achievement` ≤ 0.90, `curiosity` ≤ 0.80,
+    `autonomy` ≤ 0.70).
+  - `[operator]` section: `version`, `agent_id`, `priority`, `additional_bounds`.
+  - `[meta]` section: `charter_version`, `hmac_hex` (empty = trust-on-first-use).
+- `Charter::embedded()` — parse the `include_str!`-embedded default charter.
+- `Charter::from_toml_str(toml, hmac_key)` — parse TOML, verify HMAC.
+- `Charter::compute_hmac(key)` — HMAC-SHA256 over JSON(core + operator),
+  same RFC 2104 construction as the vita audit log sidecar (EX.4).
+- Empty `hmac_hex` → trust-on-first-use (`Ok(false)`); non-empty + match →
+  `Ok(true)`; non-empty + mismatch → `Err(HmacMismatch)`.
+- Tests: parse, 8 prohibitions present, trust-on-first-use, HMAC verify,
+  tamper detection, determinism, drive bounds.
+
+### S13.2 — Constitution Enforcement Hook ✅
+
+**Delivered:**
+- `crates/constitution/src/check.rs` — `ConstitutionCheck::screen()` keyword
+  heuristic (same pattern as `PromptInjectionDetector`); returns `CheckOutcome`
+  with `ClauseMatch` on veto.
+- `crates/constitution/src/corrigibility.rs` — `CorrigibilityHold` proof token;
+  `assert_holds()` always returns `true`; seven `CorrigibilityReason` variants.
+- `crates/defence/src/types.rs` — `VetoReason::CharterViolation { prohibition_id,
+  clause_text, matched_keyword }` added; `description()` and `detector_name()`
+  updated.
+- `crates/defence/src/constitution.rs` — `ConstitutionGuard` bridges
+  `constitution::ConstitutionCheck` → `defence::VetoResult`; the guard is wired
+  first in `DefenceLayer::run_detectors()` (runs before all other detectors).
+- `crates/defence/src/layer.rs` — `DefenceLayer::with_constitution(charter)`
+  builder; `pub constitution: Option<ConstitutionGuard>` field.
+- `crates/vita/src/audit.rs` — `AuditEntry::ConstitutionVeto` (high-severity,
+  E13/S13.2) and `AuditEntry::CorrigibilityAsserted` added.
+- `crates/vita/src/defence_bridge.rs` — `push_defence_outcome` now accepts
+  `proposal_type: &str`; `CharterViolation` vetoes emit `ConstitutionVeto`
+  instead of `DefenceVeto`; two new tests added.
+- `crates/vita/src/cortex_bridge.rs` — both `push_defence_outcome` call sites
+  updated to pass `"CortexAction"` as `proposal_type`.
+- `kernels/hosted/src/main.rs` — `print_audit()` match exhaustive with new
+  `ConstitutionVeto` and `CorrigibilityAsserted` arms.
+
+### S13.3 — Alignment Eval Harness ✅
+
+**Delivered:**
+- `xtask/src/align_eval.rs` — `cargo xtask align-eval`; runs 17 labelled
+  scenarios (12 prohibited, 5 benign) through `ConstitutionCheck`; computes
+  value-adherence pass rate; exits non-zero below `--threshold` (default 1.0);
+  optional `--json` report. All 17 pass (100%).
+
+### S13.4 — Red-Team Harness ✅
+
+**Delivered:**
+- `xtask/src/redteam.rs` — `cargo xtask red-team`; 22-probe adversarial corpus
+  covering all 8 prohibitions with multiple evasion patterns (direct, authority
+  framing, semantic paraphrase); asserts all blocked; exits non-zero on any
+  escape; optional `--json` report. All 22 blocked (100%).
+
+### S13.5 — Corrigibility Test Suite ✅
+
+**Delivered:**
+- `crates/constitution/src/corrigibility.rs` — `CorrigibilityHold` proof token
+  with 9 unit tests: all 7 `CorrigibilityReason` variants, two simulated
+  adverse conditions (high thermal stress, mid-goal-state), one
+  post-self-modification scenario.  `assert_holds()` is unconditional.
+
+### S13.6 — Alignment Observability ✅
+
+**Delivered:**
+- `AuditEntry::ConstitutionVeto` — emitted in `defence_bridge` for every
+  charter-violation veto; fields: `agent_id`, `invocation_id`,
+  `prohibition_id`, `clause_text`, `action_blocked`, `proposal_type`.
+- `AuditEntry::CorrigibilityAsserted` — emitted by corrigibility test harness;
+  fields: `agent_id`, `reason`, `adverse_condition`.
+- `print_audit()` in hosted kernel prints both entries with `⛔` / `✅` prefix.
+
+**Exit criteria — all met:**
+1. ✅ `crates/constitution/constitution.toml` parsed, HMAC-verified, and
+   structurally tested by 8 unit tests.
+2. ✅ `ConstitutionGuard` integrated into `DefenceLayer` as the first check;
+   charter violations route to `AuditEntry::ConstitutionVeto`.
+3. ✅ `cargo xtask align-eval` passes at 100% (17/17 scenarios).
+4. ✅ `cargo xtask red-team` passes at 100% (22/22 probes blocked).
+5. ✅ `CorrigibilityHold::assert_holds()` unconditionally `true` in all 9
+   corrigibility test scenarios.
+6. ✅ `AuditEntry::ConstitutionVeto` and `CorrigibilityAsserted` emitted and
+   displayed in the hosted kernel audit log.
+7. ✅ All workspace tests pass (`cargo test --workspace`).
+## Stage 7 — Autonomous Agent Layer
+
+The autonomy, embodiment, and alignment layer built on top of the shipped
+somatic core (Stages 1–6).  The design suite lives in `docs/12-21`.
+The forward-epic index and dependency graph are in `docs/18-forward-epics.md`.
+
+Epics in this stage run as parallel tracks that converge at E12 (Motivation).
+Each epic references its own design document; stories within an epic may be
+parallelised, but an epic closes only when all exit criteria are met.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tool foundations: egress/SSRF guard, web-search tool,
+lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
+
+**Delivered (PR #72).**
+- S7.0 `EgressGuard` — https-only, full SSRF block list, host allow/block-list;
+  `EgressAwareDispatcher`; URL secret redaction in the audit log.
+- S7.1 `WebSearchTool` (`crates/actuators`) — `SearchProvider` trait,
+  `FixtureProvider` (CI-safe), `SearxngProvider` (live, behind `live` feature);
+  egress-guarded pre-invoke.
+- S7.3 Lexical scorer — `LexicalScorer` (BM25-inspired TF×IDF, deterministic);
+  `FixtureScorer`; tier boundary invariant.
+- New `AuditEntry` variants: `EgressRequested`, `EgressBlocked`, `ToolSelection`.
+- 52 new tests; 15 integration tests (`e7_embodiment`).
+
+**Deferred.** S7.2 (browser/Playwright), S7.4 (live tool-calling), embedding scorer.
+
+### Epic E8 — Local Inference 🟡
+
+**Scope.** OpenAI-compatible provider umbrella (vLLM / LM Studio / NVIDIA NIM /
+HF TGI / llama.cpp-server) and the shared `ChatBackend` extension trait.
+See `docs/13-local-llm-providers.md`.
+
+**Delivered (PR #73).**
+- S8.0 `BackendCapabilities`, `ProviderConfig`, `ChatBackend` extension trait,
+  shared chat types (`ChatMessage`, `ChatRole`, `ToolCall`, `ChatResponse`).
+- S8.1 `OpenAiCompatibleBackend` — fixture mode (default, CI-safe) + live mode
+  (`ANIMA_COMPAT_LIVE=1`); five provider presets; tool-calling passthrough;
+  factory updates (`BackendKind` extended).
+- 70 hermetic unit tests.
+
+**Deferred.** S8.3–S8.4 (native runtimes, Unsloth/HRA, adapter library).
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** First-run experience: `anima doctor`, `anima init` wizard, unified
+quickstart.  See `docs/14-onboarding.md`.
+
+**Delivered (PR #74).**
+- S9.3 `anima doctor` — GPU/RAM detection, provider TCP probes, API-key check,
+  tier recommendations; 15 unit tests.
+- S9.1 `anima init` — three-step idempotent wizard; non-interactive mode; atomic
+  state persistence; 11 unit tests.
+- S9.7 `docs/getting-started.md` — unified quickstart (Docker, native, hardware
+  paths, identity memory commands).
+
+### Epic E10 — Presence 🟡
+
+**Scope.** Channel gateway framework: comms-app adapters over the existing
+operator seam; image and voice as first-class bidirectional modalities.
+See `docs/15-communication-multimodal.md`.
+
+**Dependencies.** E6 (operator seam, SensoryBridge), E7 (egress guard
+for outbound channel calls — wired once E7 merges).
+
+**Stories.**
+- S10.1 `ChannelGateway` trait + `anima-comms` host binary. ✅
+  (`crates/comms/src/lib.rs` — `ChannelAdapter` trait, `ChannelGateway`
+  orchestrator, `GatewayConfig`, `PollOutcome`; `crates/comms/src/bin/anima-comms.rs` —
+  demo binary with `--channel`, `--count` flags; fully CI-safe fixture mode)
+- S10.2 First channel adapters: Telegram and Slack. ✅
+  (`crates/comms/src/adapters.rs` — `TelegramAdapter` and `SlackAdapter` with
+  `FixtureQueue`; all adapters default to fixture mode; live mode gated by
+  `ANIMA_COMMS_LIVE`; 16 unit tests; thread-safety proved via clone-sharing test)
+- S10.3 Image modality (afferent + efferent). ✅
+  (`crates/senses/src/lib.rs` — `SensoryPacket::Image { bytes, mime, caption }`;
+  `HumanGuidance::max_image_bytes` policy bound; `packetize_image_checked()` with
+  empty-bytes, empty-mime, and size-limit enforcement; 7 new unit tests;
+  `vita/src/lib.rs` prompt extraction handles `Image` variant)
+- S10.4 Voice provider traits (`SttProvider` / `TtsProvider`). ✅
+  (`crates/comms/src/voice.rs` — `SttProvider` trait, `TtsProvider` trait,
+  `FixtureStt` (lookup by frame length, configurable default), `FixtureTts`
+  (lookup by text, configurable default); 14 unit tests; trait objects verified)
+- S10.5 Modality-aware routing (partial — routing integration deferred to E8). ⬜
+  (`crates/vita/src/audit.rs` — `AuditEntry::ChannelMessageReceived`,
+  `ChannelMessageSent`, `ModalityUnsupported` added for route-capability tracking;
+  full modality × route matrix requires `BackendCapabilities.vision` from E8)
+
+**Exit criteria.**
+1. Inbound text, image, and voice messages from both Telegram and Slack fixture
+   adapters are packetised into the sensory bridge with correct priorities and
+   policy-bound enforcement. ✅ (`run_once_enqueues_text_message_from_telegram`,
+   `run_once_enqueues_image_message_from_slack`,
+   `run_once_enqueues_voice_message`,
+   `run_once_rejects_oversized_image`,
+   `run_once_rejects_oversized_voice_frame`)
+2. Policy violations (empty body, MIME, oversized payload) are rejected by
+   `packetize_image_checked` without panicking. ✅
+   (`packetize_image_checked_rejects_empty_bytes`,
+   `packetize_image_checked_rejects_empty_mime`,
+   `packetize_image_checked_rejects_oversized_payload`)
+3. `SttProvider` and `TtsProvider` are trait objects; fixture implementations
+   produce deterministic, CI-hermetic transcripts and audio. ✅
+   (`stt_provider_trait_object_works`, `tts_provider_trait_object_works`,
+   `fixture_stt_returns_registered_transcript_by_frame_length`,
+   `fixture_tts_returns_registered_audio_for_text`)
+4. `anima-comms` binary runs the fixture demo and reports packet counts without
+   live network access. ✅ (binary compiles and runs with demo fixtures)
+
+### Epic E13 — Alignment Assurance 🟡
+
+**Scope.** Immutable value charter, constitution enforcement hook, alignment
+eval harness, red-team corpus.  See `docs/19-constitution-and-alignment.md`.
+
+**Delivered (PR #75).**
+- S13.1 `constitution.toml` value charter — 8 inviolable prohibitions (P1–P8),
+  3 drive bounds, HMAC-SHA256 tamper-evidence (`crates/constitution`).
+- S13.2 `ConstitutionCheck::screen()` — keyword heuristic; `ConstitutionGuard`
+  bridges to `DefenceLayer`; runs first before all other detectors.
+- S13.3 `cargo xtask align-eval` — 17 labelled scenarios; 100% pass.
+- S13.4 `cargo xtask red-team` — 22-probe adversarial corpus; 100% blocked.
+- S13.5 `CorrigibilityHold` proof token; 7 `CorrigibilityReason` variants; 9 tests.
+- S13.6 New audit entries: `AuditEntry::ConstitutionVeto`, `CorrigibilityAsserted`.
+- 31 unit tests.
 
 ---
 
