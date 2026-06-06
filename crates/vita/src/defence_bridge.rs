@@ -124,7 +124,15 @@ mod tests {
             false,
             1,
         );
-        push_defence_outcome(&mut audit, &outcome, "agent-a", "inv-42", "http call", "CortexAction", 300);
+        push_defence_outcome(
+            &mut audit,
+            &outcome,
+            "agent-a",
+            "inv-42",
+            "http call",
+            "CortexAction",
+            300,
+        );
 
         assert_eq!(audit.len(), 1);
         assert!(matches!(
@@ -144,7 +152,15 @@ mod tests {
             true,
             3,
         );
-        push_defence_outcome(&mut audit, &outcome, "agent-b", "inv-99", "delete op", "OutboundAction", 300);
+        push_defence_outcome(
+            &mut audit,
+            &outcome,
+            "agent-b",
+            "inv-99",
+            "delete op",
+            "OutboundAction",
+            300,
+        );
 
         assert_eq!(audit.len(), 2);
         assert!(matches!(
@@ -173,7 +189,15 @@ mod tests {
             detector: "RewardHackingDetector",
             veto_count_in_window: 1,
         };
-        push_defence_outcome(&mut audit, &outcome, "agent-c", "inv-1", "claim", "CortexAction", 300);
+        push_defence_outcome(
+            &mut audit,
+            &outcome,
+            "agent-c",
+            "inv-1",
+            "claim",
+            "CortexAction",
+            300,
+        );
 
         match &audit.entries()[0] {
             AuditEntry::DefenceVeto { detector, .. } => {
@@ -196,11 +220,23 @@ mod tests {
             detector: "ConstitutionGuard",
             veto_count_in_window: 1,
         };
-        push_defence_outcome(&mut audit, &outcome, "agent-d", "inv-42", "resist shutdown", "CortexAction", 300);
+        push_defence_outcome(
+            &mut audit,
+            &outcome,
+            "agent-d",
+            "inv-42",
+            "resist shutdown",
+            "CortexAction",
+            300,
+        );
 
         assert_eq!(audit.len(), 1);
         match &audit.entries()[0] {
-            AuditEntry::ConstitutionVeto { prohibition_id, invocation_id, .. } => {
+            AuditEntry::ConstitutionVeto {
+                prohibition_id,
+                invocation_id,
+                ..
+            } => {
                 assert_eq!(prohibition_id, "P3");
                 assert_eq!(invocation_id, "inv-42");
             }
@@ -221,10 +257,21 @@ mod tests {
             detector: "ConstitutionGuard",
             veto_count_in_window: 1,
         };
-        push_defence_outcome(&mut audit, &outcome, "agent", "inv-1", "harm action", "CortexAction", 300);
+        push_defence_outcome(
+            &mut audit,
+            &outcome,
+            "agent",
+            "inv-1",
+            "harm action",
+            "CortexAction",
+            300,
+        );
 
         // Only ConstitutionVeto, no DefenceVeto
         assert_eq!(audit.len(), 1);
-        assert!(matches!(&audit.entries()[0], AuditEntry::ConstitutionVeto { .. }));
+        assert!(matches!(
+            &audit.entries()[0],
+            AuditEntry::ConstitutionVeto { .. }
+        ));
     }
 }

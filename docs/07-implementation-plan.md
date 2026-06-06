@@ -2084,14 +2084,14 @@ the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
 stable identifier sequence; the dependency graph and recommended build
 order are recorded in `docs/18-forward-epics.md`.
 
-### Epic E7 — Embodiment ⬜
+### Epic E7 — Embodiment 🟡
 
 Real-world tools: web-search (SearXNG) + browser (Playwright), egress/SSRF
 guard + motor-gate-at-dispatch, semantic tool selection wired to
 `length_robust_filter`, live Anthropic/Ollama tool-calling.
 See `docs/12-real-world-tools-plan.md`.
 
-### Epic E8 — Local Inference ⬜
+### Epic E8 — Local Inference 🟡
 
 Provider ecosystem + fine-tuning: OpenAI-compatible umbrella (vLLM/LM Studio
 /NVIDIA NIM/HF TGI/llama.cpp-server), native FFI runtimes, Unsloth as the
@@ -2099,14 +2099,14 @@ default trainer, HRA for the instinct tier, eval harness, adapter library +
 dynamic mounting.
 See `docs/13-local-llm-providers.md`.
 
-### Epic E9 — Onboarding ⬜
+### Epic E9 — Onboarding 🟡
 
 First-run experience: `anima init` wizard, `anima doctor` preflight,
 conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support,
 per-tier router dispatch, unified quickstart.
 See `docs/14-onboarding.md`.
 
-### Epic E10 — Presence ⬜
+### Epic E10 — Presence 🟡
 
 Communication & multimodal: comms-app channel gateways (Telegram/Slack
 first) over the existing operator seam; text/image/voice as first-class
@@ -2182,26 +2182,27 @@ supports: `list`, `info <id>`, `register <path>`, `promote <id>`,
    `SkillReflectionCompleted` — 9 new variants in `vita::audit`)
 8. 43 unit tests across all E11 stories, all passing in CI. ✅
 
-### Epic E12 — Motivation ⬜
+### Epic E12 — Motivation ✅
 
 Six-tier drive hierarchy (viability → self-actualisation) feeding the
-Striatal Gate `value_score`; endogenous goal generation; affect/mood +
-economic agency; corrigibility invariant above the lattice.
-See `docs/17-motivation-and-drives.md`.
+Striatal Gate `value_score` (wired via `vita::motivation_gate::MotivatedGate`,
+opt-in through `LifecycleManager::enable_motivation`); endogenous goal
+generation; affect/mood + economic agency; corrigibility invariant above the
+lattice. See `docs/17-motivation-and-drives.md`.
 
-### Epic E13 — Alignment Assurance ⬜
+### Epic E13 — Alignment Assurance ✅
 
 Immutable value charter; constitution-enforcement hook; continuous
 alignment evals; defence red-team harness; corrigibility test suite.
 See `docs/19-constitution-and-alignment.md`.
 
-### Epic E14 — Higher Cognition ⬜
+### Epic E14 — Higher Cognition ✅
 
 Metacognition & confidence calibration; prospective/temporal memory;
 personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback.
 See `docs/20-higher-cognition.md`.
 
-### Epic E15 — Trust & Lifecycle ⬜
+### Epic E15 — Trust & Lifecycle ✅
 
 "While you were away" digest; approval-queue surface (the operator-facing
 half of E11's promotion gate); decision replay / time-travel debug; digital-
@@ -2806,7 +2807,7 @@ for outbound channel calls — wired once E7 merges).
 4. `anima-comms` binary runs the fixture demo and reports packet counts without
    live network access. ✅ (binary compiles and runs with demo fixtures)
 
-### Epic E13 — Alignment Assurance 🟡
+### Epic E13 — Alignment Assurance ✅
 
 **Scope.** Immutable value charter, constitution enforcement hook, alignment
 eval harness, red-team corpus.  See `docs/19-constitution-and-alignment.md`.

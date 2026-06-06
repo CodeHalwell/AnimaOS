@@ -15,6 +15,8 @@ pub mod identity;
 pub mod kv_gate;
 #[cfg(feature = "std")]
 pub mod metacognition;
+/// E12 — Motivation ↔ Striatal Gate integration (drive-augmented arbitration).
+pub mod motivation_gate;
 #[cfg(feature = "std")]
 pub mod prospective;
 pub mod router;
@@ -43,6 +45,7 @@ pub use gate::{
     record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
     HomeostaticSignals, SemanticClass, ThresholdGate,
 };
+// E12 — Motivation ↔ Striatal Gate: drive-augmented arbitration types.
 pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
@@ -53,6 +56,7 @@ pub use kv_gate::{
 };
 #[cfg(feature = "std")]
 pub use metacognition::{CalibrationRecord, ConfidenceScore, ConfidenceTracker, HelpRequest};
+pub use motivation_gate::{candidate_from_event, MotivatedGate};
 #[cfg(feature = "std")]
 pub use prospective::{
     inject_due_intentions, CompletionOutcome, Intention, IntentionStore, IntentionStoreError,
@@ -196,6 +200,22 @@ pub struct LifecycleManager {
     /// (sensors are inherently process-global resources).
     #[cfg(feature = "std")]
     pub sensor_bundle: Option<Arc<InteroceptiveSensorBundle>>,
+    /// Optional E12 motivated Striatal Gate (drive-augmented arbitration).
+    ///
+    /// `None` by default — when absent the somatic loop's gate behaviour is
+    /// byte-for-byte identical to before this integration.  Install it
+    /// additively via [`LifecycleManager::enable_motivation`] /
+    /// [`LifecycleManager::with_motivation`].  When `Some`, each somatic-loop
+    /// iteration refreshes the gate's drive snapshot from the current
+    /// interoceptive reading and pushes [`AuditEntry::DriveStateSnapshot`] +
+    /// [`AuditEntry::AffectStateSnapshot`] entries.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` (mirroring `task_cancel`) so
+    /// `LifecycleManager::clone()` shares one gate — drive satiation/mastery
+    /// state is inherently agent-global — and so the `&mut` `update_signals`
+    /// call and the `&self` `decide_motivated` call can both go through it.
+    #[cfg(feature = "std")]
+    pub motivated_gate: Option<Arc<Mutex<MotivatedGate>>>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -269,7 +289,34 @@ impl LifecycleManager {
             last_pressure_level: memory::MemoryPressureEvent::Normal,
             #[cfg(feature = "std")]
             sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
+            #[cfg(feature = "std")]
+            motivated_gate: None::<Arc<Mutex<MotivatedGate>>>,
         }
+    }
+
+    /// Enables the E12 motivated Striatal Gate on this manager (additive).
+    ///
+    /// Installs the supplied [`MotivatedGate`] so that subsequent
+    /// [`somatic_execution_loop`] iterations route gate decisions through the
+    /// drive hierarchy and emit drive/affect audit entries.  Leaves the
+    /// constructor signature untouched — call this after [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn enable_motivation(&mut self, gate: MotivatedGate) {
+        self.motivated_gate = Some(Arc::new(Mutex::new(gate)));
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_motivation`] returning
+    /// `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_motivation(mut self, gate: MotivatedGate) -> Self {
+        self.enable_motivation(gate);
+        self
+    }
+
+    /// `true` when the motivated Striatal Gate is installed and active.
+    #[cfg(feature = "std")]
+    pub fn motivation_enabled(&self) -> bool {
+        self.motivated_gate.is_some()
     }
 
     /// Returns a clone of the cancellation handle for the dispatch currently
@@ -614,12 +661,60 @@ pub async fn somatic_execution_loop(
                     user_facing: true,
                 };
                 let signals = HomeostaticSignals::neutral();
-                let gate = ThresholdGate::with_defaults();
                 let override_hint = GateOverride::OperatorForced {
                     reason: reason.to_owned(),
                 };
                 let event_id = format!("sensory-{task_id}");
-                let decision = gate.decide(&event_id, &event, &signals, &override_hint);
+
+                // E12: when the motivated gate is installed, route the decision
+                // through the drive hierarchy and emit drive/affect audit
+                // entries alongside the gate decision.  The operator-force
+                // override semantics are preserved exactly (invoke at Frontier).
+                // When absent, this is byte-for-byte the original code path.
+                #[cfg(feature = "std")]
+                let motivated = lifecycle.motivated_gate.clone();
+                #[cfg(not(feature = "std"))]
+                let motivated: Option<()> = None;
+
+                let decision = if let Some(mg) = motivated {
+                    #[cfg(feature = "std")]
+                    {
+                        let guard = mg.lock().expect("motivated_gate poisoned");
+                        let (decision, augmented, affect) =
+                            guard.decide_motivated(&event_id, &event, &signals, &override_hint);
+                        let snapshot = guard.drive_snapshot();
+                        drop(guard);
+
+                        let u = &snapshot.urgencies;
+                        lifecycle.audit.push(AuditEntry::DriveStateSnapshot {
+                            agent_id: lifecycle.agent_id.clone(),
+                            viability_urgency: u[motivation::DriveTier::Viability.index()],
+                            integrity_urgency: u[motivation::DriveTier::Integrity.index()],
+                            service_urgency: u[motivation::DriveTier::Service.index()],
+                            epistemic_urgency: u[motivation::DriveTier::Epistemic.index()],
+                            achievement_urgency: u[motivation::DriveTier::Achievement.index()],
+                            self_actualisation_urgency: u
+                                [motivation::DriveTier::SelfActualisation.index()],
+                            drive_delta: augmented.drive_delta,
+                            lattice_suppression_active: augmented.lattice_suppression_active,
+                        });
+                        lifecycle.audit.push(AuditEntry::AffectStateSnapshot {
+                            agent_id: lifecycle.agent_id.clone(),
+                            valence: affect.valence,
+                            arousal: affect.arousal,
+                            gate_threshold_nudge: affect.gate_threshold_nudge(),
+                        });
+                        decision
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        unreachable!("motivated_gate is std-only")
+                    }
+                } else {
+                    let gate = ThresholdGate::with_defaults();
+                    gate.decide(&event_id, &event, &signals, &override_hint)
+                };
+
                 record_gate_decision(
                     &mut lifecycle.audit,
                     &lifecycle.agent_id,
@@ -670,6 +765,16 @@ pub async fn somatic_execution_loop(
                 attention_demand: signals.attention_demand,
                 aggregate_stress: signals.aggregate_stress(),
             });
+
+            // E12: refresh the motivated gate's drive registry from this tick's
+            // real interoceptive reading so drive urgencies (and thus the
+            // augmented value score) track the live homeostatic state at ~1 Hz.
+            if let Some(ref mg) = lifecycle.motivated_gate {
+                let h = HomeostaticSignals::from_interoceptive(&signals);
+                mg.lock()
+                    .expect("motivated_gate poisoned")
+                    .update_signals(&h);
+            }
         }
 
         let pressure = lifecycle.memory.check_pressure();
@@ -977,6 +1082,124 @@ mod tests {
                 "reasoning should reference the operator-forced override; got: {reasoning}"
             );
         }
+    }
+
+    // ── E12 — MotivatedGate wired into LifecycleManager ──────────────────────
+
+    #[test]
+    fn enabling_motivation_emits_drive_and_affect_audit_entries() {
+        // With the motivated gate installed, a forced operator packet routes
+        // through the drive hierarchy and emits DriveStateSnapshot +
+        // AffectStateSnapshot alongside the GateDecision.
+        use crate::motivation_gate::MotivatedGate;
+
+        let mut m = manager("agent-motivated", Some(2));
+        m.enable_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        assert!(m.motivation_enabled());
+        m.senses
+            .packetize_text_forced("deploy now", "on-call escalation")
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // Operator-force semantics preserved: dispatched at tier 0, gate
+        // decision present with override_active=true and Frontier reasoning.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 0);
+
+        let entries = m.audit.entries();
+        let has_drive = entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::DriveStateSnapshot { .. }));
+        let has_affect = entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::AffectStateSnapshot { .. }));
+        let gate_override = entries.iter().any(|e| {
+            matches!(
+                e,
+                AuditEntry::GateDecision {
+                    override_active: true,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_drive,
+            "motivated loop must emit a DriveStateSnapshot entry"
+        );
+        assert!(
+            has_affect,
+            "motivated loop must emit an AffectStateSnapshot entry"
+        );
+        assert!(
+            gate_override,
+            "operator override must still produce a GateDecision with override_active=true"
+        );
+
+        // The affect nudge recorded must respect the documented [0.9, 1.1] band.
+        for e in entries {
+            if let AuditEntry::AffectStateSnapshot {
+                gate_threshold_nudge,
+                ..
+            } = e
+            {
+                assert!(
+                    (0.9..=1.1).contains(gate_threshold_nudge),
+                    "recorded affect nudge {gate_threshold_nudge} out of [0.9, 1.1]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn motivation_disabled_by_default_emits_no_drive_entries() {
+        // Default manager has no motivated gate; a forced packet must produce
+        // the original GateDecision and NO drive/affect entries (byte-for-byte
+        // unchanged behaviour).
+        let mut m = manager("agent-no-motivation", Some(2));
+        assert!(!m.motivation_enabled());
+        m.senses
+            .packetize_text_forced("deploy now", "on-call escalation")
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                AuditEntry::GateDecision {
+                    override_active: true,
+                    ..
+                }
+            )),
+            "disabled path must still emit the operator-force GateDecision"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::DriveStateSnapshot { .. })),
+            "disabled path must NOT emit DriveStateSnapshot entries"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::AffectStateSnapshot { .. })),
+            "disabled path must NOT emit AffectStateSnapshot entries"
+        );
+    }
+
+    #[test]
+    fn with_motivation_builder_installs_gate() {
+        use crate::motivation_gate::MotivatedGate;
+        let m = manager("agent-builder", Some(1))
+            .with_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        assert!(
+            m.motivation_enabled(),
+            "with_motivation builder must install the gate"
+        );
     }
 
     #[test]

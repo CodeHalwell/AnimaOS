@@ -317,9 +317,16 @@ impl ThresholdGate {
         &self.config
     }
 
-    // ── Internal scoring helpers ──────────────────────────────────────────────
+    // ── Scoring helpers ───────────────────────────────────────────────────────
+    //
+    // These are `pub` so composing gates (e.g. the E12 `MotivatedGate` in
+    // `motivation_gate`) can reuse the *exact* same value/threshold/cost-class
+    // formulas rather than re-deriving them.  Behaviour is unchanged.
 
-    fn value_score(&self, event: &EventFeatures) -> f32 {
+    /// Computes the base value score for an event (urgency/novelty + bonuses),
+    /// clamped to `[0.0, 1.0]`.  This is the score the threshold is tested
+    /// against before any drive augmentation.
+    pub fn value_score(&self, event: &EventFeatures) -> f32 {
         let base = self.config.urgency_weight * event.urgency.clamp(0.0, 1.0)
             + self.config.novelty_weight * event.novelty.clamp(0.0, 1.0);
         let user_bonus = if event.user_facing {
@@ -334,7 +341,9 @@ impl ThresholdGate {
         (base + user_bonus + class_bonus).clamp(0.0, 1.0)
     }
 
-    fn adaptive_threshold(&self, h: &HomeostaticSignals) -> f32 {
+    /// Computes the adaptive acceptance threshold from homeostatic signals,
+    /// clamped to `[0.05, 0.99]`.  Rises under stress, falls with attention.
+    pub fn adaptive_threshold(&self, h: &HomeostaticSignals) -> f32 {
         let financial_used = (1.0_f32 - h.financial_budget).clamp(0.0, 1.0);
         let raw = self.config.base_threshold
             + self.config.thermal_penalty * h.thermal_load.clamp(0.0, 1.0)
@@ -344,7 +353,9 @@ impl ThresholdGate {
         raw.clamp(0.05, 0.99)
     }
 
-    fn cost_class_for(&self, score: f32) -> CostClass {
+    /// Maps a (possibly drive-augmented) value score to a [`CostClass`] using
+    /// the configured cheap-local / frontier boundaries.
+    pub fn cost_class_for(&self, score: f32) -> CostClass {
         if score >= self.config.frontier_floor {
             CostClass::Frontier
         } else if score < self.config.cheap_local_ceiling {

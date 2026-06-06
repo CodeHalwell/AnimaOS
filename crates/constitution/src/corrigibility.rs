@@ -82,7 +82,10 @@ impl CorrigibilityHold {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
 
-        Self { reason, created_at_ns }
+        Self {
+            reason,
+            created_at_ns,
+        }
     }
 
     /// Assert that corrigibility holds.

@@ -1664,7 +1664,6 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
-
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();

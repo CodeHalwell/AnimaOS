@@ -1,0 +1,25 @@
+[package]
+# E8 S8.4 — the Unsloth adaptation engine. The report (docs/13-local-llm-providers.md
+# S8.4.1) names the job/crate `anima-finetune`; we keep that name so docs and code
+# agree. Code refers to the crate as `anima_finetune`.
+name = "anima-finetune"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "E8 S8.4 — Unsloth adaptation engine abstractions: FineTuner trait, AdaptationMethod (LoRA/QLoRA/HRA), adapter library + dynamic mounting, adaptation eval harness. Fixture impl is CI-hermetic; real GPU training is a feature-gated external backend."
+
+[features]
+default = []
+# Reserved for the real Unsloth/PEFT GPU backend (Python/torch/CUDA). Off by
+# default so CI builds and tests stay hermetic. Enabling this only compiles the
+# `UnslothFineTuner` skeleton; it still requires the external runtime + env to
+# actually train (see `backend::unsloth`).
+live = []
+
+[lib]
+name = "anima_finetune"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -208,6 +208,8 @@ impl SearchProvider for SearxngProvider {
             let body: serde_json::Value = resp
                 .json()
                 .map_err(|e| format!("json decode failed: {e}"))?;
+            // `return` is required: a `#[cfg(not(feature = "live"))]` arm follows.
+            #[allow(clippy::needless_return)]
             return parse_searxng_response(&body, max_results);
         }
 
