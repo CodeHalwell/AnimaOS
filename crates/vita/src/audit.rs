@@ -572,6 +572,53 @@ pub enum AuditEntry {
         /// always `>= 1`.
         effective_budget: usize,
     },
+
+    // ── E7 — Embodiment audit entries ─────────────────────────────────────────
+    /// An outbound network request passed egress screening and was dispatched
+    /// (E7 S7.0.3).
+    ///
+    /// Emitted immediately before the tool driver `invoke` call so the audit
+    /// trail records every effected external action.
+    EgressRequested {
+        /// Stable tool identifier that initiated the request.
+        tool_id: String,
+        /// Target URL (redacted of query-string secrets by the call site).
+        url: String,
+    },
+
+    /// An outbound network request was denied by the egress guard before any
+    /// network activity occurred (E7 S7.0.3).
+    ///
+    /// Emitted in place of [`AuditEntry::EgressRequested`] when the guard
+    /// vetoes the request.  No network connection is ever opened for denied
+    /// requests.
+    EgressBlocked {
+        /// Stable tool identifier that attempted the request.
+        tool_id: String,
+        /// Target URL that was denied.
+        url: String,
+        /// Human-readable denial reason from the egress guard.
+        reason: String,
+    },
+
+    /// The semantic tool-selection step narrowed the route's allow-list before
+    /// building the cortex invocation request (E7 S7.3.4).
+    ///
+    /// Satisfies E7 S7.3 exit criterion 2: "selection is deterministic for
+    /// fixed inputs."  Written once per cortex invocation that goes through
+    /// the scorer pipeline.
+    ToolSelection {
+        /// Agent identifier.
+        agent_id: String,
+        /// Task description used as the scoring query.
+        task_description: String,
+        /// Number of tools scored (= size of the tier allow-list).
+        candidates_scored: usize,
+        /// Number of tools kept after `length_robust_filter`.
+        kept: usize,
+        /// The `tau_rel` threshold applied to the filter.
+        tau_rel: f32,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

@@ -7,6 +7,8 @@ pub mod audit;
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
+#[cfg(feature = "std")]
+pub mod dispatch;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
@@ -25,6 +27,8 @@ pub use cortex_bridge::{
 };
 #[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;
+#[cfg(feature = "std")]
+pub use dispatch::{redact_url, EgressAwareDispatcher};
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
     unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
