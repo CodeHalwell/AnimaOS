@@ -632,7 +632,7 @@ pub enum AuditEntry {
         reason: String,
         /// Number of consecutive anomalous observations.
         streak: u32,
-        /// Total trips since the watchdog was last reset.
+        /// Total trips since the watchdog was created (accumulates across resets).
         trip_count: u32,
     },
     /// An agent-state snapshot was taken for potential rollback (E14.4).

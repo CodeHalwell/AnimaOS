@@ -26,7 +26,7 @@
 //! 1. Due intentions are injected into the task agenda with `MlfqTier::High`.
 //! 2. Recurring intentions reschedule after being injected.
 //! 3. Overdue intentions (past deadline by more than `overdue_grace_ns`) are
-//!    escalated to `Critical` priority.
+//!    injected at Low priority (tier 2) to let urgent tasks preempt them.
 //! 4. The store survives a process restart with all pending intentions intact.
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,10 @@ impl IntentionStore {
                 if intention.id >= store.next_id {
                     store.next_id = intention.id + 1;
                 }
+                // Reset dispatched state: the in-memory agenda is lost on restart,
+                // so any dispatched-but-unacknowledged intention must be re-injected.
+                let mut intention = intention;
+                intention.dispatched = false;
                 store.intentions.push(intention);
             }
         }
@@ -195,6 +199,11 @@ impl IntentionStore {
         interval_ns: u64,
         now_ns: u64,
     ) -> Result<u64, IntentionStoreError> {
+        if interval_ns == 0 {
+            return Err(IntentionStoreError::Corrupt(
+                "recurring interval must be greater than zero".to_string(),
+            ));
+        }
         let id = self.next_id;
         self.next_id += 1;
         let intention = Intention::recurring(id, description, due_at_ns, interval_ns, now_ns);
@@ -229,16 +238,25 @@ impl IntentionStore {
         };
 
         let outcome = if let Some(interval) = self.intentions[pos].repeat_interval_ns {
-            self.intentions[pos].due_at_ns =
-                self.intentions[pos].due_at_ns.saturating_add(interval);
-            // If the new due time is still in the past, advance by full intervals.
-            while self.intentions[pos].due_at_ns < now_ns {
-                self.intentions[pos].due_at_ns =
-                    self.intentions[pos].due_at_ns.saturating_add(interval);
+            // Guard against corrupted zero-interval stored on disk.
+            if interval == 0 {
+                return Err(IntentionStoreError::Corrupt(
+                    "recurring interval cannot be zero".to_string(),
+                ));
             }
+            // Advance due_at_ns in O(1): skip over any number of missed intervals.
+            let next_due = self.intentions[pos].due_at_ns.saturating_add(interval);
+            let new_due = if next_due < now_ns {
+                let diff = now_ns.saturating_sub(next_due);
+                let steps = diff / interval + 1;
+                next_due.saturating_add(steps.saturating_mul(interval))
+            } else {
+                next_due
+            };
+            self.intentions[pos].due_at_ns = new_due;
             self.intentions[pos].dispatched = false;
             CompletionOutcome::Rescheduled {
-                new_due_at_ns: self.intentions[pos].due_at_ns,
+                new_due_at_ns: new_due,
             }
         } else {
             self.intentions.remove(pos);
@@ -307,7 +325,7 @@ impl std::fmt::Display for IntentionStoreError {
 
 // ── inject_due_intentions ─────────────────────────────────────────────────────
 
-/// Seconds in a nanosecond (for grace-period arithmetic).
+/// Nanoseconds per second (for grace-period arithmetic).
 const ONE_SECOND_NS: u64 = 1_000_000_000;
 
 /// Default overdue grace period: 60 seconds.

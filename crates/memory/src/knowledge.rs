@@ -51,31 +51,28 @@ pub fn embed_text_knowledge(text: &str) -> [f32; 4] {
     let byte_len = text.len();
     let len_signal = (byte_len as f32 / 4096.0).min(1.0);
 
-    // Split into words for density and hash components.
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let total = words.len();
+    // Single-pass over words for density and hash components.
+    let mut total = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut first_word: Option<&str> = None;
+    let mut last_word: Option<&str> = None;
+
+    for w in text.split_whitespace() {
+        if first_word.is_none() {
+            first_word = Some(w);
+        }
+        last_word = Some(w);
+        total += 1;
+        seen.insert(w.to_lowercase());
+    }
 
     let density = if total == 0 {
         0.0
     } else {
-        let mut seen = std::collections::HashSet::new();
-        for w in &words {
-            seen.insert(w.to_lowercase());
-        }
         (seen.len() as f32 / total as f32).min(1.0)
     };
-
-    let first_hash = if total == 0 {
-        0.0
-    } else {
-        fnv_hash_f32(words[0])
-    };
-
-    let last_hash = if total == 0 {
-        0.0
-    } else {
-        fnv_hash_f32(words[total - 1])
-    };
+    let first_hash = first_word.map_or(0.0, fnv_hash_f32);
+    let last_hash = last_word.map_or(0.0, fnv_hash_f32);
 
     [len_signal, density, first_hash, last_hash]
 }
@@ -134,6 +131,14 @@ pub fn ingest_document_embedded(
     embedding: &[f32],
     payload: &[u8],
 ) -> Result<DemotionOutcome, L3ArchiveError> {
+    // Idempotency by source_key: if an entry with this key already exists in
+    // the Knowledge tier, return AlreadyPresent without modifying the archive.
+    if l3.entries().iter().any(|e| {
+        e.provenance.source_tier == SourceTier::Knowledge && e.provenance.source_key == source_key
+    }) {
+        return Ok(DemotionOutcome::AlreadyPresent);
+    }
+
     let id = *next_id;
 
     let mut packed = [0u8; 20];
@@ -183,6 +188,11 @@ pub fn query_knowledge_corpus<'a>(
         return Vec::new();
     }
 
+    // Reject dimension mismatch (mirrors L3Archive::search behaviour).
+    if candidates[0].item.embedding.len() != query.len() {
+        return Vec::new();
+    }
+
     // Score by cosine similarity, break ties by id.
     let mut scored: Vec<(f32, u64, &ArchivalEntry)> = candidates
         .into_iter()
@@ -213,7 +223,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
-    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+    let similarity = dot / (norm_a * norm_b);
+    // f32::clamp panics on NaN; guard explicitly.
+    if similarity.is_nan() {
+        0.0
+    } else {
+        similarity.clamp(-1.0, 1.0)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -288,7 +304,6 @@ mod tests {
             embedding: vec![0.9, 0.1, 0.1, 0.1],
             payload: b"episode data       ".to_vec(),
         };
-        next_id += 1;
         let ep_prov = Provenance::now(SourceTier::Episode, "episode:1");
         l3.demote(ep_item, ep_prov).expect("episode insert");
 
@@ -349,7 +364,7 @@ mod tests {
         assert_eq!(a, b, "embedding must be deterministic");
         // All components in [0, 1].
         for &c in &a {
-            assert!(c >= 0.0 && c <= 1.0, "component {c} out of [0,1]");
+            assert!((0.0..=1.0).contains(&c), "component {c} out of [0,1]");
         }
     }
 

@@ -6,7 +6,7 @@
 //! # What it does
 //!
 //! 1. **Self-report**: Estimates the agent's confidence in a cortex output
-//!    from observable evidence (tool call count, output length, consistency
+//!    from observable evidence (tool call count, output length, uncertainty
 //!    keywords).  Confidence is a scalar in `[0.0, 1.0]`.
 //! 2. **Ask-for-help path**: When `confidence < ask_for_help_floor` on a
 //!    consequential decision, returns `HelpRequest` so the operator surface
@@ -144,7 +144,6 @@ impl ConfidenceTracker {
             "might",
             "perhaps",
             "possibly",
-            "i'm unsure",
             "unsure",
             "uncertain",
         ];

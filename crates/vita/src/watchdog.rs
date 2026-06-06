@@ -99,7 +99,7 @@ pub struct CognitiveWatchdog {
     pub config: WatchdogConfig,
     /// Mutable detection state.
     state: WatchdogState,
-    /// Total number of trips since last reset.
+    /// Total number of trips since creation (accumulates across resets).
     trip_count: u32,
     /// Pending trip waiting to be surfaced (if any).
     pending_trip: Option<WatchdogTrip>,
