@@ -781,11 +781,7 @@ fn cmd_skills(args: &[String]) {
                 println!("  (none)");
             }
             for m in active {
-                println!(
-                    "  {id:<30}  {desc}",
-                    id = m.name,
-                    desc = m.description
-                );
+                println!("  {id:<30}  {desc}", id = m.name, desc = m.description);
             }
             println!("\nTotal skills: {}", registry.len());
         }
@@ -842,7 +838,8 @@ fn cmd_skills(args: &[String]) {
                     ) {
                         Ok(outcome) => {
                             if let Some(id) = &outcome.artifact_id {
-                                let entry = registry.list_all()
+                                let entry = registry
+                                    .list_all()
                                     .into_iter()
                                     .find(|e| &e.id == id)
                                     .unwrap();
@@ -892,7 +889,11 @@ fn cmd_skills(args: &[String]) {
                     return;
                 }
             };
-            let reason = args.get(2).map(String::as_str).unwrap_or("operator rollback").to_string();
+            let reason = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("operator rollback")
+                .to_string();
             match registry.rollback(&id) {
                 Ok(()) => {
                     log.push(AuditEntry::SkillRolledBack {
@@ -913,7 +914,10 @@ fn cmd_skills(args: &[String]) {
                     return;
                 }
             };
-            let reason = args.get(2).map(String::as_str).unwrap_or("manual quarantine");
+            let reason = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or("manual quarantine");
             match registry.quarantine(&id, reason) {
                 Ok(()) => {
                     log.push(AuditEntry::SkillQuarantined {
@@ -927,7 +931,10 @@ fn cmd_skills(args: &[String]) {
             }
         }
         Some("kill-switch") => {
-            let reason = args.get(1).map(String::as_str).unwrap_or("kill-switch activated");
+            let reason = args
+                .get(1)
+                .map(String::as_str)
+                .unwrap_or("kill-switch activated");
             let affected = registry.kill_switch(reason);
             log.push(AuditEntry::SkillKillSwitchActivated {
                 agent_id: AGENT_ID.to_string(),
@@ -937,7 +944,10 @@ fn cmd_skills(args: &[String]) {
             if affected.is_empty() {
                 println!("kill-switch: no agent-authored skills were active");
             } else {
-                println!("kill-switch activated — quarantined: {}", affected.join(", "));
+                println!(
+                    "kill-switch activated — quarantined: {}",
+                    affected.join(", ")
+                );
             }
         }
         Some("reflect") => {
@@ -974,10 +984,7 @@ fn cmd_skills(args: &[String]) {
             println!("  patterns found    : {}", report.patterns.len());
             println!("  proposals generated: {}", report.proposals_generated);
             for p in &report.patterns {
-                println!(
-                    "\n  Pattern: {}",
-                    p.description
-                );
+                println!("\n  Pattern: {}", p.description);
                 if let Some(name) = &p.suggested_skill_name {
                     println!("  Suggested skill name: {name}");
                 }

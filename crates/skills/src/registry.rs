@@ -442,7 +442,10 @@ mod tests {
         // "search web research" should score highly against the web-research skill.
         let selected = reg.select_for_task("search web research query", 0.5);
         let names: Vec<&str> = selected.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"web-research"), "expected web-research in: {names:?}");
+        assert!(
+            names.contains(&"web-research"),
+            "expected web-research in: {names:?}"
+        );
     }
 
     #[test]

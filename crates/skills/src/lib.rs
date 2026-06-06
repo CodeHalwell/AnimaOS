@@ -45,8 +45,8 @@ pub mod registry;
 pub use builtins::{BuiltinSkill, BUILTIN_SKILLS};
 pub use manifest::{ParseError, SkillBody, SkillManifest};
 pub use proposal::{
-    evaluate_skill_proposal, evaluate_tool_proposal_with_summary, ProposalAction, ProposalOutcome,
-    PromotionGateConfig, ScreenResult, SkillContentScreen, SkillProposal, ToolProposal,
+    evaluate_skill_proposal, evaluate_tool_proposal_with_summary, PromotionGateConfig,
+    ProposalAction, ProposalOutcome, ScreenResult, SkillContentScreen, SkillProposal, ToolProposal,
     ToolProposalAction, ToolProposalOutcome,
 };
 pub use provenance::{SkillAuthor, SkillProvenance, SkillState};

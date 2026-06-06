@@ -167,10 +167,7 @@ fn extract_local_links(text: &str) -> Vec<String> {
         let after_open = &rest[open + 2..];
         if let Some(close) = after_open.find(')') {
             let target = &after_open[..close];
-            if !target.is_empty()
-                && !target.contains("://")
-                && !target.starts_with('#')
-            {
+            if !target.is_empty() && !target.contains("://") && !target.starts_with('#') {
                 links.push(target.to_string());
             }
             rest = &after_open[close + 1..];
@@ -248,8 +245,8 @@ See [reference.md](reference.md) for scoring guidance.
 
     #[test]
     fn missing_name_returns_error() {
-        let err = SkillManifest::from_frontmatter("---\ndescription: no name\n---\nbody")
-            .unwrap_err();
+        let err =
+            SkillManifest::from_frontmatter("---\ndescription: no name\n---\nbody").unwrap_err();
         assert_eq!(err, ParseError::MissingName);
     }
 

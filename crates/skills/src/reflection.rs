@@ -149,8 +149,11 @@ fn find_tool_co_occurrence_patterns(
     let mut patterns = Vec::new();
     for ((tool_a, tool_b), ep_ids) in pair_episodes {
         if ep_ids.len() >= threshold {
-            let skill_name =
-                format!("{}-and-{}", tool_a.replace('_', "-"), tool_b.replace('_', "-"));
+            let skill_name = format!(
+                "{}-and-{}",
+                tool_a.replace('_', "-"),
+                tool_b.replace('_', "-")
+            );
             patterns.push(FrictionPattern {
                 description: format!(
                     "tools '{tool_a}' and '{tool_b}' called together in {} episodes",
@@ -286,11 +289,7 @@ mod tests {
         let mut episodes = Vec::new();
         for (idx, (t1, t2)) in tool_pairs.iter().enumerate() {
             for rep in 0..3 {
-                episodes.push(make_episode(
-                    &format!("e-{idx}-{rep}"),
-                    &[t1, t2],
-                    true,
-                ));
+                episodes.push(make_episode(&format!("e-{idx}-{rep}"), &[t1, t2], true));
             }
         }
         let config = ReflectionConfig {
@@ -319,9 +318,7 @@ mod tests {
     fn patterns_sorted_by_occurrence_count_descending() {
         let episodes: Vec<EpisodeSummary> = (0..5)
             .map(|i| make_episode(&format!("e{i}"), &["tool-x", "tool-y"], true))
-            .chain(
-                (0..3).map(|i| make_episode(&format!("f{i}"), &["tool-a", "tool-b"], true)),
-            )
+            .chain((0..3).map(|i| make_episode(&format!("f{i}"), &["tool-a", "tool-b"], true)))
             .collect();
         let report = reflect_on_episodes(
             &episodes,

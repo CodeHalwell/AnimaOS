@@ -157,9 +157,7 @@ impl SkillContentScreen {
             for &pattern in INJECTION_PATTERNS {
                 if lower.contains(pattern) {
                     return ScreenResult::Flagged {
-                        reason: format!(
-                            "skill text contains injection pattern: {pattern:?}"
-                        ),
+                        reason: format!("skill text contains injection pattern: {pattern:?}"),
                     };
                 }
             }
@@ -234,7 +232,8 @@ pub fn evaluate_skill_proposal(
         source_episode: proposal.source_episode,
         schema_version: 1,
     };
-    let artifact_id = registry.register_from_text(&proposal.skill_text, provenance, initial_state)?;
+    let artifact_id =
+        registry.register_from_text(&proposal.skill_text, provenance, initial_state)?;
 
     let action = if auto_promoted {
         ProposalAction::AutoPromoted
@@ -490,11 +489,8 @@ description: Helps run regression tests quickly and report failures.
             proposed_at_ns: 1,
             source_episode: None,
         };
-        let outcome = evaluate_tool_proposal_with_summary(
-            proposal,
-            &SkillContentScreen::default(),
-            "",
-        );
+        let outcome =
+            evaluate_tool_proposal_with_summary(proposal, &SkillContentScreen::default(), "");
         assert!(matches!(
             outcome.action,
             ToolProposalAction::Rejected { .. }

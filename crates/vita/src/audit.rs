@@ -574,7 +574,6 @@ pub enum AuditEntry {
     },
 
     // ── E11 Skills & Self-Extension audit entries ─────────────────────────────
-
     /// A new skill was successfully registered in the skill registry (S11.3).
     ///
     /// Written immediately after `SkillRegistry::register_from_text` succeeds,

@@ -145,7 +145,9 @@ mod tests {
 
     #[test]
     fn onboarding_interview_skill_exists() {
-        let found = BUILTIN_SKILLS.iter().any(|s| s.name == "onboarding-interview");
+        let found = BUILTIN_SKILLS
+            .iter()
+            .any(|s| s.name == "onboarding-interview");
         assert!(found, "onboarding-interview builtin skill not found");
     }
 }
