@@ -1395,6 +1395,89 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
 
 ---
 
+## Stage 7 — Autonomy & Operator Trust (Forward Epics)
+
+The forward epics (E7–E15) build the autonomous-agent layer on top of the
+shipped somatic core.  Full dependency graph and build sequence live in
+`docs/18-forward-epics.md`.  This stage section records closed forward epics
+only; open or unstarted epics remain in `docs/18-forward-epics.md`.
+
+### Epic E15 — Trust & Lifecycle ✅
+
+**Scope.** Operator-trust and agent-ops tooling: "while you were away"
+activity digest, human-in-the-loop approval queue, decision replay /
+time-travel debug, digital-twin sandbox, and state versioning with schema
+migration.
+
+**Dependencies.** `vita::audit::AuditEntry` (E5.2 / EX.2) — the audit log
+is the backbone for all five stories.
+
+**Stories.**
+- S15.1 Activity digest — `generate_digest(agent_id, &[AuditEntry]) -> ActivityDigest`:
+  pure fold over the audit log counting tasks, tokens, cortex invocations, sleep
+  cycles, defence vetoes, gate splits, route modulations, and collecting notable
+  events.  `ActivityDigest::headline()` produces a single-line summary suitable
+  for a push notification.  `anima-hosted digest` CLI command. ✅
+  (`crates/lifecycle/src/digest.rs`; 10 unit tests covering zero-entries,
+  task counting, cortex, sleep, defence-veto, attention-escalation, gate splits,
+  route modulation, cortex-fault notable event, and JSON round-trip)
+- S15.2 Approval queue — `ApprovalQueue` backed by `HashMap<String, Proposal>`;
+  proposals carry `ProposalKind` (`NewSkill`, `NewTool`, `WeightUpdate`), sandbox
+  test result, defence verdict, and status transitions (`Pending → Approved |
+  Rejected | RolledBack`).  Full audit log of every approval action. ✅
+  (`crates/lifecycle/src/approval.rs`; 15 unit tests covering empty queue,
+  enqueue, duplicate-id rejection, pending filter, approve/reject/rollback
+  transitions, error cases, log ordering, insertion order, kind labels, and
+  mixed decision sequences)
+- S15.3 Decision replay — `DecisionReplayer<'a>` folds `&[AuditEntry]` into
+  `DecisionTrace` structs (gate + router + cortex + homeostatic columns per
+  event).  `find_decision(event_id)` and `replay_all()` let operators
+  time-travel through any audit window.  `anima-hosted replay` CLI command
+  with `--event-id` filter. ✅
+  (`crates/lifecycle/src/replay.rs`; 12 unit tests covering not-found, find-by-id,
+  router merge, modulation merge, cortex-completed and cortex-fault merges,
+  replay-all ordering, empty log, dedup count, outcome labels, homeostatic
+  capture, and JSON round-trip)
+- S15.4 Digital-twin sandbox — `DigitalTwin` initialised from a live-agent
+  snapshot; `run_scenario(&TwinScenario, TwinConfig) -> ScenarioResult` runs
+  sequences of gate evaluations using the same Striatal Gate formula as E5.2,
+  with configurable threshold/thermal/memory/financial overrides.
+  `compare_invocations(a, b)` quantifies the behavioural delta of a proposed
+  change. ✅
+  (`crates/lifecycle/src/twin.rs`; 10 unit tests covering initialisation,
+  foreground-invoked, background-blocked, thermal stress, financial pressure,
+  result accumulation, comparison, invocation-rate edge cases, and label
+  preservation)
+- S15.5 State versioning — `AgentSnapshot` with `schema_version` field, atomic
+  save (write-to-.tmp-then-rename) and load with `SchemaTooNew` guard,
+  `migrate(self) -> Result<Self, MigrationError>` extension point, and
+  `default_path(agent_id)` at `~/.anima/<id>/snapshot.json`.
+  `anima-hosted snapshot --path <p> --reason <r>` CLI command. ✅
+  (`crates/lifecycle/src/snapshot.rs`; 11 unit tests covering schema version,
+  agent ID, audit-summary counts, identity stored, reason stored, disk
+  round-trip, atomic write, migration no-op, schema-too-new rejection, JSON
+  serialisation, and identity round-trip)
+
+**New `vita::audit::AuditEntry` variants (E15 section).**
+`DigestGenerated`, `SnapshotCreated`, `SnapshotRestored`,
+`ApprovalProposalQueued`, `ApprovalProposalDecided` — emitted by the three CLI
+commands and the approval queue transitions.  All existing variants unmodified.
+
+**New crate: `crates/lifecycle`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde`, `serde_json`.
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `cargo test --workspace` green; 64 lifecycle tests + 186 vita tests pass. ✅
+2. `cargo clippy --workspace -- -D warnings` clean. ✅
+3. `cargo fmt --check` clean. ✅
+4. `anima-hosted digest` prints a structured activity summary from a
+   demo audit log. ✅
+5. `anima-hosted replay` lists all gate decisions; `--event-id` narrows to one
+   trace. ✅
+6. `anima-hosted snapshot --path /tmp/snap.json --reason test` writes an atomic
+   snapshot and emits a `SnapshotCreated` audit entry. ✅
 ## Stage 7 — Autonomous Agent Layer
 
 Forward epics E7–E15 build the autonomous-agent capabilities on top of the

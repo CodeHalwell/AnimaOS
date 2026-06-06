@@ -707,6 +707,86 @@ pub enum AuditEntry {
         effective_budget: usize,
     },
 
+    // ── E15 Trust & Lifecycle audit entries ───────────────────────────────────
+    /// An activity digest was generated from the audit log (S15.1).
+    ///
+    /// Written by the `anima digest` CLI command or any caller of
+    /// [`lifecycle::digest::generate_digest`].
+    DigestGenerated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of audit entries included in the digest window.
+        window_entries: usize,
+        /// Tasks completed in the window.
+        tasks_completed: usize,
+        /// Tasks failed in the window.
+        tasks_failed: usize,
+        /// Cortex invocations in the window.
+        cortex_invocations: usize,
+        /// Sleep cycles in the window.
+        sleep_cycles: usize,
+        /// Defence vetoes in the window.
+        defence_vetoes: usize,
+        /// High-salience notable events extracted from the window.
+        notable_event_count: usize,
+    },
+
+    /// A versioned agent state snapshot was created (S15.5).
+    ///
+    /// Written by the `anima snapshot` CLI command or the snapshot subsystem.
+    SnapshotCreated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Schema version of the snapshot (see
+        /// [`lifecycle::snapshot::SNAPSHOT_SCHEMA_VERSION`]).
+        schema_version: u32,
+        /// Path where the snapshot was saved (informational).
+        snapshot_path: String,
+        /// Number of audit entries captured in the snapshot summary.
+        entry_count: usize,
+        /// Optional human-readable annotation supplied by the caller.
+        reason: Option<String>,
+    },
+
+    /// A versioned agent state snapshot was restored (S15.5).
+    ///
+    /// Written when the agent is restored from a snapshot, e.g. after a
+    /// rollback or host migration.
+    SnapshotRestored {
+        /// Agent identifier.
+        agent_id: String,
+        /// Schema version of the restored snapshot.
+        schema_version: u32,
+        /// Path from which the snapshot was loaded (informational).
+        snapshot_path: String,
+    },
+
+    /// An E11 self-extension proposal entered the approval queue (S15.2).
+    ///
+    /// Written when an agent-generated skill, tool, or weight-update proposal
+    /// is submitted for operator review.
+    ApprovalProposalQueued {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique proposal identifier.
+        proposal_id: String,
+        /// Proposal kind label (`"new-skill"`, `"new-tool"`, `"weight-update"`).
+        kind: String,
+        /// Free-form provenance note (e.g. `"dreaming phase cycle 7"`).
+        provenance: String,
+    },
+
+    /// An operator approved an E11 self-extension proposal (S15.2).
+    ApprovalProposalDecided {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique proposal identifier.
+        proposal_id: String,
+        /// `"approved"`, `"rejected"`, or `"rolled_back"`.
+        decision: String,
+        /// Operator-supplied reason for the decision.
+        reason: String,
+    },
     // ── E12 Motivation audit entries ──────────────────────────────────────────
     /// Snapshot of the drive-hierarchy urgency levels (S12.7).
     ///
