@@ -217,6 +217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "comms"
+version = "0.1.0"
+dependencies = [
+ "senses",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "console"
 version = "0.1.0"
 dependencies = [

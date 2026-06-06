@@ -633,6 +633,7 @@ mod tests {
             max_text_length: Some(4),
             max_pcm_samples: None,
             blocked_prefixes: vec![],
+            max_image_bytes: None,
         });
         let server = ConsoleServer::new(
             hub,
