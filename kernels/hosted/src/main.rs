@@ -1147,8 +1147,8 @@ fn cmd_why() {
 /// - `skills reflect` — run the self-improvement reflection pass on recent episodes
 fn cmd_skills(args: &[String]) {
     use skills::{
-        evaluate_skill_proposal, reflect_on_episodes, EpisodeSummary, PromotionGateConfig,
-        ReflectionConfig, SkillAuthor, SkillContentScreen, SkillProposal, SkillRegistry,
+        evaluate_skill_proposal, EpisodeSummary, PromotionGateConfig, ReflectionConfig,
+        SkillAuthor, SkillContentScreen, SkillProposal, SkillRegistry,
     };
     use vita::{AuditEntry, AuditLog};
 
@@ -1334,7 +1334,15 @@ fn cmd_skills(args: &[String]) {
             }
         }
         Some("reflect") => {
-            // Stub: demonstrate the reflection API with synthetic episodes.
+            // E11 S11.5 + E11↔E15: run the *real* Dreaming-phase reflection over
+            // synthetic recent episodes — drafting agent-authored skills,
+            // registering the `Proposed` drafts into a SkillRegistry (the same
+            // path vita's sleep cycle drives), then routing each pending proposal
+            // into the E15 approval queue via `lifecycle::SkillApprovalBridge`.
+            use lifecycle::approval::ApprovalQueue;
+            use lifecycle::skill_bridge::SkillApprovalBridge;
+            use skills::{ProposalAction, SkillState};
+
             let episodes: Vec<EpisodeSummary> = vec![
                 EpisodeSummary {
                     episode_id: "ep-demo-1".to_string(),
@@ -1355,23 +1363,91 @@ fn cmd_skills(args: &[String]) {
                     success: true,
                 },
             ];
-            let report = reflect_on_episodes(&episodes, &ReflectionConfig::default());
-            log.push(AuditEntry::SkillReflectionCompleted {
-                agent_id: AGENT_ID.to_string(),
-                episodes_analysed: report.episodes_analysed,
-                patterns_found: report.patterns.len(),
-                proposals_generated: report.proposals_generated,
-            });
+
+            // Drive the real vita reflection into a fresh registry with
+            // auto-promotion OFF, so agent skills land as `Proposed`.
+            let proposed_at_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let registration = vita::run_self_improvement_reflection(
+                AGENT_ID,
+                &episodes,
+                &ReflectionConfig::default(),
+                &PromotionGateConfig {
+                    auto_promote_agent_skills: false,
+                },
+                &mut registry,
+                &mut log,
+                proposed_at_ns,
+            );
+
             println!("Reflection complete:");
-            println!("  episodes analysed : {}", report.episodes_analysed);
-            println!("  patterns found    : {}", report.patterns.len());
-            println!("  proposals generated: {}", report.proposals_generated);
-            for p in &report.patterns {
-                println!("\n  Pattern: {}", p.description);
-                if let Some(name) = &p.suggested_skill_name {
-                    println!("  Suggested skill name: {name}");
+            println!("  episodes analysed  : {}", registration.episodes_analysed);
+            println!("  patterns found     : {}", registration.patterns_found);
+            println!(
+                "  proposals generated: {}",
+                registration.proposals_generated
+            );
+            println!(
+                "  proposed (pending) : {}",
+                registration.registered_proposed_ids.len()
+            );
+
+            // E11↔E15: route each pending agent-authored proposal into the E15
+            // approval queue.  vita stops at registration (no `lifecycle` dep);
+            // the hosted kernel performs the queue hand-off here.
+            let mut queue = ApprovalQueue::new();
+            let mut bridge = SkillApprovalBridge::new();
+            for skill_id in &registration.registered_proposed_ids {
+                let entry = match registry.list_all().into_iter().find(|e| &e.id == skill_id) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if !matches!(entry.state, SkillState::Proposed) {
+                    continue;
+                }
+                let body_text = registry
+                    .load_body(skill_id)
+                    .ok()
+                    .map(|b| b.instructions.clone())
+                    .unwrap_or_default();
+                // Reconstruct the proposal that produced this registry entry so
+                // the bridge can convert it into a NewSkill queue proposal.
+                let source_episode = entry.provenance.source_episode.clone();
+                let skill_text = format!(
+                    "---\nname: {name}\ndescription: {desc}\n---\n{body}",
+                    name = entry.manifest.name,
+                    desc = entry.manifest.description,
+                    body = body_text,
+                );
+                let proposal = SkillProposal {
+                    skill_text,
+                    authored_by: SkillAuthor::Agent,
+                    proposed_at_ns: entry.provenance.proposed_at_ns,
+                    source_episode,
+                };
+                let outcome = skills::ProposalOutcome {
+                    artifact_id: Some(skill_id.clone()),
+                    action: ProposalAction::PendingApproval,
+                };
+                match bridge.enqueue_skill(&mut queue, &outcome, &proposal) {
+                    Ok(Some(id)) => {
+                        log.push(AuditEntry::ApprovalProposalQueued {
+                            agent_id: AGENT_ID.to_string(),
+                            proposal_id: id,
+                            kind: "new-skill".to_string(),
+                            provenance: "agent (dreaming-phase reflection)".to_string(),
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("skills: enqueue failed: {e}"),
                 }
             }
+            println!(
+                "  enqueued for approval: {} (anima-hosted skills queue)",
+                queue.pending().len()
+            );
         }
         Some("queue") | Some("approve") => {
             // E11↔E15 bridge surface: demonstrate the SkillApprovalBridge driving

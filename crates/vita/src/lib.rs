@@ -102,7 +102,12 @@ use memory::{
 };
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
+#[cfg(feature = "std")]
+use skills::{EpisodeSummary, PromotionGateConfig, ReflectionConfig, SkillRegistry};
 use sleep::{CompilationContext, DreamContext, PruningContext, ReplayContext};
+
+#[cfg(feature = "std")]
+pub use sleep::{run_self_improvement_reflection, ReflectionRegistration};
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +247,52 @@ pub struct LifecycleManager {
     /// backends — consistent with the single-backend field.
     #[cfg(feature = "std")]
     pub tier_backends: Option<router::TierBackends>,
+    /// Optional E11 (S11.5) self-improvement skill registry.
+    ///
+    /// `None` by default — when absent, the Dreaming sleep phase runs exactly
+    /// as before (no reflection, no skill registration), so behaviour is
+    /// byte-for-byte identical to before this integration.  Install it
+    /// additively via [`LifecycleManager::enable_skill_reflection`] /
+    /// [`LifecycleManager::with_skill_registry`].  When `Some`, each sleep
+    /// cycle's Dreaming phase reflects over the buffered
+    /// [`recent_episode_summaries`](Self::recent_episode_summaries), drafts
+    /// skills for friction patterns above threshold, and registers
+    /// agent-authored `Proposed` drafts into this registry (emitting
+    /// `SkillReflectionCompleted` + `SkillRegistered` audit entries).
+    ///
+    /// `vita` never routes the resulting pending proposals into the E15
+    /// approval queue — that would require a `vita → lifecycle` dependency and
+    /// create a cycle.  The hosted kernel (which may depend on both) drains the
+    /// registry's pending agent-authored skills through
+    /// `lifecycle::SkillApprovalBridge` instead.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` (mirroring `task_cancel`) because
+    /// [`SkillRegistry`] is not `Clone`, so `LifecycleManager::clone()` shares
+    /// one registry — consistent with the other shared-state fields.
+    #[cfg(feature = "std")]
+    pub skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
+    /// Reflection configuration applied during the Dreaming phase (E11 S11.5).
+    ///
+    /// Only consulted when [`skill_registry`](Self::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub reflection_config: ReflectionConfig,
+    /// Promotion-gate configuration for agent-authored skill drafts (E11 S11.5).
+    ///
+    /// Defaults to operator gating (`auto_promote_agent_skills: false`) so
+    /// reflection-authored skills land as `Proposed` and await approval through
+    /// the hosted approval-queue bridge.  Only consulted when
+    /// [`skill_registry`](Self::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub promotion_gate_config: PromotionGateConfig,
+    /// Buffer of recent episode summaries the Dreaming-phase reflection consumes
+    /// (E11 S11.5).
+    ///
+    /// Callers push summaries via
+    /// [`record_episode_summary`](Self::record_episode_summary) as episodes
+    /// complete.  Empty by default, so reflection is a no-op until episodes are
+    /// recorded.
+    #[cfg(feature = "std")]
+    pub recent_episode_summaries: Vec<EpisodeSummary>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -319,6 +370,17 @@ impl LifecycleManager {
             motivated_gate: None::<Arc<Mutex<MotivatedGate>>>,
             #[cfg(feature = "std")]
             tier_backends: None::<router::TierBackends>,
+            #[cfg(feature = "std")]
+            skill_registry: None::<Arc<Mutex<SkillRegistry>>>,
+            #[cfg(feature = "std")]
+            reflection_config: ReflectionConfig::default(),
+            // Operator gating by default: agent skills land as `Proposed`.
+            #[cfg(feature = "std")]
+            promotion_gate_config: PromotionGateConfig {
+                auto_promote_agent_skills: false,
+            },
+            #[cfg(feature = "std")]
+            recent_episode_summaries: Vec::new(),
         }
     }
 
@@ -373,6 +435,91 @@ impl LifecycleManager {
     #[cfg(feature = "std")]
     pub fn motivation_enabled(&self) -> bool {
         self.motivated_gate.is_some()
+    }
+
+    // ── E11 S11.5 — Dreaming-phase self-improvement reflection ────────────────
+
+    /// Installs an E11 [`SkillRegistry`] on this manager (additive).
+    ///
+    /// After this call the Dreaming sleep phase reflects over the buffered
+    /// episode summaries and registers agent-authored skill drafts into this
+    /// registry.  Leaves the constructor signature untouched — call this after
+    /// [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn enable_skill_reflection(&mut self, registry: SkillRegistry) {
+        self.skill_registry = Some(Arc::new(Mutex::new(registry)));
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_skill_reflection`]
+    /// returning `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_skill_registry(mut self, registry: SkillRegistry) -> Self {
+        self.enable_skill_reflection(registry);
+        self
+    }
+
+    /// `true` when a skill registry is installed and the Dreaming phase will
+    /// run self-improvement reflection.
+    #[cfg(feature = "std")]
+    pub fn skill_reflection_enabled(&self) -> bool {
+        self.skill_registry.is_some()
+    }
+
+    /// Returns a clone of the shared skill-registry handle, if installed.
+    ///
+    /// The hosted kernel uses this after a sleep cycle to drain the registry's
+    /// pending agent-authored proposals into the E15 approval queue (via
+    /// `lifecycle::SkillApprovalBridge`), keeping the `vita → lifecycle` edge
+    /// absent and the dependency graph acyclic.
+    #[cfg(feature = "std")]
+    pub fn skill_registry_handle(&self) -> Option<Arc<Mutex<SkillRegistry>>> {
+        self.skill_registry.clone()
+    }
+
+    /// Buffers one episode summary for the next Dreaming-phase reflection pass
+    /// (E11 S11.5).  No-op semantics until a skill registry is installed (the
+    /// summaries are still buffered, but reflection only runs when a registry
+    /// is present).
+    #[cfg(feature = "std")]
+    pub fn record_episode_summary(&mut self, summary: EpisodeSummary) {
+        self.recent_episode_summaries.push(summary);
+    }
+
+    /// Run the E11 Dreaming-phase self-improvement reflection (S11.5).
+    ///
+    /// When a [`SkillRegistry`] is installed, reflects over the buffered
+    /// [`recent_episode_summaries`](Self::recent_episode_summaries) via
+    /// [`sleep::run_self_improvement_reflection`], drafting and registering
+    /// agent-authored `Proposed` skills and emitting the existing
+    /// `SkillReflectionCompleted` and `SkillRegistered` audit entries.  Returns
+    /// the resulting [`ReflectionRegistration`].
+    ///
+    /// When no registry is installed this is a no-op returning the default
+    /// (empty) registration, so the Dreaming phase's existing behaviour is
+    /// untouched.
+    #[cfg(feature = "std")]
+    fn run_dreaming_reflection(&mut self) -> ReflectionRegistration {
+        let Some(registry) = self.skill_registry.clone() else {
+            return ReflectionRegistration::default();
+        };
+        if self.recent_episode_summaries.is_empty() {
+            return ReflectionRegistration::default();
+        }
+        let proposed_at_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let agent_id = self.agent_id.clone();
+        let mut guard = registry.lock().expect("skill_registry poisoned");
+        sleep::run_self_improvement_reflection(
+            &agent_id,
+            &self.recent_episode_summaries,
+            &self.reflection_config,
+            &self.promotion_gate_config,
+            &mut guard,
+            &mut self.audit,
+            proposed_at_ns,
+        )
     }
 
     /// Returns a clone of the cancellation handle for the dispatch currently
@@ -493,6 +640,11 @@ impl LifecycleManager {
                     self.l1_memory.insert(key.clone(), node.clone());
                 }
             }
+
+            // E11 S11.5: Dreaming-phase self-improvement reflection.  No-op
+            // unless a skill registry is installed and episodes are buffered.
+            #[cfg(feature = "std")]
+            let _ = self.run_dreaming_reflection();
         }
         Ok(())
     }
@@ -586,6 +738,11 @@ impl LifecycleManager {
                 self.l1_memory.insert(key.clone(), node.clone());
             }
         }
+
+        // E11 S11.5: Dreaming-phase self-improvement reflection.  No-op unless a
+        // skill registry is installed and episodes are buffered.
+        #[cfg(feature = "std")]
+        let _ = self.run_dreaming_reflection();
 
         report
     }
@@ -2310,5 +2467,152 @@ mod tests {
         assert_eq!(report.files_written, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E11 S11.5 — Dreaming-phase self-improvement reflection wiring ──────────
+
+    use skills::{EpisodeSummary, SkillRegistry};
+
+    /// Three episodes that all pair the same two tools → one friction pattern
+    /// above the default reflection threshold.
+    fn co_occurrence_summaries() -> Vec<EpisodeSummary> {
+        (0..3)
+            .map(|i| EpisodeSummary {
+                episode_id: format!("ep-{i}"),
+                summary: format!("episode {i}: searched then archived"),
+                tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                success: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skill_reflection_disabled_by_default() {
+        let m = manager("agent-no-reflection", Some(1));
+        assert!(!m.skill_reflection_enabled());
+        assert!(m.skill_registry_handle().is_none());
+    }
+
+    #[test]
+    fn with_skill_registry_builder_installs_registry() {
+        let m = manager("agent-reflection-builder", Some(1))
+            .with_skill_registry(SkillRegistry::default());
+        assert!(m.skill_reflection_enabled());
+        assert!(m.skill_registry_handle().is_some());
+    }
+
+    #[test]
+    fn dreaming_phase_registers_proposed_skill_and_emits_audit() {
+        let mut m = manager("dream-agent", Some(0)).with_skill_registry(SkillRegistry::default());
+        for s in co_occurrence_summaries() {
+            m.record_episode_summary(s);
+        }
+
+        // Run one explicit sleep cycle: the Dreaming phase reflects + registers.
+        m.run_sleep_cycle();
+
+        // The shared registry now holds >=1 Proposed agent-authored skill.
+        let registry = m.skill_registry_handle().unwrap();
+        let guard = registry.lock().unwrap();
+        let proposed: Vec<_> = guard
+            .list_all()
+            .into_iter()
+            .filter(|e| e.state.is_proposed())
+            .collect();
+        assert!(
+            !proposed.is_empty(),
+            "Dreaming reflection must register at least one Proposed skill"
+        );
+        for e in &proposed {
+            assert_eq!(e.provenance.authored_by, skills::SkillAuthor::Agent);
+        }
+        // Proposed skills are not active (gated on operator approval).
+        assert_eq!(guard.list_active().len(), 0);
+        drop(guard);
+
+        // Audit: exactly one SkillReflectionCompleted + >=1 SkillRegistered.
+        let entries = m.audit.entries();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::SkillRegistered { .. })),
+            "at least one SkillRegistered audit entry expected"
+        );
+    }
+
+    #[test]
+    fn dreaming_phase_with_no_pattern_registers_nothing() {
+        let mut m =
+            manager("dream-agent-empty", Some(0)).with_skill_registry(SkillRegistry::default());
+        // Distinct tools per episode → no qualifying co-occurrence pattern.
+        for (i, tools) in [
+            ["tool-a", "tool-b"],
+            ["tool-c", "tool-d"],
+            ["tool-e", "tool-f"],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.record_episode_summary(EpisodeSummary {
+                episode_id: format!("e{i}"),
+                summary: format!("episode {i}"),
+                tools_used: tools.iter().map(|t| t.to_string()).collect(),
+                success: true,
+            });
+        }
+
+        m.run_sleep_cycle();
+
+        let registry = m.skill_registry_handle().unwrap();
+        assert!(
+            registry.lock().unwrap().is_empty(),
+            "no skill should be registered without a qualifying pattern"
+        );
+
+        // The reflection summary is still emitted; no SkillRegistered entries.
+        let entries = m.audit.entries();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillRegistered { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn dreaming_phase_without_registry_is_unchanged() {
+        // No registry installed: the sleep cycle behaves exactly as before —
+        // no reflection audit entries even when episodes are buffered.
+        let mut m = manager("dream-agent-noreg", Some(0));
+        for s in co_occurrence_summaries() {
+            m.record_episode_summary(s);
+        }
+        m.run_sleep_cycle();
+
+        let entries = m.audit.entries();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. })),
+            "no reflection should run without a registry"
+        );
+        assert!(!entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::SkillRegistered { .. })));
     }
 }

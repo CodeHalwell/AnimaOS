@@ -37,6 +37,11 @@ use memory::{
     AuditTraceEntry, CompilationConfig, CompilationReport, DreamConfig, DreamReport,
     L1PruningStore, L3Archive, PruningReport, ReplayConfig, ReplayReport,
 };
+use skills::{
+    evaluate_skill_proposal, generate_skill_draft, reflect_on_episodes, EpisodeSummary,
+    PromotionGateConfig, ProposalAction, ReflectionConfig, SkillAuthor, SkillContentScreen,
+    SkillProposal, SkillRegistry, SkillState,
+};
 
 use crate::audit::{AuditEntry, AuditLog};
 
@@ -430,6 +435,136 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         dream: None,
         dream_candidates: Vec::new(),
         compilation: None,
+    }
+}
+
+// ── E11 — Dreaming-phase self-improvement reflection (S11.5) ───────────────────
+
+/// Outcome of a [`run_self_improvement_reflection`] pass.
+///
+/// Summarises the reflection result and lists every agent-authored skill draft
+/// that was registered as [`SkillState::Proposed`] in the supplied registry so
+/// the caller (e.g. the hosted kernel) can route the new pending proposals into
+/// the E15 approval queue.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReflectionRegistration {
+    /// Number of episodes analysed by the reflection pass.
+    pub episodes_analysed: usize,
+    /// Number of friction patterns identified above threshold.
+    pub patterns_found: usize,
+    /// Number of skill drafts generated from the patterns.
+    pub proposals_generated: usize,
+    /// Registry skill ids that were registered as `Proposed` (PendingApproval).
+    ///
+    /// Empty when no qualifying pattern was found, when no registry was
+    /// configured, or when auto-promotion is enabled (drafts go straight to
+    /// `Active` and need no operator gating).
+    pub registered_proposed_ids: Vec<String>,
+}
+
+/// Run the E11 self-improvement reflection during the Dreaming phase (S11.5).
+///
+/// Given a set of recent episode summaries this:
+/// 1. calls [`reflect_on_episodes`] (respecting `reflection_config`'s
+///    thresholds/limits),
+/// 2. for each [`skills::FrictionPattern`] above threshold generates a SKILL.md
+///    draft via [`generate_skill_draft`],
+/// 3. runs each draft through [`evaluate_skill_proposal`] with
+///    `author = SkillAuthor::Agent` and the supplied `gate_config`,
+/// 4. for [`ProposalAction::PendingApproval`] outcomes the draft is registered
+///    as [`SkillState::Proposed`] in `registry` (`evaluate_skill_proposal` does
+///    the registration), and the registry skill id is collected.
+///
+/// Emits one [`AuditEntry::SkillReflectionCompleted`] summary and one
+/// [`AuditEntry::SkillRegistered`] per registered draft (covering both the
+/// auto-promoted and the proposed paths). Both audit variants are existing —
+/// no new variants are introduced.
+///
+/// `vita` deliberately stops at registering the proposals: it never references
+/// `lifecycle`, so it does NOT enqueue them into the approval queue. The hosted
+/// kernel (which may depend on both) routes the returned
+/// [`ReflectionRegistration::registered_proposed_ids`] through
+/// `lifecycle::SkillApprovalBridge`. This keeps the `vita → lifecycle` edge
+/// absent and the dependency graph acyclic.
+///
+/// Returns a [`ReflectionRegistration`] describing the pass. When `episodes` is
+/// empty (or below the configured `min_episodes`) nothing is registered and the
+/// reflection summary records zero patterns — the Dreaming phase's existing
+/// behaviour is untouched.
+pub fn run_self_improvement_reflection(
+    agent_id: &str,
+    episodes: &[EpisodeSummary],
+    reflection_config: &ReflectionConfig,
+    gate_config: &PromotionGateConfig,
+    registry: &mut SkillRegistry,
+    audit: &mut AuditLog,
+    proposed_at_ns: u64,
+) -> ReflectionRegistration {
+    let report = reflect_on_episodes(episodes, reflection_config);
+
+    let mut registered_proposed_ids = Vec::new();
+    let screen = SkillContentScreen::default();
+
+    for pattern in &report.patterns {
+        // Only patterns that suggest a skill name yield a draft.
+        if pattern.suggested_skill_name.is_none() {
+            continue;
+        }
+        let draft = generate_skill_draft(pattern);
+        let source_episode = pattern.episode_ids.first().cloned();
+        let proposal = SkillProposal {
+            skill_text: draft,
+            authored_by: SkillAuthor::Agent,
+            proposed_at_ns,
+            source_episode,
+        };
+        let outcome = match evaluate_skill_proposal(proposal, registry, &screen, gate_config) {
+            Ok(o) => o,
+            // A duplicate id (the skill already exists from a prior cycle) or a
+            // parse failure is non-fatal: skip this draft and continue.
+            Err(_) => continue,
+        };
+
+        let Some(skill_id) = outcome.artifact_id.as_deref() else {
+            // Rejected by content screening — not registered.
+            continue;
+        };
+
+        // Look up the freshly-registered entry to emit a faithful audit record.
+        if let Some(entry) = registry.list_all().into_iter().find(|e| e.id == skill_id) {
+            let initial_state = match entry.state {
+                SkillState::Active => "Active",
+                SkillState::Proposed => "Proposed",
+                SkillState::Quarantined { .. } => "Quarantined",
+                SkillState::RolledBack => "RolledBack",
+            };
+            audit.push(AuditEntry::SkillRegistered {
+                agent_id: agent_id.to_string(),
+                skill_id: entry.id.clone(),
+                skill_name: entry.manifest.name.clone(),
+                authored_by: entry.provenance.authored_by.to_string(),
+                source_episode: entry.provenance.source_episode.clone(),
+                initial_state: initial_state.to_string(),
+            });
+        }
+
+        if matches!(outcome.action, ProposalAction::PendingApproval) {
+            registered_proposed_ids.push(skill_id.to_string());
+        }
+    }
+
+    audit.push(AuditEntry::SkillReflectionCompleted {
+        agent_id: agent_id.to_string(),
+        episodes_analysed: report.episodes_analysed,
+        patterns_found: report.patterns.len(),
+        proposals_generated: report.proposals_generated,
+    });
+
+    ReflectionRegistration {
+        episodes_analysed: report.episodes_analysed,
+        patterns_found: report.patterns.len(),
+        proposals_generated: report.proposals_generated,
+        registered_proposed_ids,
     }
 }
 
@@ -1011,5 +1146,153 @@ mod tests {
         assert_eq!(cr.files_written, 0, "no file written when no pairs");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E11 — Dreaming-phase self-improvement reflection (S11.5) ──────────────
+
+    fn co_occurrence_episodes() -> Vec<EpisodeSummary> {
+        // Three episodes that all pair the same two tools → one friction pattern
+        // above the default threshold (>= 2 occurrences).
+        (0..3)
+            .map(|i| EpisodeSummary {
+                episode_id: format!("ep-{i}"),
+                summary: format!("episode {i}: searched then archived"),
+                tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                success: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reflection_registers_proposed_agent_skill_and_emits_audit() {
+        let episodes = co_occurrence_episodes();
+        let mut registry = SkillRegistry::default();
+        let mut audit = AuditLog::new();
+
+        let reg = run_self_improvement_reflection(
+            "dream-agent",
+            &episodes,
+            &ReflectionConfig::default(),
+            // auto-promotion OFF → drafts land as Proposed (PendingApproval).
+            &PromotionGateConfig {
+                auto_promote_agent_skills: false,
+            },
+            &mut registry,
+            &mut audit,
+            42,
+        );
+
+        assert!(
+            reg.patterns_found >= 1,
+            "a repeated tool co-occurrence pattern must be found"
+        );
+        assert!(
+            !reg.registered_proposed_ids.is_empty(),
+            "at least one Proposed agent-authored skill must be registered"
+        );
+
+        // Registered skills are agent-authored and in the Proposed state.
+        for id in &reg.registered_proposed_ids {
+            let entry = registry
+                .list_all()
+                .into_iter()
+                .find(|e| &e.id == id)
+                .expect("registered skill must exist");
+            assert_eq!(entry.provenance.authored_by, SkillAuthor::Agent);
+            assert!(entry.state.is_proposed());
+        }
+        // Proposed skills are not active.
+        assert_eq!(registry.list_active().len(), 0);
+
+        // Audit: exactly one SkillReflectionCompleted + >=1 SkillRegistered.
+        let entries = audit.entries();
+        let reflections = entries
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+            .count();
+        let registrations = entries
+            .iter()
+            .filter(|e| matches!(e, AuditEntry::SkillRegistered { .. }))
+            .count();
+        assert_eq!(reflections, 1, "exactly one reflection-completed entry");
+        assert!(registrations >= 1, "at least one skill-registered entry");
+    }
+
+    #[test]
+    fn reflection_with_no_qualifying_pattern_registers_nothing() {
+        // Distinct tools per episode → no pair co-occurs above threshold.
+        let episodes = vec![
+            EpisodeSummary {
+                episode_id: "e1".to_string(),
+                summary: "one".to_string(),
+                tools_used: vec!["tool-a".to_string(), "tool-b".to_string()],
+                success: true,
+            },
+            EpisodeSummary {
+                episode_id: "e2".to_string(),
+                summary: "two".to_string(),
+                tools_used: vec!["tool-c".to_string(), "tool-d".to_string()],
+                success: true,
+            },
+            EpisodeSummary {
+                episode_id: "e3".to_string(),
+                summary: "three".to_string(),
+                tools_used: vec!["tool-e".to_string(), "tool-f".to_string()],
+                success: true,
+            },
+        ];
+        let mut registry = SkillRegistry::default();
+        let mut audit = AuditLog::new();
+
+        let reg = run_self_improvement_reflection(
+            "dream-agent",
+            &episodes,
+            &ReflectionConfig::default(),
+            &PromotionGateConfig::default(),
+            &mut registry,
+            &mut audit,
+            7,
+        );
+
+        assert_eq!(reg.patterns_found, 0);
+        assert!(reg.registered_proposed_ids.is_empty());
+        assert!(registry.is_empty(), "nothing registered without a pattern");
+
+        // The reflection summary is still emitted (behaviour observable), but no
+        // SkillRegistered entries.
+        let entries = audit.entries();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillRegistered { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn reflection_with_no_episodes_is_a_noop() {
+        let mut registry = SkillRegistry::default();
+        let mut audit = AuditLog::new();
+        let reg = run_self_improvement_reflection(
+            "dream-agent",
+            &[],
+            &ReflectionConfig::default(),
+            &PromotionGateConfig::default(),
+            &mut registry,
+            &mut audit,
+            0,
+        );
+        assert_eq!(reg.episodes_analysed, 0);
+        assert_eq!(reg.patterns_found, 0);
+        assert!(reg.registered_proposed_ids.is_empty());
+        assert!(registry.is_empty());
     }
 }
