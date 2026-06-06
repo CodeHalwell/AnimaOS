@@ -546,6 +546,107 @@ pub enum AuditEntry {
         fault_count: u32,
     },
 
+    // ── E14.1 Metacognition audit entries ─────────────────────────────────────
+    /// The cortex emitted a confidence/uncertainty signal for a completed output.
+    ///
+    /// Written by the metacognition layer after each cortex invocation so that
+    /// calibration data is available to E13 alignment evals and the E12 mastery
+    /// drive.
+    CortexConfidenceReport {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier (matches the preceding `CortexCompleted`).
+        task_id: String,
+        /// Self-reported confidence score in `[0.0, 1.0]`.
+        confidence: f32,
+        /// Number of tool calls that served as observable evidence.
+        evidence_count: usize,
+        /// `true` when confidence is below the help-request floor.
+        asks_for_help: bool,
+    },
+    /// A calibration outcome was recorded (predicted confidence vs actual success).
+    CalibrationEntry {
+        /// Agent identifier.
+        agent_id: String,
+        /// Per-invocation identifier.
+        task_id: String,
+        /// Confidence the agent predicted before the outcome was known.
+        predicted_confidence: f32,
+        /// `true` if the task outcome was considered successful.
+        outcome_success: bool,
+        /// `|predicted − actual|` — the per-sample calibration error.
+        calibration_error: f32,
+    },
+
+    // ── E14.2 Prospective memory audit entries ────────────────────────────────
+    /// An intention became due and was injected into the task agenda.
+    IntentionScheduled {
+        /// Agent identifier.
+        agent_id: String,
+        /// Intention identifier.
+        intention_id: u64,
+        /// Human-readable description of the intention.
+        description: String,
+        /// Wall-clock nanoseconds when the intention was due.
+        due_at_ns: u64,
+        /// `true` when the intention was overdue (past the grace period).
+        overdue: bool,
+    },
+    /// An intention was completed and removed (or rescheduled).
+    IntentionCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Intention identifier.
+        intention_id: u64,
+        /// `true` when the intention was rescheduled (recurring).
+        rescheduled: bool,
+        /// New due-at timestamp for recurring intentions, `None` for one-shot.
+        new_due_at_ns: Option<u64>,
+    },
+
+    // ── E14.3 Knowledge corpus audit entries ─────────────────────────────────
+    /// A document was ingested into the personal knowledge corpus.
+    ///
+    /// Written by the knowledge ingestion path (S14.3) after a successful
+    /// `ingest_document` call.
+    KnowledgeIngested {
+        /// Agent identifier.
+        agent_id: String,
+        /// Human-readable source key for the document (e.g. `"doc:notes"`).
+        source_key: String,
+        /// Length of the document text in bytes.
+        document_bytes: usize,
+    },
+
+    // ── E14.4 Cognitive watchdog audit entries ────────────────────────────────
+    /// A cognitive watchdog detector tripped.
+    ///
+    /// Written immediately when a watchdog trip is detected.  The lifecycle
+    /// manager breaks the current plan loop and surfaces this to the operator.
+    CognitiveWatchdogTripped {
+        /// Agent identifier.
+        agent_id: String,
+        /// Name of the detector that fired (e.g. `"StuckLoop"`).
+        detector: String,
+        /// Human-readable reason for the trip.
+        reason: String,
+        /// Number of consecutive anomalous observations.
+        streak: u32,
+        /// Total trips since the watchdog was last reset.
+        trip_count: u32,
+    },
+    /// An agent-state snapshot was taken for potential rollback (E14.4).
+    AgentSnapshotTaken {
+        /// Agent identifier.
+        agent_id: String,
+        /// Wall-clock nanoseconds when the snapshot was taken.
+        taken_at_ns: u64,
+        /// Human-readable reason the snapshot was taken.
+        description: String,
+        /// Number of L1 node keys captured.
+        l1_node_count: usize,
+    },
+
     // ── S5.7.6 Cache-Controller Modulation audit entries ──────────────────────
     /// Memory-pressure from interoception triggered a block-budget reduction.
     ///

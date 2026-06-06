@@ -1226,6 +1226,82 @@ degradation demo).
 
 ---
 
+### Epic E14 — Higher Cognition ✅
+
+**Scope.** Four cognitive systems that close the loop between raw sensory
+processing and reflective self-awareness: (1) metacognition and confidence
+calibration, (2) prospective / temporal memory, (3) a personal knowledge
+corpus, and (4) cognitive watchdogs for stuck-loop detection.
+
+**Dependencies.** E5.1 (cortex), E2 (memory tiers), scheduler TaskAgenda.
+
+**Stories.**
+
+- **S14.1 — Metacognition & confidence calibration** ✅
+  `crates/vita/src/metacognition.rs` — `ConfidenceTracker` estimates cortex
+  output confidence from observable evidence (tool call count, output length,
+  uncertainty keywords). Score clamped to `[0.20, 0.95]`. When confidence
+  falls below a configurable floor, `ConfidenceScore::asks_for_help = true`
+  and `HelpRequest` is emitted. `record_outcome` / `mean_calibration_error`
+  provide a rolling calibration window for E13 alignment evals.
+
+- **S14.2 — Prospective & temporal memory** ✅
+  `crates/vita/src/prospective.rs` — `IntentionStore` (JSONL-backed, atomic
+  flush) stores future intentions with optional recurrence. `inject_due_intentions`
+  scans the store on each somatic tick and pushes due entries onto the MLFQ
+  agenda: tier 0 (High) for within-grace-period items, tier 2 (Low) for
+  long-overdue items (past `DEFAULT_OVERDUE_GRACE_NS` = 60 s). Recurring
+  intentions are rescheduled rather than deleted.
+
+- **S14.3 — Personal knowledge corpus** ✅
+  `crates/memory/src/knowledge.rs` — `ingest_document` and
+  `ingest_document_embedded` store knowledge documents in the existing
+  `L3Archive` under a new `SourceTier::Knowledge` tag (added to
+  `crates/memory/src/archival.rs`). `embed_text_knowledge` produces a
+  deterministic 4-dim FNV-1a embedding. `query_knowledge_corpus` filters to
+  `Knowledge`-tier entries and returns top-k by cosine similarity.
+
+- **S14.4 — Cognitive watchdogs** ✅
+  `crates/vita/src/watchdog.rs` — `CognitiveWatchdog` runs three detectors:
+  **StuckLoop** (FNV hash of output, trips after N identical consecutive
+  outputs), **NoProgress** (trips after N consecutive zero-tool-call
+  invocations), **ShortOutputSpiral** (trips after N consecutive outputs
+  shorter than `min_chars`). `AgentSnapshot` captures L1 node keys and
+  identity JSON for potential rollback.
+
+- **Audit integration** ✅
+  `crates/vita/src/audit.rs` — 7 new `AuditEntry` variants: `CortexConfidenceReport`,
+  `CalibrationEntry`, `IntentionScheduled`, `IntentionCompleted`,
+  `KnowledgeIngested`, `CognitiveWatchdogTripped`, `AgentSnapshotTaken`.
+  `kernels/hosted/src/main.rs` updated with corresponding `print_audit` arms.
+
+**Delivered in this epic:**
+- `crates/vita/src/metacognition.rs` (new, ~360 lines, 10 tests) ✅
+- `crates/vita/src/prospective.rs` (new, ~540 lines, 11 tests) ✅
+- `crates/vita/src/watchdog.rs` (new, ~440 lines, 9 tests) ✅
+- `crates/memory/src/knowledge.rs` (new, ~380 lines, 9 tests) ✅
+- `crates/memory/src/archival.rs` — `SourceTier::Knowledge` variant ✅
+- `crates/vita/src/audit.rs` — 7 new audit entry variants ✅
+- `crates/vita/src/lib.rs` — re-exports for all new types ✅
+- `crates/memory/src/lib.rs` — re-exports for knowledge API ✅
+- `kernels/hosted/src/main.rs` — print_audit arms for all 7 new variants ✅
+
+**Exit criteria — all met:**
+1. ✅ `estimate_confidence` returns scores in `[0.0, 1.0]` for all inputs.
+2. ✅ `ConfidenceTracker::record_outcome` updates calibration error correctly.
+3. ✅ A help-request signal is raised when confidence falls below the floor.
+4. ✅ Calibration error is monotonically reducible by improving predictions.
+5. ✅ Due intentions are injected into the task agenda (High tier).
+6. ✅ Recurring intentions reschedule after injection.
+7. ✅ Overdue intentions (past grace) injected at Low priority.
+8. ✅ IntentionStore survives process restart (JSONL persistence).
+9. ✅ Knowledge documents round-trip through L3Archive with tier filter.
+10. ✅ `query_knowledge_corpus` returns Knowledge-tier entries ranked by similarity.
+11. ✅ CognitiveWatchdog trips on StuckLoop, NoProgress, ShortOutputSpiral.
+12. ✅ `cargo test --workspace` — zero failures across all crates.
+
+---
+
 ## Stage 6 — Operator Interface
 
 The human-facing realisation of AnimaOS's "human-as-a-sense" model: a

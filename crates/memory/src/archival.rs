@@ -119,6 +119,13 @@ pub enum SourceTier {
     /// packed into the archive payload and the embedding is derived from
     /// the summary's length and activation values.
     Episode,
+    /// Directly-ingested knowledge document (E14, S14.3).
+    ///
+    /// Distinct from episodic memory ("what happened") — the knowledge
+    /// tier holds "what I know": documents, notes, distilled findings,
+    /// and curated facts about the user's world.  Queried via
+    /// [`crate::knowledge::query_knowledge_corpus`].
+    Knowledge,
 }
 
 /// Provenance record describing where and when an entry arrived in L3.

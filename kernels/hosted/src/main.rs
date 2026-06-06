@@ -343,6 +343,99 @@ fn print_audit(manager: &LifecycleManager) {
                      (eviction more aggressive under pressure)"
                 );
             }
+            // ── E14.1 Metacognition ───────────────────────────────────────────
+            AuditEntry::CortexConfidenceReport {
+                agent_id,
+                task_id,
+                confidence,
+                evidence_count,
+                asks_for_help,
+            } => {
+                let help_tag = if *asks_for_help { " [HELP REQUESTED]" } else { "" };
+                println!(
+                    "  🤔 confidence_report agent={agent_id} task={task_id} \
+                     confidence={confidence:.3} evidence={evidence_count}{help_tag}"
+                );
+            }
+            AuditEntry::CalibrationEntry {
+                agent_id,
+                task_id,
+                predicted_confidence,
+                outcome_success,
+                calibration_error,
+            } => {
+                let outcome = if *outcome_success { "success" } else { "failure" };
+                println!(
+                    "  📐 calibration agent={agent_id} task={task_id} \
+                     predicted={predicted_confidence:.3} outcome={outcome} \
+                     error={calibration_error:.3}"
+                );
+            }
+            // ── E14.2 Prospective memory ──────────────────────────────────────
+            AuditEntry::IntentionScheduled {
+                agent_id,
+                intention_id,
+                description,
+                due_at_ns,
+                overdue,
+            } => {
+                let overdue_tag = if *overdue { " [OVERDUE]" } else { "" };
+                println!(
+                    "  📅 intention_scheduled agent={agent_id} id={intention_id} \
+                     due_ns={due_at_ns} desc={description:?}{overdue_tag}"
+                );
+            }
+            AuditEntry::IntentionCompleted {
+                agent_id,
+                intention_id,
+                rescheduled,
+                new_due_at_ns,
+            } => {
+                let resched = if *rescheduled {
+                    format!(" rescheduled_at={}", new_due_at_ns.unwrap_or(0))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  ✅ intention_completed agent={agent_id} id={intention_id}{resched}"
+                );
+            }
+            // ── E14.3 Knowledge corpus ────────────────────────────────────────
+            AuditEntry::KnowledgeIngested {
+                agent_id,
+                source_key,
+                document_bytes,
+            } => {
+                println!(
+                    "  📚 knowledge_ingested agent={agent_id} \
+                     source={source_key:?} bytes={document_bytes}"
+                );
+            }
+            // ── E14.4 Cognitive watchdog ──────────────────────────────────────
+            AuditEntry::CognitiveWatchdogTripped {
+                agent_id,
+                detector,
+                reason,
+                streak,
+                trip_count,
+            } => {
+                println!(
+                    "  🚨 watchdog_tripped agent={agent_id} detector={detector} \
+                     streak={streak} trip_count={trip_count}"
+                );
+                println!("       reason: {reason}");
+            }
+            AuditEntry::AgentSnapshotTaken {
+                agent_id,
+                taken_at_ns,
+                description,
+                l1_node_count,
+            } => {
+                println!(
+                    "  📸 snapshot_taken agent={agent_id} at_ns={taken_at_ns} \
+                     l1_nodes={l1_node_count} desc={description:?}"
+                );
+            }
         }
     }
 }
