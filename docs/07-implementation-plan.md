@@ -1508,7 +1508,10 @@ audit entries).
   `DriveValueIntegrator::augment()` adds drive delta additively behind
   `DriveIntegratorConfig::enabled` flag (opt-in, A/B-able against today's
   baseline); `DriveAugmentedValue` with full `decomposition` for audit;
-  `DriveContribution` per tier; `reasoning_string()` for `anima why`)
+  `DriveContribution` per tier; `reasoning_string()` for `anima why`.
+  Now wired into the live gate: `crates/vita/src/motivation_gate.rs` `MotivatedGate`
+  + `LifecycleManager::enable_motivation` augment the gate value score with the
+  affect nudge — integration is WIRED, not merely designed)
 - S12.3 State-dependent weighting & priority lattice. ✅
   (`crates/motivation/src/lattice.rs` — `PriorityLattice::compute_weights()`
   applies multiplicative suppression from lower-tier urgency to higher tiers;
@@ -1613,10 +1616,16 @@ and live Anthropic/Ollama tool-calling.
   dispatch, env-var config + secret redaction. 🟡 (PR #72 open)
 - S7.1 `web-search` tool via SearXNG: `SearchProvider` trait,
   `SearxngProvider` + `FixtureProvider`, `WebSearchTool: ToolDriver`. 🟡 (PR #72 open)
-- S7.2 `browser` tool via Playwright subprocess. ⬜ (deferred)
+- S7.2 `browser` tool via Playwright subprocess. ✅ (`crates/actuators/src/browser.rs` —
+  `BrowserDriver` trait, `MockBrowserDriver` (CI default, canned/offline), feature-gated
+  `PlaywrightDriver` (UDS subprocess + `ChildGuard` RAII, egress-screened); `browser`/`browse`/`extract`
+  tools) (fixture default; live Playwright behind `live` feature)
 - S7.3 Semantic tool selection: `ToolScorer` trait, `LexicalScorer` (BM25),
   `FixtureScorer`, tool index, dispatch wiring, `AuditEntry::ToolSelection`. 🟡 (PR #72 open)
-- S7.4 Live LLM backends and real cortex tool-calling. ⬜ (deferred)
+- S7.4 Live LLM backends and real cortex tool-calling. ✅ (`crates/vita/src/cortex_bridge.rs`
+  `ChatCortexBridge` drives an E8 `ChatBackend` through a bounded Plan/Act/Observe loop;
+  hosted seam in `kernels/hosted/src/cortex.rs` `RegistryToolDispatcher` + the `ask`/`cortex`
+  subcommand) (fixture default; live Anthropic/Ollama/OpenAI-compatible when configured)
 
 **Exit criteria.**
 1. Egress guard blocks SSRF and private-IP targets, audited. 🟡
@@ -1684,11 +1693,16 @@ for live mode).
 4. `ChatBackend::health()` returns `true` in fixture mode (no network). ✅
    (`health_returns_true_in_fixture_mode`)
 
-**Remaining stories (not yet started).**
+**Remaining stories.**
 - S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ⬜
-- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜
+- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜ (external/live-gated FFI)
 - S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
-  library). ⬜
+  library). 🟡 — abstraction + fixture layer DONE: new crate `crates/finetune`
+  (`anima-finetune`) ships `FineTuner` trait, `FixtureFineTuner`, `AdaptationMethod`
+  (incl. HRA), `AdapterLibrary` (mount/evict/provenance), and the eval harness
+  (S8.4.2/.4/.7/.8 ✅). Real Unsloth/HRA GPU training + merge/quant
+  (S8.4.5/.6) remain external/live-gated — `UnslothFineTuner` is a `live`-gated
+  skeleton returning `BackendUnavailable`. ⬜
 
 ---
 
@@ -2084,14 +2098,14 @@ the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
 stable identifier sequence; the dependency graph and recommended build
 order are recorded in `docs/18-forward-epics.md`.
 
-### Epic E7 — Embodiment ⬜
+### Epic E7 — Embodiment 🟡
 
 Real-world tools: web-search (SearXNG) + browser (Playwright), egress/SSRF
 guard + motor-gate-at-dispatch, semantic tool selection wired to
 `length_robust_filter`, live Anthropic/Ollama tool-calling.
 See `docs/12-real-world-tools-plan.md`.
 
-### Epic E8 — Local Inference ⬜
+### Epic E8 — Local Inference 🟡
 
 Provider ecosystem + fine-tuning: OpenAI-compatible umbrella (vLLM/LM Studio
 /NVIDIA NIM/HF TGI/llama.cpp-server), native FFI runtimes, Unsloth as the
@@ -2099,18 +2113,19 @@ default trainer, HRA for the instinct tier, eval harness, adapter library +
 dynamic mounting.
 See `docs/13-local-llm-providers.md`.
 
-### Epic E9 — Onboarding ⬜
+### Epic E9 — Onboarding 🟡
 
 First-run experience: `anima init` wizard, `anima doctor` preflight,
 conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support,
 per-tier router dispatch, unified quickstart.
 See `docs/14-onboarding.md`.
 
-### Epic E10 — Presence ⬜
+### Epic E10 — Presence ✅
 
 Communication & multimodal: comms-app channel gateways (Telegram/Slack
 first) over the existing operator seam; text/image/voice as first-class
-bidirectional modalities.
+bidirectional modalities. All stories S10.1–S10.5 ✅ (fixture default; live
+channel delivery behind `ANIMA_COMMS_LIVE`).
 See `docs/15-communication-multimodal.md`.
 
 ### Epic E11 — Self-Extension ✅
@@ -2182,26 +2197,27 @@ supports: `list`, `info <id>`, `register <path>`, `promote <id>`,
    `SkillReflectionCompleted` — 9 new variants in `vita::audit`)
 8. 43 unit tests across all E11 stories, all passing in CI. ✅
 
-### Epic E12 — Motivation ⬜
+### Epic E12 — Motivation ✅
 
 Six-tier drive hierarchy (viability → self-actualisation) feeding the
-Striatal Gate `value_score`; endogenous goal generation; affect/mood +
-economic agency; corrigibility invariant above the lattice.
-See `docs/17-motivation-and-drives.md`.
+Striatal Gate `value_score` (wired via `vita::motivation_gate::MotivatedGate`,
+opt-in through `LifecycleManager::enable_motivation`); endogenous goal
+generation; affect/mood + economic agency; corrigibility invariant above the
+lattice. See `docs/17-motivation-and-drives.md`.
 
-### Epic E13 — Alignment Assurance ⬜
+### Epic E13 — Alignment Assurance ✅
 
 Immutable value charter; constitution-enforcement hook; continuous
 alignment evals; defence red-team harness; corrigibility test suite.
 See `docs/19-constitution-and-alignment.md`.
 
-### Epic E14 — Higher Cognition ⬜
+### Epic E14 — Higher Cognition ✅
 
 Metacognition & confidence calibration; prospective/temporal memory;
 personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback.
 See `docs/20-higher-cognition.md`.
 
-### Epic E15 — Trust & Lifecycle ⬜
+### Epic E15 — Trust & Lifecycle ✅
 
 "While you were away" digest; approval-queue surface (the operator-facing
 half of E11's promotion gate); decision replay / time-travel debug; digital-
@@ -2226,10 +2242,12 @@ tool registry).
 - S7.0 Foundations: async network substrate, `EgressGuard` (SSRF + rate
   limit), motor-gate hook at dispatch, config & secrets. 🟡
 - S7.1 `web-search` tool via SearXNG. 🟡
-- S7.2 `browser` tool via Playwright subprocess. ⬜
+- S7.2 `browser` tool via Playwright subprocess. ✅ (fixture default;
+  live Playwright behind `live` feature)
 - S7.3 Semantic tool selection (BM25 lexical scorer → `length_robust_filter`
   wire-in). 🟡
-- S7.4 Live LLM backends & real cortex tool-calling. ⬜
+- S7.4 Live LLM backends & real cortex tool-calling. ✅ (`ChatCortexBridge`;
+  fixture default; live Anthropic/Ollama/OpenAI-compatible when configured)
 
 ### Epic E8 — Local Inference Ecosystem 🟡
 
@@ -2245,9 +2263,11 @@ Details in `docs/13-local-llm-providers.md`.
   discipline. 🟡
 - S8.1 `OpenAiCompatibleBackend` umbrella + provider presets. 🟡
 - S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
-- S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜
+- S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜ (external/live-gated)
 - S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
-  library). ⬜
+  library). 🟡 (abstraction + fixture layer DONE via `crates/finetune` —
+  `FineTuner`/`FixtureFineTuner`/`AdaptationMethod`/`AdapterLibrary`/eval;
+  real GPU training/merge/quant remain external/live-gated)
 
 ### Epic E9 — Onboarding 🟡
 
@@ -2264,7 +2284,11 @@ E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
   (`kernels/hosted/src/init.rs` — `run_init()`, idempotent state machine,
   non-interactive CI mode; 11 unit tests covering JSON round-trip, save/load,
   backend inference)
-- S9.2 Conversational identity bootstrap (depends on E7 S7.4 live cortex). ⬜
+- S9.2 Conversational identity bootstrap (depends on E7 S7.4 live cortex). ✅
+  (`kernels/hosted/src/init.rs` — `InterviewIo` + `run_identity_interview`:
+  structured multi-question interview writing operator_name/working_hours/
+  primary_goals/boundaries/preferred_channel via `IdentityMemory`, with optional
+  cortex-assisted opening)
 - S9.3 Preflight & hardware/provider detection (`anima doctor`). ✅
   (`kernels/hosted/src/doctor.rs` — GPU detection via `nvidia-smi` /
   Apple Silicon / CPU-only fallback; RAM via `/proc/meminfo`; provider TCP
@@ -2273,8 +2297,11 @@ E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
 - S9.4 Non-NVIDIA / CPU / Apple Silicon support. 🟡
   (doctor detects all three; CPU-only and Apple Silicon paths are documented
   and exercised; Docker profile work deferred)
-- S9.5 Per-tier router dispatch (shared with E8 §4). ⬜
-- S9.6 Bare-metal onboarding story. ⬜
+- S9.5 Per-tier router dispatch (shared with E8 §4). ✅
+  (`crates/vita` `TierBackends` + `LifecycleManager::with_tier_backends`;
+  `llm_backends::TierBackendChoices` env/wizard/default precedence; wizard
+  wiring in `kernels/hosted/src/init.rs` + install in `serve`)
+- S9.6 Bare-metal onboarding story. ⬜ (external — bare-metal runbook)
 - S9.7 Unified quickstart doc. ✅ (`docs/getting-started.md`)
 
 **Exit criteria.**
@@ -2722,7 +2749,13 @@ lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
 - New `AuditEntry` variants: `EgressRequested`, `EgressBlocked`, `ToolSelection`.
 - 52 new tests; 15 integration tests (`e7_embodiment`).
 
-**Deferred.** S7.2 (browser/Playwright), S7.4 (live tool-calling), embedding scorer.
+**Delivered (later).** S7.2 (browser/Playwright) ✅ — `crates/actuators/src/browser.rs`
+(`BrowserDriver`, `MockBrowserDriver` CI default, feature-gated `PlaywrightDriver`;
+`browser`/`browse`/`extract` tools; fixture default, live Playwright behind `live`).
+S7.4 (live tool-calling) ✅ — `crates/vita/src/cortex_bridge.rs` `ChatCortexBridge`
+(fixture default; live Anthropic/Ollama/OpenAI-compatible when configured).
+
+**Deferred.** Embedding scorer.
 
 ### Epic E8 — Local Inference 🟡
 
@@ -2738,7 +2771,14 @@ See `docs/13-local-llm-providers.md`.
   factory updates (`BackendKind` extended).
 - 70 hermetic unit tests.
 
-**Deferred.** S8.3–S8.4 (native runtimes, Unsloth/HRA, adapter library).
+**Delivered (later).** S8.4 abstraction + fixture layer 🟡 — new crate `crates/finetune`
+(`anima-finetune`) ships `FineTuner` trait, `FixtureFineTuner`, `AdaptationMethod`
+(incl. HRA), `AdapterLibrary` (mount/evict/provenance), and the eval harness
+(S8.4.2/.4/.7/.8 ✅).
+
+**Deferred.** S8.3 (native FFI runtimes — external/live-gated) and S8.4.5/.6
+(real Unsloth/HRA GPU training + merge/quant — external/live-gated;
+`UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`).
 
 ### Epic E9 — Onboarding 🟡
 
@@ -2753,10 +2793,23 @@ quickstart.  See `docs/14-onboarding.md`.
 - S9.7 `docs/getting-started.md` — unified quickstart (Docker, native, hardware
   paths, identity memory commands).
 
-### Epic E10 — Presence 🟡
+**Delivered (later).**
+- S9.2 Conversational identity bootstrap — `kernels/hosted/src/init.rs`
+  `InterviewIo` + `run_identity_interview` (structured multi-question interview
+  writing operator_name/working_hours/primary_goals/boundaries/preferred_channel
+  via `IdentityMemory`; optional cortex-assisted opening). ✅
+- S9.5 Per-tier router dispatch — `crates/vita` `TierBackends` +
+  `LifecycleManager::with_tier_backends`; `llm_backends::TierBackendChoices`
+  (env/wizard/default precedence); wizard wiring in `init.rs` + install in `serve`. ✅
+
+**Remaining.** S9.4 🟡 (Docker profile deferred); S9.6 ⬜ (bare-metal runbook — external).
+
+### Epic E10 — Presence ✅
 
 **Scope.** Channel gateway framework: comms-app adapters over the existing
 operator seam; image and voice as first-class bidirectional modalities.
+All stories S10.1–S10.5 ✅ (fixture default; live channel delivery behind
+`ANIMA_COMMS_LIVE`).
 See `docs/15-communication-multimodal.md`.
 
 **Dependencies.** E6 (operator seam, SensoryBridge), E7 (egress guard
@@ -2780,10 +2833,12 @@ for outbound channel calls — wired once E7 merges).
   (`crates/comms/src/voice.rs` — `SttProvider` trait, `TtsProvider` trait,
   `FixtureStt` (lookup by frame length, configurable default), `FixtureTts`
   (lookup by text, configurable default); 14 unit tests; trait objects verified)
-- S10.5 Modality-aware routing (partial — routing integration deferred to E8). ⬜
-  (`crates/vita/src/audit.rs` — `AuditEntry::ChannelMessageReceived`,
-  `ChannelMessageSent`, `ModalityUnsupported` added for route-capability tracking;
-  full modality × route matrix requires `BackendCapabilities.vision` from E8)
+- S10.5 Modality-aware routing. ✅
+  (`crates/comms/src/routing.rs` — `ModalityRouter`: text always routes;
+  image → vision-capable route or caption fallback / `Unsupported`; voice → STT
+  before route; outbound voice → text degradation. Audit support in
+  `crates/vita/src/audit.rs` — `AuditEntry::ChannelMessageReceived`,
+  `ChannelMessageSent`, `ModalityUnsupported`)
 
 **Exit criteria.**
 1. Inbound text, image, and voice messages from both Telegram and Slack fixture
@@ -2806,7 +2861,7 @@ for outbound channel calls — wired once E7 merges).
 4. `anima-comms` binary runs the fixture demo and reports packet counts without
    live network access. ✅ (binary compiles and runs with demo fixtures)
 
-### Epic E13 — Alignment Assurance 🟡
+### Epic E13 — Alignment Assurance ✅
 
 **Scope.** Immutable value charter, constitution enforcement hook, alignment
 eval harness, red-team corpus.  See `docs/19-constitution-and-alignment.md`.

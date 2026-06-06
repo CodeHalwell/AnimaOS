@@ -40,6 +40,13 @@ pub struct ChatMessage {
     /// For [`ChatRole::Tool`] messages: the `id` of the originating tool call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// For [`ChatRole::Assistant`] turns that request tools: the tool calls this
+    /// turn emitted.  OpenAI-compatible providers require that any `Tool` result
+    /// message be preceded by the assistant message declaring the matching
+    /// `tool_calls` (correlated by `id`); otherwise the follow-up request is
+    /// rejected with a 400.  Empty for non-tool turns (and skipped on the wire).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl ChatMessage {
@@ -49,6 +56,7 @@ impl ChatMessage {
             role: ChatRole::System,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -58,6 +66,7 @@ impl ChatMessage {
             role: ChatRole::User,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -67,7 +76,18 @@ impl ChatMessage {
             role: ChatRole::Assistant,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
+    }
+
+    /// Attach tool calls to this (assistant) turn, returning `self` for chaining.
+    ///
+    /// Required when replaying an assistant turn that requested tools back into
+    /// the conversation, so the subsequent tool-result messages are well-formed
+    /// for OpenAI-compatible providers.
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = tool_calls;
+        self
     }
 
     /// Construct a tool-result turn.
@@ -76,6 +96,7 @@ impl ChatMessage {
             role: ChatRole::Tool,
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
+            tool_calls: Vec::new(),
         }
     }
 }
@@ -98,7 +119,7 @@ pub struct ToolSpec {
 }
 
 /// A tool call emitted by the model in a chat response.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Provider-assigned unique call ID, used to correlate the tool result.
     pub id: String,
@@ -231,6 +252,31 @@ mod tests {
         let tr = ChatMessage::tool_result("id1", "result");
         assert_eq!(tr.role, ChatRole::Tool);
         assert_eq!(tr.tool_call_id, Some("id1".to_string()));
+    }
+
+    #[test]
+    fn assistant_with_tool_calls_carries_and_serializes_them() {
+        let calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "web-search".to_string(),
+            arguments: "{\"q\":\"x\"}".to_string(),
+        }];
+        let msg = ChatMessage::assistant(String::new()).with_tool_calls(calls.clone());
+        assert_eq!(msg.tool_calls, calls);
+
+        // serde round-trip preserves the tool calls (required so a replayed
+        // assistant turn stays well-formed for OpenAI-compatible providers).
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("tool_calls"));
+        let back: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+
+        // An assistant turn with no tool calls omits the field on the wire.
+        let plain = ChatMessage::assistant("hi");
+        assert!(plain.tool_calls.is_empty());
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("tool_calls"));
     }
 
     #[test]

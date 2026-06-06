@@ -43,6 +43,20 @@
 //! available RAM, local inference providers (Ollama, LM Studio, vLLM, llama.cpp),
 //! and configured API keys, then prints a tier recommendation.
 //!
+//! # `anima ask` subcommand (E7 S7.4 — cortex invocation seam)
+//!
+//! Running `cargo run --bin anima-hosted -- ask "<task>"` builds a
+//! [`vita::InvokeRequest`] from the task text, the default tool registry, and
+//! the agent's identity memory, then drives it through a
+//! [`vita::ChatCortexBridge`].  The chat backend is a CI-safe fixture by default
+//! (text-only, no tool dispatch); a live tool-calling OpenAI-compatible backend
+//! is opt-in via `ANIMA_COMPAT_LIVE=1` + `ANIMA_COMPAT_URL`.  Tool calls the
+//! cortex emits are routed back through the registry.
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- ask "summarise the AnimaOS project"
+//! ```
+//!
 //! # `anima init` subcommand (E9 S9.1)
 //!
 //! Running `cargo run --bin anima-hosted -- init` runs the guided first-run
@@ -55,6 +69,7 @@
 //! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
 //! ```
 
+mod cortex;
 mod doctor;
 mod init;
 
@@ -87,6 +102,65 @@ fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+/// `true` when an environment flag is set to a truthy value (`1`/`true`/`yes`/`on`).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Build the default tool registry surfaced by the hosted kernel (E7 + Wave-1).
+///
+/// Registers the deterministic, CI-safe tool set: `web-search` (fixture
+/// provider) alongside the actuators browser family (`browser` / `browse` /
+/// `extract`) backed by [`MockBrowserDriver`].  Live drivers (SearXNG,
+/// Playwright) remain opt-in behind their own env/feature gates and are never
+/// wired here, so this path stays hermetic.
+pub(crate) fn build_default_tool_registry() -> praxis::ToolRegistry {
+    use actuators::browser::{
+        BrowserExtractTool, BrowserNavigateTool, BrowserReadTextTool, MockBrowserDriver, MockPage,
+    };
+    use actuators::web_search::{SearchResult, WebSearchTool};
+    use actuators::EgressGuard;
+
+    let registry = praxis::ToolRegistry::new();
+
+    // web-search over a deterministic fixture provider (no network).
+    registry.register(WebSearchTool::with_fixture(vec![SearchResult {
+        title: "AnimaOS".to_string(),
+        url: "https://example.com/animaos".to_string(),
+        snippet: "A self-preserving agent operating system.".to_string(),
+    }]));
+
+    // Browser family: each tool gets its own MockBrowserDriver seeded with the
+    // same canned page (the fixture driver is stateless, so per-tool instances
+    // are equivalent and keep the tools exercisable offline).  Each tool gets the
+    // default HTTPS-only egress guard (defence-in-depth alongside the dispatch
+    // egress screen).
+    let canned_url = "https://example.com/animaos";
+    let mock_page = MockPage::new("AnimaOS", "AnimaOS is a self-preserving agent OS.")
+        .with_extraction("h1", vec!["AnimaOS".to_string()]);
+    registry.register(BrowserNavigateTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page.clone()),
+        EgressGuard::default(),
+    ));
+    registry.register(BrowserReadTextTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page.clone()),
+        EgressGuard::default(),
+    ));
+    registry.register(BrowserExtractTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page),
+        EgressGuard::default(),
+    ));
+
+    registry
 }
 
 fn build_agent(
@@ -1075,8 +1149,8 @@ fn cmd_why() {
 /// - `skills reflect` — run the self-improvement reflection pass on recent episodes
 fn cmd_skills(args: &[String]) {
     use skills::{
-        evaluate_skill_proposal, reflect_on_episodes, EpisodeSummary, PromotionGateConfig,
-        ReflectionConfig, SkillAuthor, SkillContentScreen, SkillProposal, SkillRegistry,
+        evaluate_skill_proposal, EpisodeSummary, PromotionGateConfig, ReflectionConfig,
+        SkillAuthor, SkillContentScreen, SkillProposal, SkillRegistry,
     };
     use vita::{AuditEntry, AuditLog};
 
@@ -1262,7 +1336,15 @@ fn cmd_skills(args: &[String]) {
             }
         }
         Some("reflect") => {
-            // Stub: demonstrate the reflection API with synthetic episodes.
+            // E11 S11.5 + E11↔E15: run the *real* Dreaming-phase reflection over
+            // synthetic recent episodes — drafting agent-authored skills,
+            // registering the `Proposed` drafts into a SkillRegistry (the same
+            // path vita's sleep cycle drives), then routing each pending proposal
+            // into the E15 approval queue via `lifecycle::SkillApprovalBridge`.
+            use lifecycle::approval::ApprovalQueue;
+            use lifecycle::skill_bridge::SkillApprovalBridge;
+            use skills::{ProposalAction, SkillState};
+
             let episodes: Vec<EpisodeSummary> = vec![
                 EpisodeSummary {
                     episode_id: "ep-demo-1".to_string(),
@@ -1283,27 +1365,104 @@ fn cmd_skills(args: &[String]) {
                     success: true,
                 },
             ];
-            let report = reflect_on_episodes(&episodes, &ReflectionConfig::default());
-            log.push(AuditEntry::SkillReflectionCompleted {
-                agent_id: AGENT_ID.to_string(),
-                episodes_analysed: report.episodes_analysed,
-                patterns_found: report.patterns.len(),
-                proposals_generated: report.proposals_generated,
-            });
+
+            // Drive the real vita reflection into a fresh registry with
+            // auto-promotion OFF, so agent skills land as `Proposed`.
+            let proposed_at_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let registration = vita::run_self_improvement_reflection(
+                AGENT_ID,
+                &episodes,
+                &ReflectionConfig::default(),
+                &PromotionGateConfig {
+                    auto_promote_agent_skills: false,
+                },
+                &mut registry,
+                &mut log,
+                proposed_at_ns,
+            );
+
             println!("Reflection complete:");
-            println!("  episodes analysed : {}", report.episodes_analysed);
-            println!("  patterns found    : {}", report.patterns.len());
-            println!("  proposals generated: {}", report.proposals_generated);
-            for p in &report.patterns {
-                println!("\n  Pattern: {}", p.description);
-                if let Some(name) = &p.suggested_skill_name {
-                    println!("  Suggested skill name: {name}");
+            println!("  episodes analysed  : {}", registration.episodes_analysed);
+            println!("  patterns found     : {}", registration.patterns_found);
+            println!(
+                "  proposals generated: {}",
+                registration.proposals_generated
+            );
+            println!(
+                "  proposed (pending) : {}",
+                registration.registered_proposed_ids.len()
+            );
+
+            // E11↔E15: route each pending agent-authored proposal into the E15
+            // approval queue.  vita stops at registration (no `lifecycle` dep);
+            // the hosted kernel performs the queue hand-off here.
+            let mut queue = ApprovalQueue::new();
+            let mut bridge = SkillApprovalBridge::new();
+            for skill_id in &registration.registered_proposed_ids {
+                let entry = match registry.list_all().into_iter().find(|e| &e.id == skill_id) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if !matches!(entry.state, SkillState::Proposed) {
+                    continue;
+                }
+                let body_text = registry
+                    .load_body(skill_id)
+                    .ok()
+                    .map(|b| b.instructions.clone())
+                    .unwrap_or_default();
+                // Reconstruct the proposal that produced this registry entry so
+                // the bridge can convert it into a NewSkill queue proposal.
+                let source_episode = entry.provenance.source_episode.clone();
+                let skill_text = format!(
+                    "---\nname: {name}\ndescription: {desc}\n---\n{body}",
+                    name = entry.manifest.name,
+                    desc = entry.manifest.description,
+                    body = body_text,
+                );
+                let proposal = SkillProposal {
+                    skill_text,
+                    authored_by: SkillAuthor::Agent,
+                    proposed_at_ns: entry.provenance.proposed_at_ns,
+                    source_episode,
+                };
+                let outcome = skills::ProposalOutcome {
+                    artifact_id: Some(skill_id.clone()),
+                    action: ProposalAction::PendingApproval,
+                };
+                match bridge.enqueue_skill(&mut queue, &outcome, &proposal) {
+                    Ok(Some(id)) => {
+                        log.push(AuditEntry::ApprovalProposalQueued {
+                            agent_id: AGENT_ID.to_string(),
+                            proposal_id: id,
+                            kind: "new-skill".to_string(),
+                            provenance: "agent (dreaming-phase reflection)".to_string(),
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("skills: enqueue failed: {e}"),
                 }
             }
+            println!(
+                "  enqueued for approval: {} (anima-hosted skills queue)",
+                queue.pending().len()
+            );
+        }
+        Some("queue") | Some("approve") => {
+            // E11↔E15 bridge surface: demonstrate the SkillApprovalBridge driving
+            // a PendingApproval skill into the E15 ApprovalQueue and (for
+            // `approve`) promoting it back in the registry.
+            cmd_skills_approval(args, &mut log);
         }
         Some(sub) => {
             eprintln!("unknown skills subcommand: {sub:?}");
-            eprintln!("usage: skills {{list|info|register|promote|rollback|quarantine|kill-switch|reflect}}");
+            eprintln!(
+                "usage: skills {{list|info|register|promote|rollback|quarantine|\
+                 kill-switch|reflect|queue|approve <id>}}"
+            );
         }
     }
 
@@ -1312,6 +1471,319 @@ fn cmd_skills(args: &[String]) {
         println!("\nAudit log ({} entries):", log.len());
         for entry in log.entries() {
             println!("  {entry:?}");
+        }
+    }
+}
+
+// ── `anima tools` subcommand (E7 + Wave-1 actuators) ─────────────────────────
+
+/// Implements the `anima tools` CLI subcommand.
+///
+/// Surfaces the default tool registry — `web-search` plus the actuators browser
+/// family (`browser` / `browse` / `extract`) over a CI-safe
+/// [`actuators::browser::MockBrowserDriver`].
+///
+/// Subcommands:
+/// - `tools list`            — list every registered tool id
+/// - `tools browse <url>`    — fetch a page's readable text via the `browse` tool
+/// - `tools extract <url> <selector>` — extract elements via the `extract` tool
+fn cmd_tools(args: &[String]) {
+    use praxis::{Bus, ToolEnvelope};
+
+    let registry = build_default_tool_registry();
+
+    match args.first().map(String::as_str) {
+        Some("list") | None => {
+            let mut tools = registry.list();
+            tools.sort();
+            println!("Tool registry — registered tools:");
+            for id in &tools {
+                println!("  {id}");
+            }
+            println!("\nTotal tools: {}", tools.len());
+            println!(
+                "\n(browser tools use a MockBrowserDriver; try: \
+                 anima-hosted tools browse https://example.com/animaos)"
+            );
+        }
+        Some("browse") => {
+            let url = match args.get(1) {
+                Some(u) => u,
+                None => {
+                    eprintln!("usage: tools browse <url>");
+                    return;
+                }
+            };
+            let payload = serde_json::json!({ "url": url }).to_string().into_bytes();
+            let envelope = ToolEnvelope::new(Bus::Mcp, "browse", payload, 1);
+            match registry.dispatch(&envelope) {
+                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(v) => println!(
+                        "browse {url}:\n  text: {}",
+                        v.get("text").and_then(|t| t.as_str()).unwrap_or("(none)")
+                    ),
+                    Err(_) => println!("browse {url}: {}", String::from_utf8_lossy(&bytes)),
+                },
+                Err(e) => eprintln!("browse error: {e:?}"),
+            }
+        }
+        Some("extract") => {
+            let (url, selector) = match (args.get(1), args.get(2)) {
+                (Some(u), Some(s)) => (u, s),
+                _ => {
+                    eprintln!("usage: tools extract <url> <selector>");
+                    return;
+                }
+            };
+            let payload = serde_json::json!({ "url": url, "selector": selector })
+                .to_string()
+                .into_bytes();
+            let envelope = ToolEnvelope::new(Bus::Mcp, "extract", payload, 1);
+            match registry.dispatch(&envelope) {
+                Ok(bytes) => println!(
+                    "extract {url} [{selector}]:\n  {}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+                Err(e) => eprintln!("extract error: {e:?}"),
+            }
+        }
+        Some(sub) => {
+            eprintln!("unknown tools subcommand: {sub:?}");
+            eprintln!("usage: tools {{list|browse <url>|extract <url> <selector>}}");
+        }
+    }
+}
+
+/// Drives the E11↔E15 [`lifecycle::SkillApprovalBridge`] for the
+/// `skills queue` / `skills approve <id>` surfaces.
+///
+/// To keep the surface self-contained (the hosted `cmd_skills` registry is
+/// in-memory per invocation), this seeds one agent-authored `PendingApproval`
+/// skill, routes it through the bridge into a fresh [`lifecycle::ApprovalQueue`],
+/// and:
+/// - `queue`            — lists the pending proposals awaiting an operator.
+/// - `approve <id>`     — approves the proposal, promoting the skill in the
+///   registry (falls back to the single queued id when `<id>` is omitted).
+///
+/// Both paths emit the existing E15 `ApprovalProposal*` audit entries.
+fn cmd_skills_approval(args: &[String], log: &mut AuditLog) {
+    use lifecycle::approval::ApprovalQueue;
+    use lifecycle::skill_bridge::SkillApprovalBridge;
+    use skills::{
+        evaluate_skill_proposal, PromotionGateConfig, SkillAuthor, SkillContentScreen,
+        SkillProposal, SkillRegistry,
+    };
+
+    const AGENT_ID: &str = "anima";
+    const DEMO_SKILL: &str = "\
+---
+name: log-summariser
+description: Summarises overnight logs into a short operator digest.
+---
+
+## Steps
+
+1. Read the log window.
+2. Produce a concise digest.
+";
+
+    let mut registry = SkillRegistry::default();
+    let mut queue = ApprovalQueue::new();
+    let mut bridge = SkillApprovalBridge::new();
+
+    // Evaluate an agent-authored skill with auto-promotion OFF so it lands as
+    // PendingApproval and therefore needs an operator decision.
+    let proposal = SkillProposal {
+        skill_text: DEMO_SKILL.to_string(),
+        authored_by: SkillAuthor::Agent,
+        proposed_at_ns: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+        source_episode: None,
+    };
+    let outcome = match evaluate_skill_proposal(
+        proposal.clone(),
+        &mut registry,
+        &SkillContentScreen::default(),
+        &PromotionGateConfig {
+            auto_promote_agent_skills: false,
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skills: proposal evaluation failed: {e}");
+            return;
+        }
+    };
+
+    let queued_id = match bridge.enqueue_skill(&mut queue, &outcome, &proposal) {
+        Ok(Some(id)) => {
+            log.push(AuditEntry::ApprovalProposalQueued {
+                agent_id: AGENT_ID.to_string(),
+                proposal_id: id.clone(),
+                kind: "new-skill".to_string(),
+                provenance: "agent (skills reflection demo)".to_string(),
+            });
+            id
+        }
+        Ok(None) => {
+            println!("skills: proposal did not require approval (auto-promoted or rejected)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("skills: enqueue failed: {e}");
+            return;
+        }
+    };
+
+    match args.first().map(String::as_str) {
+        Some("queue") => {
+            println!("Approval queue — pending proposals:");
+            for p in queue.pending() {
+                println!(
+                    "  {id:<24}  provenance={prov:?}",
+                    id = p.id,
+                    prov = p.provenance
+                );
+            }
+            println!("\nPending: {}", queue.pending().len());
+            println!("Approve with: anima-hosted skills approve {queued_id}");
+        }
+        Some("approve") => {
+            // Use the operator-supplied id when present, else the single queued id.
+            let target = args
+                .get(1)
+                .map(|s| s.to_lowercase().replace(' ', "-"))
+                .unwrap_or_else(|| queued_id.clone());
+            match bridge.approve(
+                &mut queue,
+                &mut registry,
+                &target,
+                "operator approved via CLI",
+            ) {
+                Ok(()) => {
+                    log.push(AuditEntry::ApprovalProposalDecided {
+                        agent_id: AGENT_ID.to_string(),
+                        proposal_id: target.clone(),
+                        decision: "approved".to_string(),
+                        reason: "operator approved via CLI".to_string(),
+                    });
+                    let active = registry.list_active().len();
+                    println!("approved: {target} (skill promoted; {active} active skill(s))");
+                }
+                Err(e) => eprintln!("skills approve error: {e}"),
+            }
+        }
+        _ => unreachable!("cmd_skills_approval only called for queue/approve"),
+    }
+}
+
+// ── `anima ask` subcommand (E7 S7.4 — cortex invocation seam) ────────────────
+
+/// Implements the `anima ask "<task>"` subcommand.
+///
+/// Builds a [`vita::InvokeRequest`] (fresh task id, the agent id, the task text
+/// as the description, [`ToolSpec`]s derived from the default tool registry, and
+/// the agent's identity-memory document as the `identity` JSON), then runs it
+/// through a [`vita::ChatCortexBridge`] backed by a CI-safe fixture chat backend
+/// (live tool-calling backends are opt-in via `ANIMA_COMPAT_LIVE`).
+///
+/// Tool calls the cortex emits are routed back through the registry by
+/// [`cortex::RegistryToolDispatcher`].  On completion the output, the number of
+/// tool calls made, and a short audit tail are printed.
+///
+/// # CI safety
+///
+/// The shipped fixture backend returns text only, so in CI / fixture mode this
+/// returns a deterministic text answer (the fixture sentinel) without
+/// dispatching any tools.  That is expected; live backends drive real tool use.
+fn cmd_ask(args: &[String]) {
+    use cortex::{build_chat_cortex, RegistryToolDispatcher};
+    use vita::{CortexBackend, InvokeRequest};
+
+    const AGENT_ID: &str = "anima";
+
+    let task = args.join(" ");
+    let task = task.trim();
+    if task.is_empty() {
+        eprintln!("usage: anima-hosted ask \"<task>\"");
+        return;
+    }
+
+    // Tool registry + dispatcher seam (cortex tool calls → praxis registry).
+    let registry = Arc::new(build_default_tool_registry());
+    let dispatcher = RegistryToolDispatcher::new(Arc::clone(&registry));
+    let tools = dispatcher.tool_specs();
+
+    // Identity snapshot as JSON, used to frame the cortex system prompt.
+    let identity_path = IdentityMemory::default_path(AGENT_ID);
+    let identity_json = IdentityMemory::open(&identity_path)
+        .map(|store| store.to_json())
+        .unwrap_or(serde_json::Value::Null);
+
+    // Fresh task id for audit correlation.
+    let task_id = format!(
+        "ask-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let request = InvokeRequest {
+        task_id: task_id.clone(),
+        agent_id: AGENT_ID.to_string(),
+        description: task.to_string(),
+        tools,
+        identity: identity_json,
+        route_id: None,
+        memory_scope: None,
+        max_turns: None,
+        max_tool_calls: None,
+    };
+
+    // Seed the fixture so an offline `ask` always echoes a usable answer keyed
+    // on the task text; live backends ignore the fixture map entirely.
+    let fixtures = [(
+        task.to_string(),
+        vec![format!("(fixture cortex) acknowledged task: {task}")],
+    )];
+    let bridge = build_chat_cortex(
+        fixtures,
+        vita::DEFAULT_MAX_TURNS,
+        vita::DEFAULT_MAX_TOOL_CALLS,
+    );
+
+    let mut audit = AuditLog::new();
+    match bridge.invoke(request, &dispatcher, &mut audit) {
+        Ok(result) => {
+            println!("=== anima ask — cortex result ===");
+            println!("task_id        : {}", result.task_id);
+            println!("tool_calls_made: {}", result.tool_calls_made);
+            println!(
+                "latency_to_1st : {} ms",
+                result.latency_to_first_action.as_millis()
+            );
+            println!("\n--- output ---\n{}\n", result.output);
+            if !result.episode_summary.is_empty() {
+                println!("--- episode summary ---\n{}\n", result.episode_summary);
+            }
+
+            // Short audit tail (last few entries).
+            let entries = audit.entries();
+            let tail_start = entries.len().saturating_sub(5);
+            println!(
+                "--- audit tail ({} of {} entries) ---",
+                entries.len() - tail_start,
+                entries.len()
+            );
+            for entry in &entries[tail_start..] {
+                println!("  {entry:?}");
+            }
+        }
+        Err(e) => {
+            eprintln!("ask: cortex invocation failed: {e}");
         }
     }
 }
@@ -1337,6 +1809,18 @@ fn cmd_serve() {
     let provider = std::env::var("ANIMA_BACKEND").unwrap_or_else(|_| "mock".to_string());
     let backend = BackendFactory::from_env_or_mock(&provider);
 
+    // ── E9 S9.5 — per-tier router dispatch ────────────────────────────────────
+    // Resolve the cheap-local / mid-tier / frontier backends from the wizard's
+    // saved choices (overridable by ANIMA_{CHEAP,MID,FRONTIER}_BACKEND), then
+    // install them so the somatic loop dispatches each task to the bound tier.
+    let tier_choices = init::resolve_tier_choices(&agent_id);
+    let (cheap_b, mid_b, frontier_b) = tier_choices.clone().into_fixture_backends();
+    let tier_backends = vita::TierBackends::new(
+        Arc::clone(&cheap_b),
+        Arc::clone(&mid_b),
+        Arc::clone(&frontier_b),
+    );
+
     // The shared bridge: POSTed guidance lands in the very queue the loop drains.
     let bridge = SensoryBridge::new(HumanGuidance::new("operator-console"));
 
@@ -1348,10 +1832,20 @@ fn cmd_serve() {
         HumanGuidance::new("boot"),
         Arc::clone(&backend),
         None, // run forever
-    );
+    )
+    .with_tier_backends(tier_backends);
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
+
+    // E12: optionally enable drive-augmented arbitration (motivation) on the
+    // serving agent.  Off by default; opt in via ANIMA_MOTIVATION=1 so the
+    // existing gate behaviour is unchanged unless requested.
+    if env_flag("ANIMA_MOTIVATION") {
+        use vita::motivation_gate::MotivatedGate;
+        manager.enable_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        println!("  motivation: enabled (drive-augmented Striatal Gate)");
+    }
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
@@ -1373,6 +1867,12 @@ fn cmd_serve() {
         println!("  auth      : bearer token required (ANIMA_CONSOLE_TOKEN)");
     }
     println!("  backend   : {} ({})", backend.id(), backend.model_id());
+    println!(
+        "  tiers     : cheap-local={} mid-tier={} frontier={}",
+        cheap_b.id(),
+        mid_b.id(),
+        frontier_b.id()
+    );
     println!("  audit log : {}", audit_path.display());
     println!(
         "\nThe agent starts idle and sleeps until a sense wakes it. Send guidance —\n\
@@ -1664,7 +2164,6 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
-
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1678,6 +2177,16 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("skills") {
         cmd_skills(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("tools") {
+        cmd_tools(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("ask")
+        || args.first().map(String::as_str) == Some("cortex")
+    {
+        cmd_ask(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("serve") {

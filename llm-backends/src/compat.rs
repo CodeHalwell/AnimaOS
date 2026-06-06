@@ -250,6 +250,26 @@ impl OpenAiCompatibleBackend {
                 if let Some(id) = &m.tool_call_id {
                     v["tool_call_id"] = serde_json::Value::String(id.clone());
                 }
+                // Assistant turns that requested tools must replay those calls so
+                // the following tool-result messages are valid for OpenAI-compatible
+                // providers (correlated by id). Skipped when empty.
+                if !m.tool_calls.is_empty() {
+                    v["tool_calls"] = serde_json::Value::Array(
+                        m.tool_calls
+                            .iter()
+                            .map(|tc| {
+                                serde_json::json!({
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.name,
+                                        "arguments": tc.arguments,
+                                    },
+                                })
+                            })
+                            .collect(),
+                    );
+                }
                 v
             })
             .collect();

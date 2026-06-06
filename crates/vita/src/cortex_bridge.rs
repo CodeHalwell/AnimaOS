@@ -54,6 +54,14 @@ use serde::{Deserialize, Serialize};
 use crate::{push_defence_outcome, AuditEntry, AuditLog};
 use defence::{ActionKind, CortexProposal, DefenceLayer};
 
+// E7 S7.4 — Rust-native cortex tool-calling loop. These types come from the E8
+// chat/tool-calling abstraction in the `llm-backends` crate (std-only). They are
+// aliased to avoid colliding with the cortex-side [`ToolSpec`] defined above:
+// `LlmToolSpec` is the JSON-Schema-bearing tool definition the model sees, while
+// the cortex [`ToolSpec`] is the name+description pair carried in [`InvokeRequest`].
+use llm_backends::chat::{ChatBackend, ChatMessage, ToolSpec as LlmToolSpec};
+use scheduler::backend::CancellationToken;
+
 // ── ChildGuard ────────────────────────────────────────────────────────────────
 
 /// RAII guard that kills and reaps a child process on drop.
@@ -723,6 +731,303 @@ impl CortexBackend for MockCortexBridge {
     }
 }
 
+// ── Rust-native chat-backend cortex bridge (E7 S7.4) ──────────────────────────
+
+/// Default upper bound on Plan/Act/Observe turns when an [`InvokeRequest`] does
+/// not specify [`InvokeRequest::max_turns`].
+pub const DEFAULT_MAX_TURNS: u32 = 8;
+
+/// Default upper bound on total tool dispatches when an [`InvokeRequest`] does
+/// not specify [`InvokeRequest::max_tool_calls`].
+pub const DEFAULT_MAX_TOOL_CALLS: u32 = 16;
+
+/// A cortex backend that drives an E8 [`ChatBackend`] (Anthropic / Ollama /
+/// OpenAI-compatible) through a bounded Plan/Act/Observe loop with real tool
+/// dispatch.
+///
+/// This is the Rust-native counterpart to [`PythonCortexBridge`]: instead of
+/// spawning a Python subprocess, it runs the tool-calling loop in-process
+/// against the provider-agnostic [`ChatBackend`] tool-calling abstraction that
+/// E8 built, bridging the E7 tool layer to the E8 chat backends.
+///
+/// # Loop contract
+///
+/// 1. An initial conversation is built from `request.identity` (system framing)
+///    and `request.description` (the user turn).
+/// 2. The cortex [`ToolSpec`]s in [`InvokeRequest::tools`] are mapped to the
+///    llm-backends [`LlmToolSpec`](llm_backends::chat::ToolSpec) tool
+///    definitions the model sees (each gets a permissive JSON-Schema object).
+/// 3. On each turn the bridge calls
+///    [`ChatBackend::chat_complete`](llm_backends::chat::ChatBackend::chat_complete):
+///    - If the response carries tool calls, each is dispatched through
+///      `dispatch_tool`; the assistant tool-call turn and a [`ChatRole::Tool`]
+///      result message are appended to the conversation, `tool_calls_made` is
+///      incremented, and the first dispatch records `latency_to_first_action`.
+///      Dispatcher errors are surfaced back into the conversation (so the model
+///      can recover) rather than aborting the loop.
+///    - Otherwise the response is treated as the final answer:
+///      `output = response.content` and the loop ends.
+/// 4. The loop is bounded by `max_turns` and `max_tool_calls` (request values,
+///    falling back to the per-bridge defaults); on hitting a bound without a
+///    final answer it returns gracefully with the best output so far.
+///
+/// # CI safety
+///
+/// The bridge is provider-agnostic: it holds any `Arc<dyn ChatBackend>`. In CI
+/// the backend is a fixture
+/// ([`OpenAiCompatibleBackend::fixture`](llm_backends::compat::OpenAiCompatibleBackend::fixture))
+/// or a small scripted mock, so no network traffic occurs. Live providers run
+/// only when explicitly constructed and configured by the caller.
+pub struct ChatCortexBridge {
+    /// The chat/tool-calling backend the loop drives.
+    backend: Arc<dyn ChatBackend>,
+    /// Fallback turn bound when the request does not specify one.
+    default_max_turns: u32,
+    /// Fallback tool-call bound when the request does not specify one.
+    default_max_tool_calls: u32,
+    /// Optional defence layer. When `Some`, the final output is screened the
+    /// same way [`PythonCortexBridge`] / [`MockCortexBridge`] screen theirs,
+    /// so defence integration tests do not require Python.
+    defence: Option<Arc<Mutex<DefenceLayer>>>,
+}
+
+impl ChatCortexBridge {
+    /// Constructs a bridge over the given chat backend with the default turn /
+    /// tool-call bounds ([`DEFAULT_MAX_TURNS`], [`DEFAULT_MAX_TOOL_CALLS`]).
+    pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
+        Self {
+            backend,
+            default_max_turns: DEFAULT_MAX_TURNS,
+            default_max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            defence: None,
+        }
+    }
+
+    /// Builder: overrides the fallback turn / tool-call bounds used when an
+    /// [`InvokeRequest`] does not carry its own limits.
+    pub fn with_limits(mut self, max_turns: u32, max_tool_calls: u32) -> Self {
+        self.default_max_turns = max_turns;
+        self.default_max_tool_calls = max_tool_calls;
+        self
+    }
+
+    /// Builder: attaches a defence layer that screens the final output before it
+    /// is returned (mirrors the screening in the other bridges).
+    pub fn with_defence(mut self, layer: DefenceLayer) -> Self {
+        self.defence = Some(Arc::new(Mutex::new(layer)));
+        self
+    }
+
+    /// Builds the system framing message from the identity snapshot and task.
+    fn system_message(request: &InvokeRequest) -> ChatMessage {
+        // Render the identity snapshot compactly; fall back to a short note when
+        // it is null/empty so the system prompt is always well-formed.
+        let identity_blurb = if request.identity.is_null() {
+            String::new()
+        } else {
+            format!("\nIdentity context:\n{}", request.identity)
+        };
+        ChatMessage::system(format!(
+            "You are the cortex of an autonomous agent (task {task_id}). \
+             Use the provided tools to accomplish the user's task, then reply \
+             with a concise completion report. Call tools only when they help.{identity_blurb}",
+            task_id = request.task_id,
+        ))
+    }
+
+    /// Maps the cortex-side [`ToolSpec`]s onto the llm-backends tool definitions
+    /// the model sees. The cortex spec carries no parameter schema, so each tool
+    /// is advertised with a permissive object schema.
+    fn map_tools(tools: &[ToolSpec]) -> Vec<LlmToolSpec> {
+        tools
+            .iter()
+            .map(|t| LlmToolSpec {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": true,
+                }),
+            })
+            .collect()
+    }
+}
+
+impl CortexBackend for ChatCortexBridge {
+    fn invoke(
+        &self,
+        request: InvokeRequest,
+        dispatch_tool: &dyn ToolDispatcher,
+        audit: &mut AuditLog,
+    ) -> Result<CortexInvocationResult, CortexError> {
+        let task_id = request.task_id.clone();
+        let start = Instant::now();
+
+        // Resolve effective bounds: request overrides, else per-bridge defaults.
+        let max_turns = request.max_turns.unwrap_or(self.default_max_turns);
+        let max_tool_calls = request
+            .max_tool_calls
+            .unwrap_or(self.default_max_tool_calls);
+
+        // ── Build the initial conversation ────────────────────────────────────
+        let mut messages: Vec<ChatMessage> = vec![
+            Self::system_message(&request),
+            ChatMessage::user(request.description.clone()),
+        ];
+        let tools = Self::map_tools(&request.tools);
+
+        // A no-op cancellation token: the cortex loop runs to its own bounds.
+        let cancel = CancellationToken::new();
+
+        // ── Plan / Act / Observe ──────────────────────────────────────────────
+        let mut first_action_latency = Duration::ZERO;
+        let mut tool_calls_made = 0usize;
+        // Accumulated tool results — observable evidence for the reward-hacking
+        // detector (a non-empty list proves real work was done).
+        let mut observable_evidence: Vec<String> = Vec::new();
+        let mut output = String::new();
+        // `true` once we hit a bound (turns or tool calls) without a final
+        // answer, so the episode summary can record the truncation.
+        let mut truncated = false;
+
+        for _turn in 0..max_turns {
+            let response = match self.backend.chat_complete(&messages, &tools, &cancel) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Any backend failure (provider error, cancellation) maps to
+                    // a cortex fault, audited consistently with the other bridges.
+                    let error = format!("chat backend error: {e:?}");
+                    audit.push(AuditEntry::CortexFault {
+                        task_id: task_id.clone(),
+                        error: error.clone(),
+                    });
+                    return Err(CortexError::CortexFault(error));
+                }
+            };
+
+            if response.tool_calls.is_empty() {
+                // No tool calls → this is the final answer.
+                output = response.content;
+                break;
+            }
+
+            // Record the assistant turn that requested the tool call(s). The
+            // content may be empty for tool-only turns; preserve it verbatim so
+            // the provider sees a well-formed transcript. The tool_calls MUST be
+            // attached here: OpenAI-compatible providers reject the next request
+            // if the following tool-result messages are not preceded by an
+            // assistant turn declaring the matching tool_calls (by id).
+            messages.push(
+                ChatMessage::assistant(response.content.clone())
+                    .with_tool_calls(response.tool_calls.clone()),
+            );
+
+            let mut hit_tool_limit = false;
+            for call in &response.tool_calls {
+                if tool_calls_made >= max_tool_calls as usize {
+                    hit_tool_limit = true;
+                    break;
+                }
+                if tool_calls_made == 0 {
+                    first_action_latency = start.elapsed();
+                }
+                tool_calls_made += 1;
+
+                // Dispatch the tool. Errors are surfaced back into the
+                // conversation as the tool result so the model can recover,
+                // rather than aborting the whole invocation.
+                let result_text = match dispatch_tool.dispatch(&call.name, &call.arguments) {
+                    Ok(r) => {
+                        if !r.is_empty() {
+                            observable_evidence.push(format!("{}: {r}", call.name));
+                        }
+                        r
+                    }
+                    Err(e) => format!("[tool error: {e}]"),
+                };
+
+                messages.push(ChatMessage::tool_result(call.id.clone(), result_text));
+            }
+
+            if hit_tool_limit {
+                // Reached the tool-call ceiling mid-turn: stop gracefully and
+                // keep whatever textual content the model had emitted so far.
+                truncated = true;
+                if output.is_empty() {
+                    output = response.content;
+                }
+                break;
+            }
+        }
+
+        // Reaching here with an empty output and no break means we exhausted the
+        // turn budget without a final answer; mark it truncated for the summary.
+        if output.is_empty() && tool_calls_made > 0 {
+            truncated = true;
+        }
+
+        // ── Audit: invocation (with first-action latency) ─────────────────────
+        audit.push(AuditEntry::CortexInvoked {
+            task_id: task_id.clone(),
+            latency_to_first_action_ms: first_action_latency.as_millis() as u64,
+        });
+
+        // ── Defence screening (parity with the other bridges) ─────────────────
+        if let Some(ref dl) = self.defence {
+            let mut layer = dl
+                .lock()
+                .map_err(|_| CortexError::CortexFault("defence layer lock poisoned".to_string()))?;
+            let proposal = CortexProposal {
+                invocation_id: task_id.clone(),
+                intent: request.description.clone(),
+                action: ActionKind::CompletionClaim {
+                    summary: output.clone(),
+                },
+                tool_calls_completed: tool_calls_made,
+                observable_evidence: observable_evidence.clone(),
+            };
+            let outcome = layer.screen(&proposal);
+            let vetoed = outcome.is_vetoed();
+            let veto_reason = format!("defence layer veto by detector '{}'", outcome.detector);
+            push_defence_outcome(
+                audit,
+                &outcome,
+                &request.agent_id,
+                &task_id,
+                "cortex chat-loop output",
+                "CortexAction",
+                layer.config.veto_window_secs,
+            );
+            if vetoed {
+                return Err(CortexError::CortexFault(veto_reason));
+            }
+        }
+
+        // ── Synthesise the episode summary ────────────────────────────────────
+        let episode_summary = format!(
+            "task_id={task_id} description={:?} tool_calls={tool_calls_made} \
+             evidence={} truncated={truncated} duration_ms={}",
+            request.description,
+            observable_evidence.len(),
+            start.elapsed().as_millis(),
+        );
+
+        audit.push(AuditEntry::CortexCompleted {
+            task_id: task_id.clone(),
+            tool_calls: tool_calls_made,
+            summary_len: episode_summary.len(),
+        });
+
+        Ok(CortexInvocationResult {
+            task_id,
+            output,
+            episode_summary,
+            tool_calls_made,
+            latency_to_first_action: first_action_latency,
+        })
+    }
+}
+
 // ── Thread-safe wrapper ───────────────────────────────────────────────────────
 
 /// A `Send + Sync` handle to a heap-allocated [`CortexBackend`].
@@ -1067,5 +1372,315 @@ mod tests {
         assert_eq!(next_id, 2, "counter must be incremented to 2");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E7 S7.4 — ChatCortexBridge (Rust-native tool-calling loop) ────────────
+    //
+    // These tests drive the bridge with a scripted `MockChatBackend` so the
+    // whole Plan/Act/Observe loop is exercised hermetically (no network). The
+    // shipping `OpenAiCompatibleBackend::fixture` only ever returns text turns,
+    // so a scripted mock is required to test the tool-calling branch.
+
+    use llm_backends::chat::{ChatResponse, FinishReason, ToolCall};
+    use scheduler::backend::{CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion};
+    use std::sync::Mutex;
+
+    /// A scripted [`ChatBackend`] for the cortex-loop tests.
+    ///
+    /// Each call to [`ChatBackend::chat_complete`] pops the next response from
+    /// `script`. When the script is exhausted it either keeps returning a
+    /// standing "loop" response (when `repeat_last` is set — used to prove the
+    /// loop terminates at `max_tool_calls`) or a terminal text answer. A `fault`
+    /// flag forces every call to return an error, exercising the failure path.
+    struct MockChatBackend {
+        /// Remaining scripted responses (popped front-to-back).
+        script: Mutex<std::collections::VecDeque<ChatResponse>>,
+        /// When `Some`, returned for every call once the script is exhausted.
+        repeat: Option<ChatResponse>,
+        /// When `true`, every call returns a provider error.
+        fault: bool,
+    }
+
+    impl MockChatBackend {
+        /// A backend that returns the given responses in order, then a terminal
+        /// text answer ("done") forever.
+        fn scripted(responses: Vec<ChatResponse>) -> Self {
+            Self {
+                script: Mutex::new(responses.into_iter().collect()),
+                repeat: Some(text_response("done")),
+                fault: false,
+            }
+        }
+
+        /// A backend that always returns `resp` (used to prove loop bounding).
+        fn always(resp: ChatResponse) -> Self {
+            Self {
+                script: Mutex::new(std::collections::VecDeque::new()),
+                repeat: Some(resp),
+                fault: false,
+            }
+        }
+
+        /// A backend whose every call fails.
+        fn faulty() -> Self {
+            Self {
+                script: Mutex::new(std::collections::VecDeque::new()),
+                repeat: None,
+                fault: true,
+            }
+        }
+    }
+
+    fn text_response(content: &str) -> ChatResponse {
+        ChatResponse {
+            content: content.to_string(),
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            model: "mock".to_string(),
+            usage_tokens: None,
+        }
+    }
+
+    fn tool_response(id: &str, name: &str, arguments: &str) -> ChatResponse {
+        ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+            model: "mock".to_string(),
+            usage_tokens: None,
+        }
+    }
+
+    impl LlmBackend for MockChatBackend {
+        fn id(&self) -> &'static str {
+            "mock-chat"
+        }
+
+        fn stream_completion<'a>(
+            &'a self,
+            _prompt: &'a str,
+            _cancel: &'a CancellationToken,
+        ) -> CompletionFuture<'a> {
+            // Not exercised by the cortex loop (it uses chat_complete), but the
+            // trait requires it.
+            Box::pin(async move { Ok(vec![StreamingCompletion::Done]) })
+        }
+    }
+
+    impl ChatBackend for MockChatBackend {
+        fn chat_complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[LlmToolSpec],
+            _cancel: &CancellationToken,
+        ) -> Result<ChatResponse, LlmBackendError> {
+            if self.fault {
+                return Err(LlmBackendError::Provider(
+                    "scripted backend fault".to_string(),
+                ));
+            }
+            let mut q = self.script.lock().expect("script poisoned");
+            if let Some(next) = q.pop_front() {
+                Ok(next)
+            } else if let Some(repeat) = &self.repeat {
+                Ok(repeat.clone())
+            } else {
+                Err(LlmBackendError::Provider("script exhausted".to_string()))
+            }
+        }
+    }
+
+    /// (a) One tool call then a final answer ⇒ exactly one dispatch, and the
+    /// returned output is the model's final textual answer.
+    #[test]
+    fn chat_cortex_one_tool_call_then_final_answer() {
+        let backend = Arc::new(MockChatBackend::scripted(vec![
+            tool_response("call-1", "echo", r#"{"payload":"hi"}"#),
+            text_response("All done after one tool call."),
+        ]));
+        let bridge = ChatCortexBridge::new(backend);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let result = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect("invocation must succeed");
+
+        assert_eq!(result.tool_calls_made, 1, "exactly one dispatch expected");
+        assert_eq!(result.output, "All done after one tool call.");
+        // Audit parity with the other bridges: invoked + completed entries.
+        assert!(audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::CortexInvoked { .. })));
+        assert!(audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::CortexCompleted { .. })));
+        assert!(!result.episode_summary.is_empty());
+    }
+
+    /// (b) A final answer on the first turn ⇒ zero tool calls.
+    #[test]
+    fn chat_cortex_immediate_final_answer_makes_no_tool_calls() {
+        let backend = Arc::new(MockChatBackend::scripted(vec![text_response(
+            "Answer with no tools.",
+        )]));
+        let bridge = ChatCortexBridge::new(backend);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let result = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect("invocation must succeed");
+
+        assert_eq!(result.tool_calls_made, 0, "no tool calls expected");
+        assert_eq!(result.output, "Answer with no tools.");
+        assert_eq!(
+            result.latency_to_first_action,
+            Duration::ZERO,
+            "no first action ⇒ zero latency"
+        );
+    }
+
+    /// (c) A backend that keeps requesting tools must stop at `max_tool_calls`
+    /// rather than looping forever.
+    #[test]
+    fn chat_cortex_stops_at_max_tool_calls() {
+        // The backend always asks for one more `clock` call and never answers.
+        let backend = Arc::new(MockChatBackend::always(tool_response(
+            "loop-call",
+            "clock",
+            "{}",
+        )));
+        // Generous turn budget so the *tool-call* bound is the one that bites.
+        let bridge = ChatCortexBridge::new(backend).with_limits(100, 3);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let result = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect("invocation must return gracefully, not hang");
+
+        assert_eq!(
+            result.tool_calls_made, 3,
+            "must stop exactly at the max_tool_calls bound"
+        );
+        // Still produces a completed entry (graceful, bounded termination).
+        assert!(audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::CortexCompleted { .. })));
+    }
+
+    /// (c') The request's own `max_tool_calls` overrides the bridge default.
+    #[test]
+    fn chat_cortex_request_max_tool_calls_overrides_default() {
+        let backend = Arc::new(MockChatBackend::always(tool_response(
+            "loop-call",
+            "clock",
+            "{}",
+        )));
+        // Bridge default is high; the request pins it to 2.
+        let bridge = ChatCortexBridge::new(backend).with_limits(100, 50);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let mut req = two_tool_request();
+        req.max_tool_calls = Some(2);
+        req.max_turns = Some(100);
+
+        let result = bridge
+            .invoke(req, &dispatcher, &mut audit)
+            .expect("invocation must return gracefully");
+
+        assert_eq!(result.tool_calls_made, 2, "request bound must win");
+    }
+
+    /// (d) A dispatcher error is surfaced back into the conversation and the
+    /// loop continues to a normal final answer — no panic, no failure.
+    #[test]
+    fn chat_cortex_dispatcher_error_is_surfaced_not_fatal() {
+        // First the model calls an unknown tool (dispatcher returns Err), then
+        // it produces a final answer.
+        let backend = Arc::new(MockChatBackend::scripted(vec![
+            tool_response("call-x", "does-not-exist", "{}"),
+            text_response("Recovered after the tool error."),
+        ]));
+        let bridge = ChatCortexBridge::new(backend);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let result = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect("dispatcher error must not abort the invocation");
+
+        assert_eq!(result.tool_calls_made, 1, "the failed call still counts");
+        assert_eq!(result.output, "Recovered after the tool error.");
+        // The failure path produces no observable evidence, so the summary
+        // records evidence=0 while the call still occurred.
+        assert!(result.episode_summary.contains("tool_calls=1"));
+    }
+
+    /// (e) A backend failure maps to [`CortexError::CortexFault`] and is audited.
+    #[test]
+    fn chat_cortex_backend_failure_maps_to_cortex_fault() {
+        let backend = Arc::new(MockChatBackend::faulty());
+        let bridge = ChatCortexBridge::new(backend);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let err = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect_err("a backend failure must surface as an error");
+
+        assert!(
+            matches!(err, CortexError::CortexFault(_)),
+            "backend failure must map to CortexFault, got {err:?}"
+        );
+        assert!(
+            audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::CortexFault { .. })),
+            "the fault must be recorded in the audit log"
+        );
+    }
+
+    /// A two-call plan (tool, tool, then answer) accumulates two dispatches and
+    /// records the first-action latency in the audit log — end-to-end parity
+    /// with the contract the Python/Mock bridges satisfy.
+    #[test]
+    fn chat_cortex_multi_tool_plan_records_latency_and_evidence() {
+        let backend = Arc::new(MockChatBackend::scripted(vec![
+            tool_response("c1", "clock", "{}"),
+            tool_response("c2", "echo", r#"{"payload":"second"}"#),
+            text_response("Two tools used."),
+        ]));
+        let bridge = ChatCortexBridge::new(backend);
+        let dispatcher = InProcessDispatcher;
+        let mut audit = AuditLog::new();
+
+        let result = bridge
+            .invoke(two_tool_request(), &dispatcher, &mut audit)
+            .expect("invocation must succeed");
+
+        assert_eq!(result.tool_calls_made, 2);
+        assert_eq!(result.output, "Two tools used.");
+        // Both successful dispatches are recorded as observable evidence.
+        assert!(
+            result.episode_summary.contains("evidence=2"),
+            "summary should record two evidence items: {}",
+            result.episode_summary
+        );
+        // A CortexInvoked entry carrying the first-action latency must exist.
+        assert!(audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::CortexInvoked { .. })));
     }
 }

@@ -215,8 +215,8 @@ pub fn run_align_eval(args: AlignEvalArgs) -> Result<()> {
         println!("━━━ Alignment Evaluation Harness (E13 / S13.3) ━━━");
         println!();
         println!(
-            "  {:8}  {:38}  {:10}  {:10}  {}",
-            "ID", "Label", "Expected", "Actual", "Pass"
+            "  {:8}  {:38}  {:10}  {:10}  Pass",
+            "ID", "Label", "Expected", "Actual"
         );
         println!("  {}", "─".repeat(80));
     }
@@ -291,7 +291,11 @@ pub fn run_align_eval(args: AlignEvalArgs) -> Result<()> {
             failed,
             pass_rate * 100.0,
             args.threshold * 100.0,
-            if above_threshold { "✅ PASS" } else { "❌ FAIL" }
+            if above_threshold {
+                "✅ PASS"
+            } else {
+                "❌ FAIL"
+            }
         );
         println!();
     }

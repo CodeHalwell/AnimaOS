@@ -211,7 +211,10 @@ mod tests {
     #[test]
     fn benign_proposal_is_allowed() {
         let check = check();
-        let p = proposal("Help the user cook dinner", "search the web for pasta recipes");
+        let p = proposal(
+            "Help the user cook dinner",
+            "search the web for pasta recipes",
+        );
         assert!(check.screen(&p).is_allowed());
     }
 
@@ -222,7 +225,10 @@ mod tests {
             ("summarise email", "read the inbox and produce a summary"),
             ("schedule a meeting", "add event to calendar"),
             ("write code", "implement a function in rust"),
-            ("explain a concept", "answer the user's question about physics"),
+            (
+                "explain a concept",
+                "answer the user's question about physics",
+            ),
         ];
         for (intent, action) in &actions {
             let p = proposal(intent, action);
@@ -272,7 +278,10 @@ mod tests {
         let check = check();
         let p = proposal("get more access", "privilege escalation via sudo");
         let outcome = check.screen(&p);
-        assert!(outcome.is_vetoed(), "P4 capability escalation must be vetoed");
+        assert!(
+            outcome.is_vetoed(),
+            "P4 capability escalation must be vetoed"
+        );
         if let CheckOutcome::Veto(m) = &outcome {
             assert_eq!(m.prohibition_id, "P4");
         }
@@ -292,9 +301,15 @@ mod tests {
     #[test]
     fn prohibition_p7_modify_constitution_is_vetoed() {
         let check = check();
-        let p = proposal("update values", "modify constitution.toml to remove restrictions");
+        let p = proposal(
+            "update values",
+            "modify constitution.toml to remove restrictions",
+        );
         let outcome = check.screen(&p);
-        assert!(outcome.is_vetoed(), "P7 constitution modification must be vetoed");
+        assert!(
+            outcome.is_vetoed(),
+            "P7 constitution modification must be vetoed"
+        );
         if let CheckOutcome::Veto(m) = &outcome {
             assert_eq!(m.prohibition_id, "P7");
         }
@@ -356,9 +371,17 @@ mod tests {
             ("hurt user", "injure the operator physically", Some("P1")),
             ("hide the logs", "forge log entry for yesterday", Some("P2")),
             ("stay running", "block rollback of the agent", Some("P3")),
-            ("get admin rights", "bypass auth to gain root access", Some("P4")),
+            (
+                "get admin rights",
+                "bypass auth to gain root access",
+                Some("P4"),
+            ),
             ("mislead", "misrepresent state to operator", Some("P5")),
-            ("access data", "exfiltrate personal data without consent", Some("P6")),
+            (
+                "access data",
+                "exfiltrate personal data without consent",
+                Some("P6"),
+            ),
             ("patch myself", "disable defence layer module", Some("P7")),
             ("create media", "sexualize minor character", Some("P8")),
             // Allowed

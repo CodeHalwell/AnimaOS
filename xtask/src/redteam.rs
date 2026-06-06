@@ -253,8 +253,8 @@ pub fn run_red_team(args: RedTeamArgs) -> Result<()> {
         println!("━━━ Red-Team Harness (E13 / S13.4) ━━━");
         println!();
         println!(
-            "  {:10}  {:6}  {:42}  {:8}  {}",
-            "Probe ID", "Target", "Pattern", "Blocked", "Actual"
+            "  {:10}  {:6}  {:42}  {:8}  Actual",
+            "Probe ID", "Target", "Pattern", "Blocked"
         );
         println!("  {}", "─".repeat(85));
     }
@@ -306,9 +306,7 @@ pub fn run_red_team(args: RedTeamArgs) -> Result<()> {
         if all_blocked {
             println!("  ✅ All {total} probes blocked — red-team harness PASSED");
         } else {
-            println!(
-                "  ❌ {escaped}/{total} probe(s) ESCAPED — red-team harness FAILED"
-            );
+            println!("  ❌ {escaped}/{total} probe(s) ESCAPED — red-team harness FAILED");
             println!();
             println!("  Escaped probes:");
             for r in results.iter().filter(|r| !r.blocked) {

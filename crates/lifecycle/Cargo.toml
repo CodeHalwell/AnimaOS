@@ -7,6 +7,10 @@ description = "E15 — Operator trust & agent lifecycle: digest, replay, snapsho
 
 [dependencies]
 vita = { path = "../vita" }
+# E15↔E11 bridge: lifecycle owns the approval queue and routes E11 skill/tool
+# proposals into it. `skills` depends only on `praxis` + `serde` (no path to
+# `vita`/`lifecycle`), so this edge is acyclic — verified via `cargo metadata`.
+skills = { path = "../skills" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

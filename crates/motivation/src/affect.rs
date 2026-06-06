@@ -226,7 +226,7 @@ mod tests {
             let affect = AffectState::from_drives(&snap);
             let nudge = affect.gate_threshold_nudge();
             assert!(
-                nudge >= 0.9 && nudge <= 1.1,
+                (0.9..=1.1).contains(&nudge),
                 "nudge must be in [0.9, 1.1], got {nudge}"
             );
         }

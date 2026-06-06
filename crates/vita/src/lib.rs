@@ -15,6 +15,8 @@ pub mod identity;
 pub mod kv_gate;
 #[cfg(feature = "std")]
 pub mod metacognition;
+/// E12 — Motivation ↔ Striatal Gate integration (drive-augmented arbitration).
+pub mod motivation_gate;
 #[cfg(feature = "std")]
 pub mod prospective;
 pub mod router;
@@ -27,9 +29,9 @@ pub mod watchdog;
 pub use audit::{AuditEntry, AuditLog};
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
-    archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
+    archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
-    PythonCortexBridge, ToolDispatcher, ToolSpec,
+    PythonCortexBridge, ToolDispatcher, ToolSpec, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURNS,
 };
 #[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;
@@ -43,6 +45,7 @@ pub use gate::{
     record_gate_decision, CostClass, EventFeatures, Gate, GateConfig, GateDecision, GateOverride,
     HomeostaticSignals, SemanticClass, ThresholdGate,
 };
+// E12 — Motivation ↔ Striatal Gate: drive-augmented arbitration types.
 pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
@@ -53,16 +56,27 @@ pub use kv_gate::{
 };
 #[cfg(feature = "std")]
 pub use metacognition::{CalibrationRecord, ConfidenceScore, ConfidenceTracker, HelpRequest};
+pub use motivation_gate::{candidate_from_event, MotivatedGate};
 #[cfg(feature = "std")]
 pub use prospective::{
     inject_due_intentions, CompletionOutcome, Intention, IntentionStore, IntentionStoreError,
     DEFAULT_OVERDUE_GRACE_NS,
 };
+#[cfg(feature = "std")]
+pub use router::TierBackends;
 pub use router::{
-    build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
-    validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
-    RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
+    build_routed_request, default_routes, model_selector_for_cost_class,
+    record_modulated_router_decision, record_router_decision, validate_route, MemoryScope,
+    ModelSelector, ModulationDecision, PromptScaffold, Route, RouteError, RouteId, Router,
+    StaticRouter, TerminationPolicy, ToolScope,
 };
+/// Object-safe alias for the provider-agnostic LLM backend trait.
+///
+/// [`router::TierBackends`] stores `Arc<dyn LlmBackendRef>` per tier; the alias
+/// keeps the router module decoupled from the `scheduler` crate path while
+/// pointing at the very same trait the rest of `vita` already uses
+/// ([`scheduler::backend::LlmBackend`]).
+pub use scheduler::LlmBackend as LlmBackendRef;
 #[cfg(feature = "std")]
 pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
@@ -88,7 +102,12 @@ use memory::{
 };
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
+#[cfg(feature = "std")]
+use skills::{EpisodeSummary, PromotionGateConfig, ReflectionConfig, SkillRegistry};
 use sleep::{CompilationContext, DreamContext, PruningContext, ReplayContext};
+
+#[cfg(feature = "std")]
+pub use sleep::{run_self_improvement_reflection, ReflectionRegistration};
 
 /// Lifecycle runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +215,84 @@ pub struct LifecycleManager {
     /// (sensors are inherently process-global resources).
     #[cfg(feature = "std")]
     pub sensor_bundle: Option<Arc<InteroceptiveSensorBundle>>,
+    /// Optional E12 motivated Striatal Gate (drive-augmented arbitration).
+    ///
+    /// `None` by default — when absent the somatic loop's gate behaviour is
+    /// byte-for-byte identical to before this integration.  Install it
+    /// additively via [`LifecycleManager::enable_motivation`] /
+    /// [`LifecycleManager::with_motivation`].  When `Some`, each somatic-loop
+    /// iteration refreshes the gate's drive snapshot from the current
+    /// interoceptive reading and pushes [`AuditEntry::DriveStateSnapshot`] +
+    /// [`AuditEntry::AffectStateSnapshot`] entries.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` (mirroring `task_cancel`) so
+    /// `LifecycleManager::clone()` shares one gate — drive satiation/mastery
+    /// state is inherently agent-global — and so the `&mut` `update_signals`
+    /// call and the `&self` `decide_motivated` call can both go through it.
+    #[cfg(feature = "std")]
+    pub motivated_gate: Option<Arc<Mutex<MotivatedGate>>>,
+    /// Optional E9 S9.5 per-tier backend map (router-aware dispatch).
+    ///
+    /// `None` by default — when absent, every task dispatches through the single
+    /// [`LifecycleManager::backend`], so behaviour is byte-for-byte identical to
+    /// before this integration.  Install it additively via
+    /// [`LifecycleManager::with_tier_backends`] /
+    /// [`LifecycleManager::set_tier_backends`].  When `Some`, the task-dispatch
+    /// path resolves the gate's [`CostClass`] (via [`ThresholdGate`]) to a
+    /// [`ModelSelector`] tier and dispatches to the backend bound to that tier,
+    /// emitting a [`AuditEntry::RouterDecision`] recording the selected tier.
+    ///
+    /// Wrapped only in the map's own `Arc`s (each tier backend is already
+    /// `Arc<dyn LlmBackendRef>`), so `LifecycleManager::clone()` shares the
+    /// backends — consistent with the single-backend field.
+    #[cfg(feature = "std")]
+    pub tier_backends: Option<router::TierBackends>,
+    /// Optional E11 (S11.5) self-improvement skill registry.
+    ///
+    /// `None` by default — when absent, the Dreaming sleep phase runs exactly
+    /// as before (no reflection, no skill registration), so behaviour is
+    /// byte-for-byte identical to before this integration.  Install it
+    /// additively via [`LifecycleManager::enable_skill_reflection`] /
+    /// [`LifecycleManager::with_skill_registry`].  When `Some`, each sleep
+    /// cycle's Dreaming phase reflects over the buffered
+    /// [`recent_episode_summaries`](Self::recent_episode_summaries), drafts
+    /// skills for friction patterns above threshold, and registers
+    /// agent-authored `Proposed` drafts into this registry (emitting
+    /// `SkillReflectionCompleted` + `SkillRegistered` audit entries).
+    ///
+    /// `vita` never routes the resulting pending proposals into the E15
+    /// approval queue — that would require a `vita → lifecycle` dependency and
+    /// create a cycle.  The hosted kernel (which may depend on both) drains the
+    /// registry's pending agent-authored skills through
+    /// `lifecycle::SkillApprovalBridge` instead.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` (mirroring `task_cancel`) because
+    /// [`SkillRegistry`] is not `Clone`, so `LifecycleManager::clone()` shares
+    /// one registry — consistent with the other shared-state fields.
+    #[cfg(feature = "std")]
+    pub skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
+    /// Reflection configuration applied during the Dreaming phase (E11 S11.5).
+    ///
+    /// Only consulted when [`skill_registry`](Self::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub reflection_config: ReflectionConfig,
+    /// Promotion-gate configuration for agent-authored skill drafts (E11 S11.5).
+    ///
+    /// Defaults to operator gating (`auto_promote_agent_skills: false`) so
+    /// reflection-authored skills land as `Proposed` and await approval through
+    /// the hosted approval-queue bridge.  Only consulted when
+    /// [`skill_registry`](Self::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub promotion_gate_config: PromotionGateConfig,
+    /// Buffer of recent episode summaries the Dreaming-phase reflection consumes
+    /// (E11 S11.5).
+    ///
+    /// Callers push summaries via
+    /// [`record_episode_summary`](Self::record_episode_summary) as episodes
+    /// complete.  Empty by default, so reflection is a no-op until episodes are
+    /// recorded.
+    #[cfg(feature = "std")]
+    pub recent_episode_summaries: Vec<EpisodeSummary>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -269,7 +366,160 @@ impl LifecycleManager {
             last_pressure_level: memory::MemoryPressureEvent::Normal,
             #[cfg(feature = "std")]
             sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
+            #[cfg(feature = "std")]
+            motivated_gate: None::<Arc<Mutex<MotivatedGate>>>,
+            #[cfg(feature = "std")]
+            tier_backends: None::<router::TierBackends>,
+            #[cfg(feature = "std")]
+            skill_registry: None::<Arc<Mutex<SkillRegistry>>>,
+            #[cfg(feature = "std")]
+            reflection_config: ReflectionConfig::default(),
+            // Operator gating by default: agent skills land as `Proposed`.
+            #[cfg(feature = "std")]
+            promotion_gate_config: PromotionGateConfig {
+                auto_promote_agent_skills: false,
+            },
+            #[cfg(feature = "std")]
+            recent_episode_summaries: Vec::new(),
         }
+    }
+
+    /// Installs the E9 S9.5 per-tier backend map on this manager (additive).
+    ///
+    /// After this call, the task-dispatch path selects the LLM backend bound to
+    /// the gate decision's [`CostClass`] tier instead of the single
+    /// [`LifecycleManager::backend`].  Leaves the constructor signature
+    /// untouched — call this after [`LifecycleManager::new`].
+    ///
+    /// Use [`router::TierBackends::uniform`] to point all three tiers at one
+    /// backend for backward-compatible behaviour through the new code path.
+    #[cfg(feature = "std")]
+    pub fn set_tier_backends(&mut self, tiers: router::TierBackends) {
+        self.tier_backends = Some(tiers);
+    }
+
+    /// Builder variant of [`LifecycleManager::set_tier_backends`] returning
+    /// `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_tier_backends(mut self, tiers: router::TierBackends) -> Self {
+        self.set_tier_backends(tiers);
+        self
+    }
+
+    /// `true` when the per-tier backend map is installed and active.
+    #[cfg(feature = "std")]
+    pub fn tier_dispatch_enabled(&self) -> bool {
+        self.tier_backends.is_some()
+    }
+
+    /// Enables the E12 motivated Striatal Gate on this manager (additive).
+    ///
+    /// Installs the supplied [`MotivatedGate`] so that subsequent
+    /// [`somatic_execution_loop`] iterations route gate decisions through the
+    /// drive hierarchy and emit drive/affect audit entries.  Leaves the
+    /// constructor signature untouched — call this after [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn enable_motivation(&mut self, gate: MotivatedGate) {
+        self.motivated_gate = Some(Arc::new(Mutex::new(gate)));
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_motivation`] returning
+    /// `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_motivation(mut self, gate: MotivatedGate) -> Self {
+        self.enable_motivation(gate);
+        self
+    }
+
+    /// `true` when the motivated Striatal Gate is installed and active.
+    #[cfg(feature = "std")]
+    pub fn motivation_enabled(&self) -> bool {
+        self.motivated_gate.is_some()
+    }
+
+    // ── E11 S11.5 — Dreaming-phase self-improvement reflection ────────────────
+
+    /// Installs an E11 [`SkillRegistry`] on this manager (additive).
+    ///
+    /// After this call the Dreaming sleep phase reflects over the buffered
+    /// episode summaries and registers agent-authored skill drafts into this
+    /// registry.  Leaves the constructor signature untouched — call this after
+    /// [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn enable_skill_reflection(&mut self, registry: SkillRegistry) {
+        self.skill_registry = Some(Arc::new(Mutex::new(registry)));
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_skill_reflection`]
+    /// returning `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_skill_registry(mut self, registry: SkillRegistry) -> Self {
+        self.enable_skill_reflection(registry);
+        self
+    }
+
+    /// `true` when a skill registry is installed and the Dreaming phase will
+    /// run self-improvement reflection.
+    #[cfg(feature = "std")]
+    pub fn skill_reflection_enabled(&self) -> bool {
+        self.skill_registry.is_some()
+    }
+
+    /// Returns a clone of the shared skill-registry handle, if installed.
+    ///
+    /// The hosted kernel uses this after a sleep cycle to drain the registry's
+    /// pending agent-authored proposals into the E15 approval queue (via
+    /// `lifecycle::SkillApprovalBridge`), keeping the `vita → lifecycle` edge
+    /// absent and the dependency graph acyclic.
+    #[cfg(feature = "std")]
+    pub fn skill_registry_handle(&self) -> Option<Arc<Mutex<SkillRegistry>>> {
+        self.skill_registry.clone()
+    }
+
+    /// Buffers one episode summary for the next Dreaming-phase reflection pass
+    /// (E11 S11.5).  No-op semantics until a skill registry is installed (the
+    /// summaries are still buffered, but reflection only runs when a registry
+    /// is present).
+    #[cfg(feature = "std")]
+    pub fn record_episode_summary(&mut self, summary: EpisodeSummary) {
+        self.recent_episode_summaries.push(summary);
+    }
+
+    /// Run the E11 Dreaming-phase self-improvement reflection (S11.5).
+    ///
+    /// When a [`SkillRegistry`] is installed, reflects over the buffered
+    /// [`recent_episode_summaries`](Self::recent_episode_summaries) via
+    /// [`sleep::run_self_improvement_reflection`], drafting and registering
+    /// agent-authored `Proposed` skills and emitting the existing
+    /// `SkillReflectionCompleted` and `SkillRegistered` audit entries.  Returns
+    /// the resulting [`ReflectionRegistration`].
+    ///
+    /// When no registry is installed this is a no-op returning the default
+    /// (empty) registration, so the Dreaming phase's existing behaviour is
+    /// untouched.
+    #[cfg(feature = "std")]
+    fn run_dreaming_reflection(&mut self) -> ReflectionRegistration {
+        let Some(registry) = self.skill_registry.clone() else {
+            return ReflectionRegistration::default();
+        };
+        if self.recent_episode_summaries.is_empty() {
+            return ReflectionRegistration::default();
+        }
+        let proposed_at_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let agent_id = self.agent_id.clone();
+        let mut guard = registry.lock().expect("skill_registry poisoned");
+        sleep::run_self_improvement_reflection(
+            &agent_id,
+            &self.recent_episode_summaries,
+            &self.reflection_config,
+            &self.promotion_gate_config,
+            &mut guard,
+            &mut self.audit,
+            proposed_at_ns,
+        )
     }
 
     /// Returns a clone of the cancellation handle for the dispatch currently
@@ -390,6 +640,11 @@ impl LifecycleManager {
                     self.l1_memory.insert(key.clone(), node.clone());
                 }
             }
+
+            // E11 S11.5: Dreaming-phase self-improvement reflection.  No-op
+            // unless a skill registry is installed and episodes are buffered.
+            #[cfg(feature = "std")]
+            let _ = self.run_dreaming_reflection();
         }
         Ok(())
     }
@@ -484,6 +739,11 @@ impl LifecycleManager {
             }
         }
 
+        // E11 S11.5: Dreaming-phase self-improvement reflection.  No-op unless a
+        // skill registry is installed and episodes are buffered.
+        #[cfg(feature = "std")]
+        let _ = self.run_dreaming_reflection();
+
         report
     }
 
@@ -491,6 +751,72 @@ impl LifecycleManager {
         self.max_iterations
             .map(|limit| self.iterations >= limit)
             .unwrap_or(false)
+    }
+
+    /// Resolve the LLM backend used to dispatch a task (E9 S9.5).
+    ///
+    /// When the per-tier backend map is **absent**, returns a clone of the
+    /// single [`LifecycleManager::backend`] — identical to the legacy path.
+    ///
+    /// When the map is **present**, derives the gate [`CostClass`] for the task's
+    /// MLFQ priority tier (via [`cost_class_for_mlfq_tier`]), maps it onto the
+    /// router's [`ModelSelector`], selects the backend bound to that tier, and
+    /// pushes a [`AuditEntry::RouterDecision`] recording the selected tier and
+    /// backend so the routing is permanently traceable (reusing the existing
+    /// E5.3 router-decision audit variant — no new audit variants added).
+    #[cfg(feature = "std")]
+    fn resolve_dispatch_backend(&mut self, task_id: u64, mlfq_tier: u8) -> Arc<dyn LlmBackend> {
+        match &self.tier_backends {
+            None => Arc::clone(&self.backend),
+            Some(tiers) => {
+                let cost_class = cost_class_for_mlfq_tier(mlfq_tier);
+                let selector = router::model_selector_for_cost_class(cost_class);
+                let backend = Arc::clone(tiers.backend_for(selector));
+                // Reuse the E5.3 RouterDecision audit entry to record the
+                // per-tier backend selection (model_selector carries the tier;
+                // tool_scope_name carries the chosen backend id for traceability).
+                self.audit.push(AuditEntry::RouterDecision {
+                    agent_id: self.agent_id.clone(),
+                    event_id: format!("dispatch-{task_id}"),
+                    route_id: selector.as_str().to_string(),
+                    model_selector: selector.as_str().to_string(),
+                    tool_scope_name: backend.id().to_string(),
+                    tools_available: 0,
+                    tools_permitted: 0,
+                    memory_scope_identity: true,
+                    memory_scope_l1: true,
+                    memory_scope_l2: !matches!(selector, ModelSelector::CheapLocal),
+                    memory_scope_l3: matches!(selector, ModelSelector::Frontier),
+                    max_turns: 0,
+                    max_tool_calls: 0,
+                });
+                backend
+            }
+        }
+    }
+}
+
+/// Map an MLFQ priority tier onto a gate [`CostClass`] for per-tier dispatch
+/// (E9 S9.5).
+///
+/// The somatic loop's normal task path does not run the full Striatal Gate
+/// (only operator-forced packets are gated), so the per-tier backend map keys
+/// off the task's MLFQ priority instead — a deterministic, audit-friendly proxy
+/// for the cost tier:
+///
+/// | MLFQ tier | Priority origin            | Cost class   |
+/// |-----------|----------------------------|--------------|
+/// | `0`       | Critical / High / forced   | `Frontier`   |
+/// | `1`       | Normal interaction         | `MidTier`    |
+/// | `≥ 2`     | Low / background           | `CheapLocal` |
+///
+/// This mirrors [`priority_to_mlfq_tier`] in reverse so the highest-priority
+/// work reaches the most capable bound backend.
+pub fn cost_class_for_mlfq_tier(mlfq_tier: u8) -> CostClass {
+    match mlfq_tier {
+        0 => CostClass::Frontier,
+        1 => CostClass::MidTier,
+        _ => CostClass::CheapLocal,
     }
 }
 
@@ -614,12 +940,60 @@ pub async fn somatic_execution_loop(
                     user_facing: true,
                 };
                 let signals = HomeostaticSignals::neutral();
-                let gate = ThresholdGate::with_defaults();
                 let override_hint = GateOverride::OperatorForced {
                     reason: reason.to_owned(),
                 };
                 let event_id = format!("sensory-{task_id}");
-                let decision = gate.decide(&event_id, &event, &signals, &override_hint);
+
+                // E12: when the motivated gate is installed, route the decision
+                // through the drive hierarchy and emit drive/affect audit
+                // entries alongside the gate decision.  The operator-force
+                // override semantics are preserved exactly (invoke at Frontier).
+                // When absent, this is byte-for-byte the original code path.
+                #[cfg(feature = "std")]
+                let motivated = lifecycle.motivated_gate.clone();
+                #[cfg(not(feature = "std"))]
+                let motivated: Option<()> = None;
+
+                let decision = if let Some(mg) = motivated {
+                    #[cfg(feature = "std")]
+                    {
+                        let guard = mg.lock().expect("motivated_gate poisoned");
+                        let (decision, augmented, affect) =
+                            guard.decide_motivated(&event_id, &event, &signals, &override_hint);
+                        let snapshot = guard.drive_snapshot();
+                        drop(guard);
+
+                        let u = &snapshot.urgencies;
+                        lifecycle.audit.push(AuditEntry::DriveStateSnapshot {
+                            agent_id: lifecycle.agent_id.clone(),
+                            viability_urgency: u[motivation::DriveTier::Viability.index()],
+                            integrity_urgency: u[motivation::DriveTier::Integrity.index()],
+                            service_urgency: u[motivation::DriveTier::Service.index()],
+                            epistemic_urgency: u[motivation::DriveTier::Epistemic.index()],
+                            achievement_urgency: u[motivation::DriveTier::Achievement.index()],
+                            self_actualisation_urgency: u
+                                [motivation::DriveTier::SelfActualisation.index()],
+                            drive_delta: augmented.drive_delta,
+                            lattice_suppression_active: augmented.lattice_suppression_active,
+                        });
+                        lifecycle.audit.push(AuditEntry::AffectStateSnapshot {
+                            agent_id: lifecycle.agent_id.clone(),
+                            valence: affect.valence,
+                            arousal: affect.arousal,
+                            gate_threshold_nudge: affect.gate_threshold_nudge(),
+                        });
+                        decision
+                    }
+                    #[cfg(not(feature = "std"))]
+                    {
+                        unreachable!("motivated_gate is std-only")
+                    }
+                } else {
+                    let gate = ThresholdGate::with_defaults();
+                    gate.decide(&event_id, &event, &signals, &override_hint)
+                };
+
                 record_gate_decision(
                     &mut lifecycle.audit,
                     &lifecycle.agent_id,
@@ -670,6 +1044,16 @@ pub async fn somatic_execution_loop(
                 attention_demand: signals.attention_demand,
                 aggregate_stress: signals.aggregate_stress(),
             });
+
+            // E12: refresh the motivated gate's drive registry from this tick's
+            // real interoceptive reading so drive urgencies (and thus the
+            // augmented value score) track the live homeostatic state at ~1 Hz.
+            if let Some(ref mg) = lifecycle.motivated_gate {
+                let h = HomeostaticSignals::from_interoceptive(&signals);
+                mg.lock()
+                    .expect("motivated_gate poisoned")
+                    .update_signals(&h);
+            }
         }
 
         let pressure = lifecycle.memory.check_pressure();
@@ -716,6 +1100,13 @@ pub async fn somatic_execution_loop(
             });
 
             let cancel = lifecycle.install_fresh_cancel();
+            // E9 S9.5: when a per-tier backend map is installed, resolve the
+            // dispatch backend for this task's cost-class tier and record the
+            // routing decision; otherwise fall back to the single backend so
+            // the default path is unchanged.
+            #[cfg(feature = "std")]
+            let backend = lifecycle.resolve_dispatch_backend(task_id, tier);
+            #[cfg(not(feature = "std"))]
             let backend = Arc::clone(&lifecycle.backend);
             let dispatch_result = lifecycle
                 .scheduler
@@ -977,6 +1368,253 @@ mod tests {
                 "reasoning should reference the operator-forced override; got: {reasoning}"
             );
         }
+    }
+
+    // ── E12 — MotivatedGate wired into LifecycleManager ──────────────────────
+
+    #[test]
+    fn enabling_motivation_emits_drive_and_affect_audit_entries() {
+        // With the motivated gate installed, a forced operator packet routes
+        // through the drive hierarchy and emits DriveStateSnapshot +
+        // AffectStateSnapshot alongside the GateDecision.
+        use crate::motivation_gate::MotivatedGate;
+
+        let mut m = manager("agent-motivated", Some(2));
+        m.enable_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        assert!(m.motivation_enabled());
+        m.senses
+            .packetize_text_forced("deploy now", "on-call escalation")
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // Operator-force semantics preserved: dispatched at tier 0, gate
+        // decision present with override_active=true and Frontier reasoning.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 0);
+
+        let entries = m.audit.entries();
+        let has_drive = entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::DriveStateSnapshot { .. }));
+        let has_affect = entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::AffectStateSnapshot { .. }));
+        let gate_override = entries.iter().any(|e| {
+            matches!(
+                e,
+                AuditEntry::GateDecision {
+                    override_active: true,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_drive,
+            "motivated loop must emit a DriveStateSnapshot entry"
+        );
+        assert!(
+            has_affect,
+            "motivated loop must emit an AffectStateSnapshot entry"
+        );
+        assert!(
+            gate_override,
+            "operator override must still produce a GateDecision with override_active=true"
+        );
+
+        // The affect nudge recorded must respect the documented [0.9, 1.1] band.
+        for e in entries {
+            if let AuditEntry::AffectStateSnapshot {
+                gate_threshold_nudge,
+                ..
+            } = e
+            {
+                assert!(
+                    (0.9..=1.1).contains(gate_threshold_nudge),
+                    "recorded affect nudge {gate_threshold_nudge} out of [0.9, 1.1]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn motivation_disabled_by_default_emits_no_drive_entries() {
+        // Default manager has no motivated gate; a forced packet must produce
+        // the original GateDecision and NO drive/affect entries (byte-for-byte
+        // unchanged behaviour).
+        let mut m = manager("agent-no-motivation", Some(2));
+        assert!(!m.motivation_enabled());
+        m.senses
+            .packetize_text_forced("deploy now", "on-call escalation")
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                AuditEntry::GateDecision {
+                    override_active: true,
+                    ..
+                }
+            )),
+            "disabled path must still emit the operator-force GateDecision"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::DriveStateSnapshot { .. })),
+            "disabled path must NOT emit DriveStateSnapshot entries"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::AffectStateSnapshot { .. })),
+            "disabled path must NOT emit AffectStateSnapshot entries"
+        );
+    }
+
+    #[test]
+    fn with_motivation_builder_installs_gate() {
+        use crate::motivation_gate::MotivatedGate;
+        let m = manager("agent-builder", Some(1))
+            .with_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        assert!(
+            m.motivation_enabled(),
+            "with_motivation builder must install the gate"
+        );
+    }
+
+    // ── E9 S9.5 — Per-tier backend dispatch wired into LifecycleManager ───────
+
+    /// A tier map with three distinguishable mock backends.
+    fn distinct_tiers() -> crate::router::TierBackends {
+        crate::router::TierBackends::new(
+            Arc::new(MockLlmBackend::with_id("cheap")),
+            Arc::new(MockLlmBackend::with_id("mid")),
+            Arc::new(MockLlmBackend::with_id("frontier")),
+        )
+    }
+
+    /// The backend id recorded by the most recent tier-dispatch RouterDecision
+    /// (we stash the chosen backend id in `tool_scope_name`).
+    fn dispatched_backend_id(m: &LifecycleManager) -> Option<String> {
+        m.audit.entries().iter().rev().find_map(|e| match e {
+            AuditEntry::RouterDecision {
+                tool_scope_name, ..
+            } => Some(tool_scope_name.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn tier_dispatch_disabled_by_default() {
+        let m = manager("agent-no-tiers", Some(1));
+        assert!(!m.tier_dispatch_enabled());
+    }
+
+    #[test]
+    fn with_tier_backends_builder_installs_map() {
+        let m = manager("agent-tier-builder", Some(1)).with_tier_backends(distinct_tiers());
+        assert!(m.tier_dispatch_enabled());
+    }
+
+    #[test]
+    fn frontier_tier_task_dispatches_to_frontier_backend() {
+        // MLFQ tier 0 (Critical/High) → Frontier cost class → frontier backend.
+        let mut m =
+            manager("agent-frontier-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(1, 0, "high priority work"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("frontier"),
+            "a tier-0 (Frontier) task must dispatch to the frontier backend"
+        );
+    }
+
+    #[test]
+    fn cheap_local_tier_task_dispatches_to_cheap_backend() {
+        // MLFQ tier 2 (Low/background) → CheapLocal cost class → cheap backend.
+        let mut m = manager("agent-cheap-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(7, 2, "background chore"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("cheap"),
+            "a tier-2 (CheapLocal) task must dispatch to the cheap backend"
+        );
+    }
+
+    #[test]
+    fn mid_tier_task_dispatches_to_mid_backend() {
+        let mut m = manager("agent-mid-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(3, 1, "normal interaction"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("mid"),
+            "a tier-1 (MidTier) task must dispatch to the mid backend"
+        );
+    }
+
+    #[test]
+    fn uniform_tier_map_preserves_single_backend_behaviour() {
+        // A uniform map routes every tier to one backend: behaviour through the
+        // new path matches the legacy single-backend dispatch.
+        let tiers = crate::router::TierBackends::uniform(Arc::new(MockLlmBackend::with_id("solo")));
+        let mut m = manager("agent-uniform", Some(1)).with_tier_backends(tiers);
+        m.agenda.push(Task::new(9, 0, "anything"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(dispatched_backend_id(&m).as_deref(), Some("solo"));
+    }
+
+    #[test]
+    fn no_tier_map_emits_no_router_decision_and_uses_single_backend() {
+        // Backward compatibility: without a tier map the dispatch path is
+        // unchanged — no RouterDecision entry, single backend used.
+        let mut m = manager("agent-legacy-dispatch", Some(1));
+        m.agenda.push(Task::new(11, 0, "legacy task"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert!(
+            dispatched_backend_id(&m).is_none(),
+            "no RouterDecision entry must be emitted when no tier map is installed"
+        );
+    }
+
+    #[test]
+    fn cost_class_for_mlfq_tier_maps_priorities() {
+        assert_eq!(cost_class_for_mlfq_tier(0), CostClass::Frontier);
+        assert_eq!(cost_class_for_mlfq_tier(1), CostClass::MidTier);
+        assert_eq!(cost_class_for_mlfq_tier(2), CostClass::CheapLocal);
+        assert_eq!(cost_class_for_mlfq_tier(5), CostClass::CheapLocal);
     }
 
     #[test]
@@ -1829,5 +2467,152 @@ mod tests {
         assert_eq!(report.files_written, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E11 S11.5 — Dreaming-phase self-improvement reflection wiring ──────────
+
+    use skills::{EpisodeSummary, SkillRegistry};
+
+    /// Three episodes that all pair the same two tools → one friction pattern
+    /// above the default reflection threshold.
+    fn co_occurrence_summaries() -> Vec<EpisodeSummary> {
+        (0..3)
+            .map(|i| EpisodeSummary {
+                episode_id: format!("ep-{i}"),
+                summary: format!("episode {i}: searched then archived"),
+                tools_used: vec!["web-search".to_string(), "archive".to_string()],
+                success: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skill_reflection_disabled_by_default() {
+        let m = manager("agent-no-reflection", Some(1));
+        assert!(!m.skill_reflection_enabled());
+        assert!(m.skill_registry_handle().is_none());
+    }
+
+    #[test]
+    fn with_skill_registry_builder_installs_registry() {
+        let m = manager("agent-reflection-builder", Some(1))
+            .with_skill_registry(SkillRegistry::default());
+        assert!(m.skill_reflection_enabled());
+        assert!(m.skill_registry_handle().is_some());
+    }
+
+    #[test]
+    fn dreaming_phase_registers_proposed_skill_and_emits_audit() {
+        let mut m = manager("dream-agent", Some(0)).with_skill_registry(SkillRegistry::default());
+        for s in co_occurrence_summaries() {
+            m.record_episode_summary(s);
+        }
+
+        // Run one explicit sleep cycle: the Dreaming phase reflects + registers.
+        m.run_sleep_cycle();
+
+        // The shared registry now holds >=1 Proposed agent-authored skill.
+        let registry = m.skill_registry_handle().unwrap();
+        let guard = registry.lock().unwrap();
+        let proposed: Vec<_> = guard
+            .list_all()
+            .into_iter()
+            .filter(|e| e.state.is_proposed())
+            .collect();
+        assert!(
+            !proposed.is_empty(),
+            "Dreaming reflection must register at least one Proposed skill"
+        );
+        for e in &proposed {
+            assert_eq!(e.provenance.authored_by, skills::SkillAuthor::Agent);
+        }
+        // Proposed skills are not active (gated on operator approval).
+        assert_eq!(guard.list_active().len(), 0);
+        drop(guard);
+
+        // Audit: exactly one SkillReflectionCompleted + >=1 SkillRegistered.
+        let entries = m.audit.entries();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::SkillRegistered { .. })),
+            "at least one SkillRegistered audit entry expected"
+        );
+    }
+
+    #[test]
+    fn dreaming_phase_with_no_pattern_registers_nothing() {
+        let mut m =
+            manager("dream-agent-empty", Some(0)).with_skill_registry(SkillRegistry::default());
+        // Distinct tools per episode → no qualifying co-occurrence pattern.
+        for (i, tools) in [
+            ["tool-a", "tool-b"],
+            ["tool-c", "tool-d"],
+            ["tool-e", "tool-f"],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.record_episode_summary(EpisodeSummary {
+                episode_id: format!("e{i}"),
+                summary: format!("episode {i}"),
+                tools_used: tools.iter().map(|t| t.to_string()).collect(),
+                success: true,
+            });
+        }
+
+        m.run_sleep_cycle();
+
+        let registry = m.skill_registry_handle().unwrap();
+        assert!(
+            registry.lock().unwrap().is_empty(),
+            "no skill should be registered without a qualifying pattern"
+        );
+
+        // The reflection summary is still emitted; no SkillRegistered entries.
+        let entries = m.audit.entries();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| matches!(e, AuditEntry::SkillRegistered { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn dreaming_phase_without_registry_is_unchanged() {
+        // No registry installed: the sleep cycle behaves exactly as before —
+        // no reflection audit entries even when episodes are buffered.
+        let mut m = manager("dream-agent-noreg", Some(0));
+        for s in co_occurrence_summaries() {
+            m.record_episode_summary(s);
+        }
+        m.run_sleep_cycle();
+
+        let entries = m.audit.entries();
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::SkillReflectionCompleted { .. })),
+            "no reflection should run without a registry"
+        );
+        assert!(!entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::SkillRegistered { .. })));
     }
 }

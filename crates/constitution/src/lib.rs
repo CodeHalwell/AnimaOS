@@ -27,5 +27,7 @@ pub mod check;
 pub mod corrigibility;
 
 pub use charter::{Charter, CharterError, CoreLayer, DriveBound, OperatorLayer, Prohibition};
-pub use check::{CheckOutcome, ClauseLayer, ClauseMatch, ConstitutionCheck, ConstitutionProposal, ProposalType};
+pub use check::{
+    CheckOutcome, ClauseLayer, ClauseMatch, ConstitutionCheck, ConstitutionProposal, ProposalType,
+};
 pub use corrigibility::{CorrigibilityHold, CorrigibilityReason};

@@ -863,6 +863,108 @@ pub fn build_routed_request(
     }
 }
 
+// ── Per-tier backend map (E9 S9.5) ────────────────────────────────────────────
+
+/// A router-aware backend map binding each [`ModelSelector`] tier to a concrete
+/// [`LlmBackend`] (E9 S9.5).
+///
+/// The Striatal Gate (E5.2) chooses a [`CostClass`] per decision and the
+/// Thalamic Router (E5.3) maps that onto a [`ModelSelector`].  Historically the
+/// [`crate::LifecycleManager`] held a *single* `Arc<dyn LlmBackend>` and ignored
+/// the tier; this map closes that gap so the cheap-local / mid-tier / frontier
+/// tiers dispatch to the providers the operator actually bound (via the wizard
+/// or `ANIMA_{CHEAP,MID,FRONTIER}_BACKEND`).
+///
+/// # Backward compatibility
+///
+/// Construct with [`TierBackends::uniform`] to point all three tiers at one
+/// backend — behaviour then matches the legacy single-backend path exactly.
+/// The map is installed *additively* on the lifecycle via
+/// [`crate::LifecycleManager::with_tier_backends`]; when it is absent the
+/// dispatch path is byte-for-byte unchanged.
+#[cfg(feature = "std")]
+#[derive(Clone)]
+pub struct TierBackends {
+    cheap_local: std::sync::Arc<dyn crate::LlmBackendRef>,
+    mid_tier: std::sync::Arc<dyn crate::LlmBackendRef>,
+    frontier: std::sync::Arc<dyn crate::LlmBackendRef>,
+}
+
+#[cfg(feature = "std")]
+impl TierBackends {
+    /// Build a tier map with an explicit backend per tier.
+    pub fn new(
+        cheap_local: std::sync::Arc<dyn crate::LlmBackendRef>,
+        mid_tier: std::sync::Arc<dyn crate::LlmBackendRef>,
+        frontier: std::sync::Arc<dyn crate::LlmBackendRef>,
+    ) -> Self {
+        Self {
+            cheap_local,
+            mid_tier,
+            frontier,
+        }
+    }
+
+    /// Build a tier map where every tier shares one backend.
+    ///
+    /// This is the backward-compatible default: a [`crate::LifecycleManager`]
+    /// configured with `TierBackends::uniform(backend)` dispatches identically
+    /// to one configured with the single-backend constructor.
+    pub fn uniform(backend: std::sync::Arc<dyn crate::LlmBackendRef>) -> Self {
+        Self {
+            cheap_local: std::sync::Arc::clone(&backend),
+            mid_tier: std::sync::Arc::clone(&backend),
+            frontier: backend,
+        }
+    }
+
+    /// Return the backend bound to `selector`.
+    pub fn backend_for(
+        &self,
+        selector: ModelSelector,
+    ) -> &std::sync::Arc<dyn crate::LlmBackendRef> {
+        match selector {
+            ModelSelector::CheapLocal => &self.cheap_local,
+            ModelSelector::MidTier => &self.mid_tier,
+            ModelSelector::Frontier => &self.frontier,
+        }
+    }
+
+    /// Return the backend bound to the tier the gate's [`CostClass`] selects.
+    ///
+    /// This mirrors the gate→router→backend handshake: a `CheapLocal` decision
+    /// dispatches to the cheap backend, `Frontier` to the frontier backend, etc.
+    pub fn backend_for_cost_class(
+        &self,
+        cost_class: CostClass,
+    ) -> &std::sync::Arc<dyn crate::LlmBackendRef> {
+        self.backend_for(model_selector_for_cost_class(cost_class))
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::fmt::Debug for TierBackends {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TierBackends")
+            .field("cheap_local", &self.cheap_local.id())
+            .field("mid_tier", &self.mid_tier.id())
+            .field("frontier", &self.frontier.id())
+            .finish()
+    }
+}
+
+/// Map a gate [`CostClass`] onto the router's [`ModelSelector`] tier.
+///
+/// This is the canonical 1:1 correspondence used throughout E5.2/E5.3: the gate
+/// decides the cost tier and the router selects the model of the same tier.
+pub fn model_selector_for_cost_class(cost_class: CostClass) -> ModelSelector {
+    match cost_class {
+        CostClass::CheapLocal => ModelSelector::CheapLocal,
+        CostClass::MidTier => ModelSelector::MidTier,
+        CostClass::Frontier => ModelSelector::Frontier,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1874,5 +1976,94 @@ mod tests {
             modulated_count, 0,
             "no RouterModulated entry when signals are neutral"
         );
+    }
+
+    // ── E9 S9.5 — Per-tier backend map (TierBackends) ─────────────────────────
+
+    /// Build a `TierBackends` whose three tiers carry distinguishable backend
+    /// ids so selection can be asserted by `id()`.
+    fn distinct_tier_backends() -> TierBackends {
+        use scheduler::MockLlmBackend;
+        TierBackends::new(
+            std::sync::Arc::new(MockLlmBackend::with_id("cheap")),
+            std::sync::Arc::new(MockLlmBackend::with_id("mid")),
+            std::sync::Arc::new(MockLlmBackend::with_id("frontier")),
+        )
+    }
+
+    #[test]
+    fn model_selector_for_cost_class_is_one_to_one() {
+        assert_eq!(
+            model_selector_for_cost_class(CostClass::CheapLocal),
+            ModelSelector::CheapLocal
+        );
+        assert_eq!(
+            model_selector_for_cost_class(CostClass::MidTier),
+            ModelSelector::MidTier
+        );
+        assert_eq!(
+            model_selector_for_cost_class(CostClass::Frontier),
+            ModelSelector::Frontier
+        );
+    }
+
+    #[test]
+    fn tier_backends_selects_distinct_backend_per_selector() {
+        let tiers = distinct_tier_backends();
+        assert_eq!(tiers.backend_for(ModelSelector::CheapLocal).id(), "cheap");
+        assert_eq!(tiers.backend_for(ModelSelector::MidTier).id(), "mid");
+        assert_eq!(tiers.backend_for(ModelSelector::Frontier).id(), "frontier");
+    }
+
+    #[test]
+    fn cheap_local_cost_class_dispatches_to_cheap_backend() {
+        let tiers = distinct_tier_backends();
+        assert_eq!(
+            tiers.backend_for_cost_class(CostClass::CheapLocal).id(),
+            "cheap",
+            "a CheapLocal decision must dispatch to the cheap backend"
+        );
+    }
+
+    #[test]
+    fn frontier_cost_class_dispatches_to_frontier_backend() {
+        let tiers = distinct_tier_backends();
+        assert_eq!(
+            tiers.backend_for_cost_class(CostClass::Frontier).id(),
+            "frontier",
+            "a Frontier decision must dispatch to the frontier backend"
+        );
+    }
+
+    #[test]
+    fn mid_tier_cost_class_dispatches_to_mid_backend() {
+        let tiers = distinct_tier_backends();
+        assert_eq!(tiers.backend_for_cost_class(CostClass::MidTier).id(), "mid");
+    }
+
+    #[test]
+    fn uniform_tier_backends_routes_every_tier_to_one_backend() {
+        use scheduler::MockLlmBackend;
+        let tiers = TierBackends::uniform(std::sync::Arc::new(MockLlmBackend::with_id("solo")));
+        for cc in [
+            CostClass::CheapLocal,
+            CostClass::MidTier,
+            CostClass::Frontier,
+        ] {
+            assert_eq!(
+                tiers.backend_for_cost_class(cc).id(),
+                "solo",
+                "uniform map must route {cc:?} to the single backend"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_backends_debug_lists_backend_ids() {
+        let tiers = distinct_tier_backends();
+        let debug = format!("{tiers:?}");
+        assert!(debug.contains("cheap"));
+        assert!(debug.contains("mid"));
+        assert!(debug.contains("frontier"));
     }
 }

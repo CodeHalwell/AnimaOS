@@ -175,8 +175,8 @@ impl Charter {
 
     /// Load a charter from a file path.
     pub fn from_path(path: &std::path::Path) -> Result<Self, CharterError> {
-        let toml = std::fs::read_to_string(path)
-            .map_err(|e| CharterError::ParseError(e.to_string()))?;
+        let toml =
+            std::fs::read_to_string(path).map_err(|e| CharterError::ParseError(e.to_string()))?;
         Self::from_toml_str(&toml, None)
     }
 
@@ -322,7 +322,10 @@ mod tests {
     fn charter_hmac_not_verified_when_hmac_hex_is_empty() {
         let c = Charter::embedded().unwrap();
         // The embedded charter ships with an empty hmac_hex.
-        assert!(!c.hmac_verified, "embedded default should be trust-on-first-use");
+        assert!(
+            !c.hmac_verified,
+            "embedded default should be trust-on-first-use"
+        );
     }
 
     #[test]
@@ -333,11 +336,18 @@ mod tests {
 
         let toml_with_hmac = format!(
             "{}\n\n[meta]\ncharter_version = 1\nhmac_hex = \"{hex}\"",
-            &EMBEDDED_CHARTER[..EMBEDDED_CHARTER.rfind("[meta]").unwrap_or(EMBEDDED_CHARTER.len())].trim()
+            &EMBEDDED_CHARTER[..EMBEDDED_CHARTER
+                .rfind("[meta]")
+                .unwrap_or(EMBEDDED_CHARTER.len())]
+                .trim()
         );
 
         let result = Charter::from_toml_str(&toml_with_hmac, Some(key));
-        assert!(result.is_ok(), "valid HMAC should verify: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "valid HMAC should verify: {:?}",
+            result.err()
+        );
         assert!(result.unwrap().hmac_verified);
     }
 

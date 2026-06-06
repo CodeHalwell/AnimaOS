@@ -19,7 +19,10 @@
 //! - [`ChannelAdapter`] — the per-channel driver trait.
 //! - [`ChannelGateway`] — orchestrates adapters ↔ bridge.
 //! - [`adapters`] — fixture-backed Telegram and Slack adapters (CI-safe).
-//! - [`voice`] — [`SttProvider`] and [`TtsProvider`] traits + fixture impls.
+//! - [`voice`] — [`voice::SttProvider`] and [`voice::TtsProvider`] traits +
+//!   fixture impls.
+//! - [`routing`] — [`routing::ModalityRouter`] for S10.5 modality-aware routing
+//!   and presence.
 //!
 //! Inbound channel messages are packetised via the existing
 //! [`senses::SensoryBridge`] policy checks before entering the agent; no
@@ -28,9 +31,15 @@
 //! directly.
 
 pub mod adapters;
+pub mod routing;
 pub mod voice;
 
+use routing::{
+    DeliveryPreference, ModalityCapability, ModalityRouter, OutboundContext, OutboundPlan,
+    RouteAudit, RouteDecision,
+};
 use senses::{SensoryBridge, SensoryBridgeError, SensoryPriority};
+use voice::SttProvider;
 
 // ── Modality ──────────────────────────────────────────────────────────────────
 
@@ -369,6 +378,150 @@ impl ChannelGateway {
     }
 }
 
+// ── Modality-aware routing & presence (E10 S10.5) ──────────────────────────────
+
+/// Outcome of a single modality-aware inbound poll
+/// ([`ChannelGateway::run_once_routed`]).
+///
+/// Carries both the base [`PollOutcome`] (size/policy checks + bridge result)
+/// and the S10.5 [`RouteDecision`] / [`RouteAudit`] so the host can record the
+/// correct `vita::AuditEntry` without `comms` depending on `vita`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutedOutcome {
+    /// The routing decision for the message's modality given backend capabilities.
+    pub decision: RouteDecision,
+    /// The audit record the host should persist
+    /// (`ChannelMessageReceived` / `ModalityUnsupported`).
+    pub audit: RouteAudit,
+    /// The base size/policy/bridge outcome, present only when the message was
+    /// routed (directly, via caption fallback, or via STT) and therefore
+    /// actually enqueued in the sensory bridge. `None` for unsupported
+    /// modalities, which are dropped before reaching the bridge.
+    pub poll: Option<PollOutcome>,
+}
+
+impl ChannelGateway {
+    /// Polls all adapters once with **modality-aware routing** (S10.5).
+    ///
+    /// For each inbound message the [`ModalityRouter`] first decides whether the
+    /// target backend (described by `caps`) can serve the modality:
+    ///
+    /// - **Text** is enqueued as today.
+    /// - **Image** is enqueued when `caps.vision`; otherwise its caption (if
+    ///   any) is enqueued as text, and a caption-less image is dropped with a
+    ///   `ModalityUnsupported` audit record.
+    /// - **Voice** is transcribed by `stt` *before* routing (STT-before-route)
+    ///   and the transcript enqueued as text; without STT the voice is dropped.
+    ///
+    /// Each routed message yields a `ChannelMessageReceived` audit record; each
+    /// dropped one yields a `ModalityUnsupported` record. This method is purely
+    /// additive — it does not change [`run_once`](Self::run_once).
+    pub fn run_once_routed(
+        &self,
+        router: &ModalityRouter,
+        caps: &ModalityCapability,
+        stt: &dyn SttProvider,
+    ) -> Vec<RoutedOutcome> {
+        let mut outcomes = Vec::new();
+
+        for adapter in &self.adapters {
+            let mut count = 0usize;
+            while let Some(msg) = adapter.receive() {
+                outcomes.push(self.ingest_routed(adapter.id(), msg, router, caps, stt));
+                count += 1;
+                if count >= 50 {
+                    break;
+                }
+            }
+        }
+
+        outcomes
+    }
+
+    fn ingest_routed(
+        &self,
+        channel_id: &str,
+        msg: ChannelMessage,
+        router: &ModalityRouter,
+        caps: &ModalityCapability,
+        stt: &dyn SttProvider,
+    ) -> RoutedOutcome {
+        let decision = router.route_inbound(&msg.content, caps, stt);
+        let audit = ModalityRouter::inbound_audit(channel_id, &msg.from, &decision);
+
+        // Map the decision onto an actual bridge ingest. Routed text/image go
+        // through the existing size/policy-checked path; transcoded modalities
+        // (caption fallback, STT transcript) are ingested as text.
+        let poll = match &decision {
+            RouteDecision::Routed(Modality::Text) => Some(self.ingest(channel_id, msg)),
+            RouteDecision::Routed(Modality::Image) => Some(self.ingest(channel_id, msg)),
+            RouteDecision::Routed(Modality::Voice) => {
+                // Unreachable in practice: voice always routes via STT below.
+                // Kept exhaustive so a future direct-voice route still ingests.
+                Some(self.ingest(channel_id, msg))
+            }
+            RouteDecision::RoutedFallback { text, .. }
+            | RouteDecision::RoutedViaStt { transcript: text } => {
+                let routed = ChannelMessage {
+                    from: msg.from.clone(),
+                    content: ChannelContent::Text(text.clone()),
+                };
+                Some(self.ingest(channel_id, routed))
+            }
+            RouteDecision::Unsupported { .. } => None,
+        };
+
+        RoutedOutcome {
+            decision,
+            audit,
+            poll,
+        }
+    }
+
+    /// Sends an outbound reply, choosing its modality via the *presence* policy
+    /// (S10.5) and returning the `ChannelMessageSent` audit record on success.
+    ///
+    /// `pref` expresses whether the reply should be spoken; when
+    /// [`DeliveryPreference::Voice`] is requested and the context's `caps.tts` is
+    /// set, the context's TTS provider renders the text to a voice note,
+    /// otherwise it degrades to text. The chosen content is handed to the named
+    /// adapter's `send()`.
+    ///
+    /// The router, route capabilities, and TTS provider are bundled into
+    /// [`OutboundContext`] so the call site stays compact.
+    ///
+    /// Returns `Err(ChannelError)` if no adapter with `channel_id` is registered
+    /// or the adapter's `send()` fails (e.g. fixture mode); on the error path no
+    /// audit record is produced because nothing was sent.
+    pub fn send_routed(
+        &self,
+        ctx: OutboundContext<'_>,
+        channel_id: &str,
+        to: &str,
+        text: &str,
+        pref: DeliveryPreference,
+    ) -> Result<RouteAudit, ChannelError> {
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|a| a.id() == channel_id)
+            .ok_or_else(|| {
+                ChannelError::ApiError(format!("no adapter registered for channel {channel_id:?}"))
+            })?;
+
+        let plan: OutboundPlan = ctx.plan(text, pref);
+        let audit = ModalityRouter::outbound_audit(channel_id, to, &plan);
+
+        let outbound = OutboundMessage {
+            to: to.to_string(),
+            content: plan.into_content(),
+        };
+        adapter.send(&outbound)?;
+
+        Ok(audit)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -559,5 +712,258 @@ mod tests {
         let outcomes = gw.run_once();
         assert!(!outcomes[0].enqueued);
         assert!(outcomes[0].rejection.is_some());
+    }
+
+    // ── Modality-aware routing & presence (S10.5) ─────────────────────────────
+
+    use crate::routing::{
+        DeliveryPreference, ModalityCapability, ModalityRouter, OutboundContext, RouteAuditKind,
+        RouteDecision,
+    };
+    use crate::voice::{FixtureStt, FixtureTts};
+
+    #[test]
+    fn routed_text_always_enqueues_and_records_received() {
+        let adapter = TelegramAdapter::with_fixture(vec![FixtureMessage {
+            from: "user42".into(),
+            content: ChannelContent::Text("hello".into()),
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let outcomes = gw.run_once_routed(
+            &ModalityRouter::new(),
+            &ModalityCapability::text_only(),
+            &FixtureStt::new(),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let o = &outcomes[0];
+        assert_eq!(o.decision, RouteDecision::Routed(Modality::Text));
+        assert_eq!(o.audit.kind, RouteAuditKind::Received);
+        assert_eq!(o.audit.modality, "text");
+        assert_eq!(o.audit.peer, "user42");
+        assert!(o.poll.as_ref().unwrap().enqueued);
+        assert!(gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn routed_image_to_vision_backend_enqueues_and_records_received() {
+        let adapter = SlackAdapter::with_fixture(vec![FixtureMessage {
+            from: "alice".into(),
+            content: ChannelContent::Image {
+                bytes: vec![0xFF, 0xD8, 0xFF],
+                mime: "image/jpeg".into(),
+                caption: Some("screenshot".into()),
+            },
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let outcomes = gw.run_once_routed(
+            &ModalityRouter::new(),
+            &ModalityCapability::from_vision(true),
+            &FixtureStt::new(),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let o = &outcomes[0];
+        assert_eq!(o.decision, RouteDecision::Routed(Modality::Image));
+        assert_eq!(o.audit.kind, RouteAuditKind::Received);
+        assert_eq!(o.audit.modality, "image");
+        assert!(
+            o.poll.as_ref().unwrap().enqueued,
+            "image should be enqueued"
+        );
+        assert!(gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn routed_image_to_non_vision_backend_falls_back_to_caption() {
+        let adapter = SlackAdapter::with_fixture(vec![FixtureMessage {
+            from: "alice".into(),
+            content: ChannelContent::Image {
+                bytes: vec![0xFF, 0xD8, 0xFF],
+                mime: "image/jpeg".into(),
+                caption: Some("an error dialog".into()),
+            },
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let outcomes = gw.run_once_routed(
+            &ModalityRouter::new(),
+            &ModalityCapability::from_vision(false),
+            &FixtureStt::new(),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let o = &outcomes[0];
+        assert_eq!(
+            o.decision,
+            RouteDecision::RoutedFallback {
+                original: Modality::Image,
+                text: "an error dialog".into(),
+            }
+        );
+        // The fallback caption is admitted to the bridge as text.
+        assert_eq!(o.audit.kind, RouteAuditKind::Received);
+        assert_eq!(o.audit.modality, "text");
+        assert!(o.poll.as_ref().unwrap().enqueued);
+        assert!(gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn routed_image_to_non_vision_backend_without_caption_is_unsupported() {
+        let adapter = SlackAdapter::with_fixture(vec![FixtureMessage {
+            from: "alice".into(),
+            content: ChannelContent::Image {
+                bytes: vec![0xFF, 0xD8, 0xFF],
+                mime: "image/jpeg".into(),
+                caption: None,
+            },
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let outcomes = gw.run_once_routed(
+            &ModalityRouter::new(),
+            &ModalityCapability::from_vision(false),
+            &FixtureStt::new(),
+        );
+        assert_eq!(outcomes.len(), 1);
+        let o = &outcomes[0];
+        assert!(matches!(
+            o.decision,
+            RouteDecision::Unsupported {
+                modality: Modality::Image,
+                ..
+            }
+        ));
+        assert_eq!(o.audit.kind, RouteAuditKind::Unsupported);
+        assert_eq!(o.audit.modality, "image");
+        // Dropped before the bridge: no poll outcome, nothing enqueued.
+        assert!(o.poll.is_none());
+        assert!(!gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn routed_voice_triggers_stt_before_enqueue() {
+        let samples = vec![1i16, 2, 3];
+        let adapter = TelegramAdapter::with_fixture(vec![FixtureMessage {
+            from: "speaker".into(),
+            content: ChannelContent::Voice(samples),
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let stt = FixtureStt::new().with_transcript(3, "transcribed words");
+        let caps = ModalityCapability::from_vision(false).with_stt(true);
+        let outcomes = gw.run_once_routed(&ModalityRouter::new(), &caps, &stt);
+
+        assert_eq!(outcomes.len(), 1);
+        let o = &outcomes[0];
+        assert_eq!(
+            o.decision,
+            RouteDecision::RoutedViaStt {
+                transcript: "transcribed words".into(),
+            }
+        );
+        // STT output is admitted to the bridge as text.
+        assert_eq!(o.audit.kind, RouteAuditKind::Received);
+        assert_eq!(o.audit.modality, "text");
+        assert!(o.poll.as_ref().unwrap().enqueued);
+        assert!(gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn routed_voice_without_stt_is_unsupported_and_not_enqueued() {
+        let adapter = TelegramAdapter::with_fixture(vec![FixtureMessage {
+            from: "speaker".into(),
+            content: ChannelContent::Voice(vec![0i16; 10]),
+        }]);
+        let gw = make_gateway(vec![Box::new(adapter)]);
+
+        let outcomes = gw.run_once_routed(
+            &ModalityRouter::new(),
+            &ModalityCapability::from_vision(false), // stt = false
+            &FixtureStt::new(),
+        );
+        let o = &outcomes[0];
+        assert!(matches!(
+            o.decision,
+            RouteDecision::Unsupported {
+                modality: Modality::Voice,
+                ..
+            }
+        ));
+        assert_eq!(o.audit.kind, RouteAuditKind::Unsupported);
+        assert!(o.poll.is_none());
+        assert!(!gw.bridge().has_packets());
+    }
+
+    #[test]
+    fn send_routed_text_records_sent_but_fixture_adapter_blocks_send() {
+        // Fixture adapters return LiveModeNotEnabled, so send_routed surfaces the
+        // adapter error (no audit on the error path).
+        let gw = make_gateway(vec![Box::new(TelegramAdapter::with_fixture(vec![]))]);
+        let router = ModalityRouter::new();
+        let caps = ModalityCapability::text_only();
+        let tts = FixtureTts::new();
+        let result = gw.send_routed(
+            OutboundContext::new(&router, &caps, &tts),
+            "telegram",
+            "alice",
+            "reply",
+            DeliveryPreference::Text,
+        );
+        assert_eq!(result, Err(ChannelError::LiveModeNotEnabled));
+    }
+
+    #[test]
+    fn send_routed_unknown_channel_is_api_error() {
+        let gw = make_gateway(vec![Box::new(TelegramAdapter::with_fixture(vec![]))]);
+        let router = ModalityRouter::new();
+        let caps = ModalityCapability::text_only();
+        let tts = FixtureTts::new();
+        let result = gw.send_routed(
+            OutboundContext::new(&router, &caps, &tts),
+            "discord",
+            "x",
+            "hi",
+            DeliveryPreference::Text,
+        );
+        assert!(matches!(result, Err(ChannelError::ApiError(_))));
+    }
+
+    #[test]
+    fn send_routed_via_live_adapter_records_sent_audit() {
+        // A tiny always-live adapter that accepts sends, so we can assert the
+        // ChannelMessageSent audit record on the success path.
+        struct LiveEcho;
+        impl ChannelAdapter for LiveEcho {
+            fn id(&self) -> &str {
+                "echo"
+            }
+            fn receive(&self) -> Option<ChannelMessage> {
+                None
+            }
+            fn send(&self, _msg: &OutboundMessage) -> Result<(), ChannelError> {
+                Ok(())
+            }
+            fn is_live(&self) -> bool {
+                true
+            }
+        }
+
+        let gw = make_gateway(vec![Box::new(LiveEcho)]);
+        let router = ModalityRouter::new();
+        let tts = FixtureTts::new().with_audio("spoken reply", vec![5i16, 6, 7]);
+        let caps = ModalityCapability::full();
+
+        let audit = gw
+            .send_routed(
+                OutboundContext::new(&router, &caps, &tts),
+                "echo",
+                "bob",
+                "spoken reply",
+                DeliveryPreference::Voice,
+            )
+            .expect("live adapter accepts send");
+        assert_eq!(audit.kind, RouteAuditKind::Sent);
+        assert_eq!(audit.peer, "bob");
+        assert_eq!(audit.modality, "voice");
     }
 }

@@ -139,6 +139,141 @@ impl BackendFactory {
     }
 }
 
+// ── E9 S9.5 / E8 §4 — Per-tier backend binding ─────────────────────────────────
+
+/// The three router tiers an operator can bind to distinct providers (E9 S9.5).
+///
+/// Mirrors `vita::ModelSelector` without taking a dependency on `vita`: the
+/// hosted kernel maps these three [`BackendKind`]s onto the
+/// `vita::router::TierBackends` map (cheap-local / mid-tier / frontier).
+///
+/// The binding is **configurable** — built from environment variables with
+/// sensible, CI-hermetic defaults (see [`TierBackendChoices::from_env`]) — and
+/// is never hard-coded, matching the design in
+/// `docs/13-local-llm-providers.md §4`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierBackendChoices {
+    /// Provider for the cheap-local (fast, on-device) tier.
+    pub cheap_local: BackendKind,
+    /// Provider for the mid-tier (balanced) tier.
+    pub mid_tier: BackendKind,
+    /// Provider for the frontier (full-capability) tier.
+    pub frontier: BackendKind,
+}
+
+impl TierBackendChoices {
+    /// Build an explicit set of tier choices.
+    pub fn new(cheap_local: BackendKind, mid_tier: BackendKind, frontier: BackendKind) -> Self {
+        Self {
+            cheap_local,
+            mid_tier,
+            frontier,
+        }
+    }
+
+    /// All three tiers bound to a single provider (backward-compatible default).
+    pub fn uniform(kind: BackendKind) -> Self {
+        Self {
+            cheap_local: kind.clone(),
+            mid_tier: kind.clone(),
+            frontier: kind,
+        }
+    }
+
+    /// Resolve tier bindings from the environment with sensible defaults.
+    ///
+    /// Per-tier overrides (parsed via [`BackendKind::parse`]; unrecognised
+    /// values fall back to that tier's default):
+    ///
+    /// | Tier        | Env var                  | Default                                   |
+    /// |-------------|--------------------------|-------------------------------------------|
+    /// | cheap-local | `ANIMA_CHEAP_BACKEND`    | `ollama` if `ANIMA_OLLAMA*` hints, else mock |
+    /// | mid-tier    | `ANIMA_MID_BACKEND`      | the cheap-local choice (open decision left to operator) |
+    /// | frontier    | `ANIMA_FRONTIER_BACKEND` | `anthropic` if `ANTHROPIC_API_KEY` set, else mock |
+    ///
+    /// As a convenience, a global `ANIMA_BACKEND` (the legacy single-backend
+    /// selector) seeds every tier when set and no per-tier override is given, so
+    /// existing single-backend deployments keep working unchanged.
+    ///
+    /// The mid-tier default deliberately tracks the cheap-local choice rather
+    /// than hard-coding a provider — the open mid-tier decision is left to the
+    /// operator (`docs/13 §4`).
+    pub fn from_env() -> Self {
+        let global = std::env::var("ANIMA_BACKEND")
+            .ok()
+            .and_then(|s| BackendKind::parse(&s));
+
+        let cheap_default = global.clone().unwrap_or_else(default_cheap_local_kind);
+        let cheap_local = tier_kind_from_env("ANIMA_CHEAP_BACKEND", cheap_default);
+
+        // Mid-tier tracks the cheap-local choice by default (open decision).
+        let mid_default = global.clone().unwrap_or_else(|| cheap_local.clone());
+        let mid_tier = tier_kind_from_env("ANIMA_MID_BACKEND", mid_default);
+
+        let frontier_default = global.unwrap_or_else(default_frontier_kind);
+        let frontier = tier_kind_from_env("ANIMA_FRONTIER_BACKEND", frontier_default);
+
+        Self {
+            cheap_local,
+            mid_tier,
+            frontier,
+        }
+    }
+
+    /// Materialise each tier choice into a fixture-mode [`LlmBackend`].
+    ///
+    /// Returns `(cheap_local, mid_tier, frontier)` ready to assemble into a
+    /// `vita::router::TierBackends`.
+    pub fn into_fixture_backends(
+        self,
+    ) -> (
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+    ) {
+        (
+            BackendFactory::fixture(self.cheap_local),
+            BackendFactory::fixture(self.mid_tier),
+            BackendFactory::fixture(self.frontier),
+        )
+    }
+}
+
+/// Parse a tier override env var, falling back to `default` when unset or when
+/// the value is not a recognised provider name.
+fn tier_kind_from_env(var: &str, default: BackendKind) -> BackendKind {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| BackendKind::parse(&s))
+        .unwrap_or(default)
+}
+
+/// Default cheap-local provider: `ollama` when an Ollama endpoint/model hint is
+/// present in the environment, otherwise the CI-safe `mock`.
+fn default_cheap_local_kind() -> BackendKind {
+    let ollama_hint = std::env::var("ANIMA_OLLAMA_URL").is_ok()
+        || std::env::var("ANIMA_OLLAMA_MODEL").is_ok()
+        || std::env::var("OLLAMA_HOST").is_ok();
+    if ollama_hint {
+        BackendKind::Ollama
+    } else {
+        BackendKind::Mock
+    }
+}
+
+/// Default frontier provider: `anthropic` when an API key is configured,
+/// otherwise the CI-safe `mock`.
+fn default_frontier_kind() -> BackendKind {
+    if std::env::var("ANTHROPIC_API_KEY")
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+    {
+        BackendKind::Anthropic
+    } else {
+        BackendKind::Mock
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +426,62 @@ mod tests {
     fn from_env_or_mock_recognises_vllm() {
         let b = BackendFactory::from_env_or_mock("vllm");
         assert_eq!(b.id(), "vllm");
+    }
+
+    // ── E9 S9.5 — TierBackendChoices ──────────────────────────────────────────
+
+    #[test]
+    fn tier_choices_uniform_binds_all_three_tiers_to_one_provider() {
+        let choices = TierBackendChoices::uniform(BackendKind::Mock);
+        assert_eq!(choices.cheap_local, BackendKind::Mock);
+        assert_eq!(choices.mid_tier, BackendKind::Mock);
+        assert_eq!(choices.frontier, BackendKind::Mock);
+    }
+
+    #[test]
+    fn tier_choices_new_keeps_distinct_tiers() {
+        let choices = TierBackendChoices::new(
+            BackendKind::Ollama,
+            BackendKind::LmStudio,
+            BackendKind::Anthropic,
+        );
+        assert_eq!(choices.cheap_local, BackendKind::Ollama);
+        assert_eq!(choices.mid_tier, BackendKind::LmStudio);
+        assert_eq!(choices.frontier, BackendKind::Anthropic);
+    }
+
+    #[test]
+    fn tier_choices_into_fixture_backends_materialises_each_tier() {
+        let choices = TierBackendChoices::new(
+            BackendKind::Mock,
+            BackendKind::OpenAi,
+            BackendKind::Anthropic,
+        );
+        let (cheap, mid, frontier) = choices.into_fixture_backends();
+        assert_eq!(cheap.id(), "mock");
+        assert_eq!(mid.id(), "openai");
+        assert_eq!(frontier.id(), "anthropic");
+    }
+
+    #[test]
+    fn tier_kind_from_env_falls_back_to_default_when_unset() {
+        // Use a var name that is exceedingly unlikely to be set in any
+        // environment so the fallback path is exercised deterministically.
+        let kind = tier_kind_from_env(
+            "ANIMA_TIER_KIND_FROM_ENV_DEFINITELY_UNSET_XYZ",
+            BackendKind::LmStudio,
+        );
+        assert_eq!(kind, BackendKind::LmStudio);
+    }
+
+    #[test]
+    fn from_env_is_ci_safe_and_returns_constructible_backends() {
+        // Whatever the ambient environment, from_env() must yield three parseable
+        // tier choices that materialise into real backends without panicking.
+        let choices = TierBackendChoices::from_env();
+        let (cheap, mid, frontier) = choices.into_fixture_backends();
+        assert!(!cheap.id().is_empty());
+        assert!(!mid.id().is_empty());
+        assert!(!frontier.id().is_empty());
     }
 }

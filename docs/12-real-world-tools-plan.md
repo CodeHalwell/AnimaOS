@@ -1,8 +1,10 @@
 # 12 — Real-World Tools: Embodiment & Efferent World-Interaction Plan
 
 > **Status:** 🟡 In Progress — Phase 0 (S7.0) and Phase 1 (S7.1) delivered;
-> Phase 3 foundations (S7.3 lexical scorer + audit) delivered.
-> Phase 2 (browser/Playwright) and Phase 4 (live LLM) pending.
+> Phase 3 foundations (S7.3 lexical scorer + audit) delivered;
+> Phase 2 (browser/Playwright, S7.2) ✅ and Phase 4 (live LLM tool-calling, S7.4) ✅
+> delivered (fixture default; live behind the `live` feature / when configured).
+> Remaining: embedding scorer (S7.3 full) and live infra/ops.
 > Branch: `claude/intelligent-cannon-rY1gS`.
 > Companion: [13 — Local LLM Provider Ecosystem](./13-local-llm-providers.md)
 > (E8) supplies the *brains* that E7's tools give *hands*. The chat/tool-calling
@@ -130,7 +132,12 @@ The enabling layer everything else depends on.
 2. ⬜ Live SearXNG test — guarded by `live` feature + `#[ignore]` (infrastructure not shipped yet).
 3. ✅ Egress guard exercised by `searxng_provider_blocks_private_base_url` unit test.
 
-### Phase 2 — `browser` tool via Playwright subprocess (`S7.2`)
+### Phase 2 — `browser` tool via Playwright subprocess (`S7.2`) ✅
+
+> Delivered in `crates/actuators/src/browser.rs`: `BrowserDriver` trait,
+> `MockBrowserDriver` (CI default), feature-gated `PlaywrightDriver`
+> (UDS subprocess + `ChildGuard`, egress-screened); `browser`/`browse`/`extract`
+> tools. Fixture default; live Playwright behind the `live` feature.
 
 - **S7.2.1 — Playwright driver process.** A Node (or Python) Playwright worker
   that speaks the **same length-prefixed-JSON-over-UDS** protocol as the cortex.
@@ -176,7 +183,12 @@ end-to-end; (2) navigation to a blocked host is vetoed and audited;
 2. ✅ Selection is deterministic for fixed inputs.
 3. ⬜ Embedding-based selection requires `EmbeddingScorer` (Phase 3 full).
 
-### Phase 4 — Live LLM backends & real cortex tool-calling (`S7.4`)
+### Phase 4 — Live LLM backends & real cortex tool-calling (`S7.4`) ✅
+
+> Delivered in `crates/vita/src/cortex_bridge.rs`: `ChatCortexBridge` drives an
+> E8 `ChatBackend` through a bounded Plan/Act/Observe loop; hosted seam in
+> `kernels/hosted/src/cortex.rs` (`RegistryToolDispatcher`) + the `ask`/`cortex`
+> subcommand. Fixture default; live Anthropic/Ollama/OpenAI-compatible when configured.
 
 - **S7.4.1 — Anthropic live mode.** Real HTTPS + streaming + tool-use blocks;
   map `ToolSpec` → Anthropic tool schema; parse `tool_use` → `ToolCall`, feed

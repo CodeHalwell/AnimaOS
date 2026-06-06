@@ -9,11 +9,17 @@ license.workspace = true
 # a no_std-compatible layer.
 [features]
 default = ["std"]
-std = ["dep:sha2", "dep:actuators"]
+# E12: motivation/std follows vita/std so the Striatal Gate ↔ drive integration
+# (motivation_gate) is available in the hosted kernel while staying no_std-clean.
+std = ["dep:sha2", "dep:actuators", "dep:llm-backends", "motivation/std"]
 
 [dependencies]
 memory = { path = "../memory" }
 interoception = { path = "../interoception" }
+# E12 — Motivation: drive hierarchy feeds the Striatal Gate value score via
+# motivation_gate. default-features = false keeps the no_std path clean; the
+# `std` feature is pulled in transitively through vita's own `std` feature.
+motivation = { path = "../motivation", default-features = false }
 scheduler = { path = "../scheduler" }
 senses = { path = "../senses" }
 kv-controller = { path = "../kv-controller" }
@@ -28,6 +34,12 @@ serde_json = { workspace = true }
 sha2 = { version = "0.11", default-features = false, optional = true }
 # E7 — Embodiment: egress guard for motor-gate hook at dispatch (S7.0.3).
 actuators = { path = "../actuators", optional = true }
+# E7 S7.4 — Rust-native cortex tool-calling loop: drives an E8 `ChatBackend`
+# (Anthropic/Ollama/OpenAI-compatible) through the Plan/Act/Observe loop.
+# llm-backends lives outside the no_std workspace tree (it pulls in ureq/TLS),
+# so it is gated behind vita's `std` feature and pulled in only there. No
+# dependency cycle: llm-backends → scheduler (not vita).
+llm-backends = { path = "../../llm-backends", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
