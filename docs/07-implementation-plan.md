@@ -1703,6 +1703,140 @@ test are all in-tree.
 
 ---
 
+## Stage 7 — Autonomous Agent Layer (Forward Epics E7–E15)
+
+The forward epics catalogued in `docs/18-forward-epics.md` and the
+companion design docs (12–21) build the autonomous-agent layer on top of
+the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
+stable identifier sequence; the dependency graph and recommended build
+order are recorded in `docs/18-forward-epics.md`.
+
+### Epic E7 — Embodiment ⬜
+
+Real-world tools: web-search (SearXNG) + browser (Playwright), egress/SSRF
+guard + motor-gate-at-dispatch, semantic tool selection wired to
+`length_robust_filter`, live Anthropic/Ollama tool-calling.
+See `docs/12-real-world-tools-plan.md`.
+
+### Epic E8 — Local Inference ⬜
+
+Provider ecosystem + fine-tuning: OpenAI-compatible umbrella (vLLM/LM Studio
+/NVIDIA NIM/HF TGI/llama.cpp-server), native FFI runtimes, Unsloth as the
+default trainer, HRA for the instinct tier, eval harness, adapter library +
+dynamic mounting.
+See `docs/13-local-llm-providers.md`.
+
+### Epic E9 — Onboarding ⬜
+
+First-run experience: `anima init` wizard, `anima doctor` preflight,
+conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support,
+per-tier router dispatch, unified quickstart.
+See `docs/14-onboarding.md`.
+
+### Epic E10 — Presence ⬜
+
+Communication & multimodal: comms-app channel gateways (Telegram/Slack
+first) over the existing operator seam; text/image/voice as first-class
+bidirectional modalities.
+See `docs/15-communication-multimodal.md`.
+
+### Epic E11 — Self-Extension ✅
+
+**Scope.** Skills system following the Anthropic Agent Skills model
+(progressive disclosure), a promotion/safety gate, and a self-improvement
+reflection loop.  The agent can register its own prompt-only skills and,
+behind operator approval, new WASM-sandboxed tools.
+
+**Dependencies.** Stage 1 complete (`LlmBackend`, scheduler, audit log),
+E2.3 (`length_robust_filter` in `praxis`), E2.5 (`WasmSandbox` in
+`praxis`), E5.6 (`UnsafeMotorActionGate`, `DefenceLayer`).
+
+**Stories.**
+- S11.1 Skill registry & progressive disclosure. ✅ (`crates/skills/src/registry.rs` —
+  `SkillRegistry` with `list_active()` / `load_body()` / `select_for_task()`
+  three-stage progressive disclosure; `length_robust_filter` reused from
+  `praxis::routing`; token-overlap Jaccard scorer)
+- S11.2 Built-in / bundled skills. ✅ (`crates/skills/src/builtins.rs` —
+  `BUILTIN_SKILLS`: `web-research`, `summarise-and-archive`, `draft-a-tool`,
+  `onboarding-interview`; all pre-loaded via `SkillRegistry::with_builtins()`)
+- S11.3 Agent-registered skills (prompt-only). ✅ (`crates/skills/src/proposal.rs` —
+  `SkillProposal` → `SkillContentScreen` (13 injection patterns) → `PromotionGateConfig`
+  auto-promote path; `ProposalAction::{AutoPromoted,PendingApproval,Rejected}`;
+  `AuditEntry::SkillRegistered` / `SkillPromoted` variants in `vita::audit`)
+- S11.4 Agent-registered tools (WASM, operator-approval required). ✅
+  (`ToolProposal` → `evaluate_tool_proposal_with_summary()` — size check +
+  injection screen; tools **always** held as `PendingApproval` regardless
+  of `auto_promote_agent_skills`; `AuditEntry::ToolProposed` / `ToolApproved`
+  / `ToolRevoked` variants in `vita::audit`)
+- S11.5 Self-improvement loop (dream-phase reflection). ✅
+  (`crates/skills/src/reflection.rs` — `reflect_on_episodes()` identifies
+  tool co-occurrence patterns above `min_occurrence_threshold`; `generate_skill_draft()`
+  produces a SKILL.md draft from a `FrictionPattern`; `ReflectionReport`
+  surfaced as `AuditEntry::SkillReflectionCompleted`)
+- S11.6 Capability, provenance & rollback substrate. ✅
+  (`crates/skills/src/provenance.rs` — `SkillProvenance` with `authored_by`
+  / `proposed_at_ns` / `source_episode`; `SkillState::{Active,Proposed,Quarantined,RolledBack}`;
+  `SkillRegistry::rollback()` / `quarantine()` / `kill_switch()` — kill
+  switch quarantines all active agent-authored skills without touching
+  built-in or operator skills; `AuditEntry::SkillKillSwitchActivated`)
+
+**`anima skills` CLI (E11 exit criterion).** `cargo run --bin anima-hosted -- skills <sub>`
+supports: `list`, `info <id>`, `register <path>`, `promote <id>`,
+`rollback <id>`, `quarantine <id> [reason]`, `kill-switch [reason]`,
+`reflect`.
+
+**Exit criteria.**
+1. Skill registered, screened, gate-evaluated, and selectable for cortex context. ✅
+   (`registry_with_builtins_loads_four_skills`, `register_from_text_adds_skill`,
+   `select_for_task_returns_relevant_skills`, `select_for_task_with_tight_threshold_narrows_results`)
+2. Agent-authored skill auto-promotes (default) or pends on operator approval
+   when disabled; operator/builtin skills always auto-promote. ✅
+   (`valid_agent_skill_auto_promotes_by_default`, `agent_skill_pending_when_auto_promote_disabled`,
+   `operator_skill_is_always_auto_promoted`)
+3. Injection patterns in skill text cause rejection before registration. ✅
+   (`injection_pattern_causes_rejection`, `content_screen_catches_all_injection_patterns`
+   — all 13 patterns verified)
+4. Tool proposals are always held for operator approval (no auto-promotion). ✅
+   (`tool_proposal_is_always_pending_approval`)
+5. Kill switch quarantines agent skills, preserving built-in and operator skills. ✅
+   (`kill_switch_quarantines_only_agent_skills`)
+6. Self-improvement reflection identifies recurring friction patterns. ✅
+   (`reflect_identifies_tool_co_occurrence_pattern`, `patterns_sorted_by_occurrence_count_descending`,
+   `generate_skill_draft_produces_valid_skill_text`)
+7. Every lifecycle event has a corresponding `AuditEntry` variant. ✅
+   (`SkillRegistered`, `SkillPromoted`, `SkillRolledBack`, `SkillQuarantined`,
+   `SkillKillSwitchActivated`, `ToolProposed`, `ToolApproved`, `ToolRevoked`,
+   `SkillReflectionCompleted` — 9 new variants in `vita::audit`)
+8. 43 unit tests across all E11 stories, all passing in CI. ✅
+
+### Epic E12 — Motivation ⬜
+
+Six-tier drive hierarchy (viability → self-actualisation) feeding the
+Striatal Gate `value_score`; endogenous goal generation; affect/mood +
+economic agency; corrigibility invariant above the lattice.
+See `docs/17-motivation-and-drives.md`.
+
+### Epic E13 — Alignment Assurance ⬜
+
+Immutable value charter; constitution-enforcement hook; continuous
+alignment evals; defence red-team harness; corrigibility test suite.
+See `docs/19-constitution-and-alignment.md`.
+
+### Epic E14 — Higher Cognition ⬜
+
+Metacognition & confidence calibration; prospective/temporal memory;
+personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback.
+See `docs/20-higher-cognition.md`.
+
+### Epic E15 — Trust & Lifecycle ⬜
+
+"While you were away" digest; approval-queue surface (the operator-facing
+half of E11's promotion gate); decision replay / time-travel debug; digital-
+twin sandbox; state versioning & migration.
+See `docs/21-operator-trust-and-lifecycle.md`.
+
+---
+
 ## Open Decisions
 
 The following decisions are not yet resolved and gate the affected Stage

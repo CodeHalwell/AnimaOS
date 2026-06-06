@@ -809,6 +809,7 @@ dependencies = [
  "scheduler",
  "senses",
  "serde_json",
+ "skills",
  "vita",
 ]
 
@@ -1491,6 +1492,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "skills"
+version = "0.1.0"
+dependencies = [
+ "praxis",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1739,6 +1750,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "skills",
 ]
 
 [[package]]

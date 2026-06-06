@@ -16,4 +16,5 @@ scheduler = { path = "../../crates/scheduler" }
 senses = { path = "../../crates/senses" }
 console = { path = "../../crates/console" }
 llm-backends = { path = "../../llm-backends" }
+skills = { path = "../../crates/skills" }
 serde_json = { workspace = true }
