@@ -12,6 +12,7 @@ members = [
   "crates/kv-controller",
   "crates/console-proto",
   "crates/console",
+  "crates/motivation",
   "crates/skills",
   "crates/comms",
   "crates/actuators",

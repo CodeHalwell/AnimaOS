@@ -365,6 +365,60 @@ fn print_audit(manager: &LifecycleManager) {
                      (eviction more aggressive under pressure)"
                 );
             }
+            // E12 Motivation
+            AuditEntry::DriveStateSnapshot {
+                viability_urgency,
+                service_urgency,
+                epistemic_urgency,
+                drive_delta,
+                lattice_suppression_active,
+                ..
+            } => {
+                println!(
+                    "  🎯 drive_state viability={viability_urgency:.2} service={service_urgency:.2} \
+                     epistemic={epistemic_urgency:.2} delta={drive_delta:.3}{}",
+                    if *lattice_suppression_active { " [lattice suppressed]" } else { "" }
+                );
+            }
+            AuditEntry::GoalSpawned {
+                goal_id,
+                description,
+                provenance,
+                priority,
+                ..
+            } => {
+                println!(
+                    "  🎯 goal_spawned id={goal_id} priority={priority:.2} \
+                     provenance={provenance} desc={description:?}"
+                );
+            }
+            AuditEntry::GoalCompleted {
+                goal_id,
+                description,
+                ..
+            } => {
+                println!("  ✅ goal_completed id={goal_id} desc={description:?}");
+            }
+            AuditEntry::CorrigibilityHold {
+                blocked_goal_description,
+                reason,
+                ..
+            } => {
+                println!(
+                    "  🛑 corrigibility_hold blocked={blocked_goal_description:?} reason={reason:?}"
+                );
+            }
+            AuditEntry::AffectStateSnapshot {
+                valence,
+                arousal,
+                gate_threshold_nudge,
+                ..
+            } => {
+                println!(
+                    "  💭 affect valence={valence:+.2} arousal={arousal:.2} \
+                     nudge={gate_threshold_nudge:.3}"
+                );
+            }
             // ── E11 Skills & Self-Extension entries ───────────────────────────
             AuditEntry::SkillRegistered {
                 skill_id,

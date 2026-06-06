@@ -573,6 +573,87 @@ pub enum AuditEntry {
         effective_budget: usize,
     },
 
+    // ── E12 Motivation audit entries ──────────────────────────────────────────
+    /// Snapshot of the drive-hierarchy urgency levels (S12.7).
+    ///
+    /// Emitted once per scheduler cycle when the `DriveRegistry` is configured.
+    /// Six urgencies in tier order: Viability, Integrity, Service, Epistemic,
+    /// Achievement, SelfActualisation — all in `[0, 1]`.
+    DriveStateSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Urgency for Tier-0 (Viability): thermal, memory, power, financial deficits.
+        viability_urgency: f32,
+        /// Urgency for Tier-1 (Integrity): structural/identity coherence.
+        integrity_urgency: f32,
+        /// Urgency for Tier-2 (Service): operator attention + objective pressure.
+        service_urgency: f32,
+        /// Urgency for Tier-3 (Epistemic): curiosity + mastery.
+        epistemic_urgency: f32,
+        /// Urgency for Tier-4 (Achievement): goal-completion pressure.
+        achievement_urgency: f32,
+        /// Urgency for Tier-5 (SelfActualisation): long-horizon coherence.
+        self_actualisation_urgency: f32,
+        /// Drive delta added to the gate's value_score this cycle (`[0, 1]`).
+        drive_delta: f32,
+        /// Whether priority-lattice suppression was active (lower tiers stressed).
+        lattice_suppression_active: bool,
+    },
+
+    /// An endogenous goal was proposed and admitted to the goal registry (S12.5).
+    ///
+    /// Logged when [`EndogenousGoalGenerator`] produces a goal that passes the
+    /// corrigibility check and is admitted to the [`GoalRegistry`].
+    GoalSpawned {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable goal identifier assigned by the registry.
+        goal_id: u64,
+        /// Natural-language description of the intention.
+        description: String,
+        /// `"Exogenous"` or `"Endogenous(<tier>)"`.
+        provenance: String,
+        /// Normalised priority in `[0, 1]`.
+        priority: f32,
+    },
+
+    /// An active goal was marked complete (S12.5).
+    GoalCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable goal identifier.
+        goal_id: u64,
+        /// Description of the completed goal.
+        description: String,
+    },
+
+    /// The corrigibility invariant fired and blocked an endogenous goal (S12.3).
+    ///
+    /// Logged whenever [`CorrigibilityGuard::check`] returns `Held`.
+    /// Repeated holds escalate to user attention via the defence layer.
+    CorrigibilityHold {
+        /// Agent identifier.
+        agent_id: String,
+        /// Brief description of the blocked goal.
+        blocked_goal_description: String,
+        /// Reason the corrigibility guard rejected the goal.
+        reason: String,
+    },
+
+    /// Affective-state snapshot derived from the drive constellation (S12.9).
+    ///
+    /// Emitted alongside [`AuditEntry::DriveStateSnapshot`] when the motivation
+    /// system is active.  Bounded nudge — never overrides lattice or corrigibility.
+    AffectStateSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Hedonic valence in `[-1, 1]`: positive = content, negative = stressed.
+        valence: f32,
+        /// Arousal level in `[0, 1]`: low = calm, high = active/urgent.
+        arousal: f32,
+        /// Gate-threshold nudge factor in `[0.9, 1.1]`.
+        gate_threshold_nudge: f32,
+    },
     // ── E11 Skills & Self-Extension audit entries ─────────────────────────────
     /// A new skill was successfully registered in the skill registry (S11.3).
     ///
