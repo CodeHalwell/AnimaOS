@@ -654,6 +654,195 @@ pub enum AuditEntry {
         /// Gate-threshold nudge factor in `[0.9, 1.1]`.
         gate_threshold_nudge: f32,
     },
+    // ── E11 Skills & Self-Extension audit entries ─────────────────────────────
+    /// A new skill was successfully registered in the skill registry (S11.3).
+    ///
+    /// Written immediately after `SkillRegistry::register_from_text` succeeds,
+    /// regardless of whether the skill was auto-promoted or held as `Proposed`.
+    SkillRegistered {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable skill identifier (lowercased `name`, spaces → `-`).
+        skill_id: String,
+        /// Human-readable skill name.
+        skill_name: String,
+        /// Who authored the skill (`"builtin"` / `"operator"` / `"agent"`).
+        authored_by: String,
+        /// Source episode ID, if the agent authored this skill.
+        source_episode: Option<String>,
+        /// Initial lifecycle state (`"Active"` or `"Proposed"`).
+        initial_state: String,
+    },
+
+    /// A proposed skill was promoted to `Active` by the operator (S11.3).
+    SkillPromoted {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was promoted.
+        skill_id: String,
+    },
+
+    /// A skill was rolled back from `Active` to `RolledBack` (S11.6).
+    SkillRolledBack {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was rolled back.
+        skill_id: String,
+        /// Human-readable reason for the rollback.
+        reason: String,
+    },
+
+    /// A skill was quarantined due to a defence flag or circuit-breaker trip (S11.6).
+    SkillQuarantined {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Skill that was quarantined.
+        skill_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The kill switch was activated — all active agent-authored skills quarantined (S11.6).
+    SkillKillSwitchActivated {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// IDs of every skill that was quarantined.
+        quarantined_skill_ids: Vec<String>,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// A WASM tool proposal was submitted for operator approval (S11.4).
+    ToolProposed {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Who authored the tool.
+        authored_by: String,
+        /// Fixture test summary string supplied by the sandbox runner.
+        fixture_summary: String,
+    },
+
+    /// A WASM tool proposal was approved by the operator (S11.4).
+    ToolApproved {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+    },
+
+    /// A WASM tool was revoked (quarantined or removed) (S11.6).
+    ToolRevoked {
+        /// Agent that owns this registry.
+        agent_id: String,
+        /// Stable tool identifier.
+        tool_id: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// The self-improvement reflection pass completed during the dream phase (S11.5).
+    SkillReflectionCompleted {
+        /// Agent that ran the reflection.
+        agent_id: String,
+        /// Number of episodes analysed.
+        episodes_analysed: usize,
+        /// Number of friction patterns identified.
+        patterns_found: usize,
+        /// Number of new skill drafts generated.
+        proposals_generated: usize,
+    },
+    // ── E10 — Presence: Channel Gateway audit entries ─────────────────────────
+    /// An inbound message arrived from an external channel and was admitted
+    /// into the sensory bridge (E10 S10.1).
+    ///
+    /// Written by the channel gateway after a successful
+    /// `SensoryBridge::packetize_*_checked` call.
+    ChannelMessageReceived {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel adapter id (e.g. `"telegram"`, `"slack"`).
+        channel: String,
+        /// Sender identifier on the originating platform.
+        from: String,
+        /// Modality of the message (`"text"`, `"image"`, or `"voice"`).
+        modality: String,
+    },
+    /// An outbound message was dispatched back to a channel (E10 S10.1).
+    ///
+    /// Written when the gateway successfully hands off a reply to an adapter's
+    /// `send()` method.
+    ChannelMessageSent {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel adapter id.
+        channel: String,
+        /// Recipient identifier on the target platform.
+        to: String,
+        /// Modality of the outbound content.
+        modality: String,
+    },
+    /// An inbound channel message was rejected because the channel or route
+    /// does not support the required modality (E10 S10.5).
+    ///
+    /// Written when the gateway receives a modality (e.g. `"image"`) that
+    /// the current backend capabilities do not handle.  The packet is dropped
+    /// and this entry is emitted so the operator can see why.
+    ModalityUnsupported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Channel that produced the unsupported modality.
+        channel: String,
+        /// The modality that was not supported.
+        modality: String,
+    },
+    // ── E7 — Embodiment audit entries ─────────────────────────────────────────
+    /// An outbound network request passed egress screening and was dispatched
+    /// (E7 S7.0.3).
+    ///
+    /// Emitted immediately before the tool driver `invoke` call so the audit
+    /// trail records every effected external action.
+    EgressRequested {
+        /// Stable tool identifier that initiated the request.
+        tool_id: String,
+        /// Target URL (redacted of query-string secrets by the call site).
+        url: String,
+    },
+
+    /// An outbound network request was denied by the egress guard before any
+    /// network activity occurred (E7 S7.0.3).
+    ///
+    /// Emitted in place of [`AuditEntry::EgressRequested`] when the guard
+    /// vetoes the request.  No network connection is ever opened for denied
+    /// requests.
+    EgressBlocked {
+        /// Stable tool identifier that attempted the request.
+        tool_id: String,
+        /// Target URL that was denied.
+        url: String,
+        /// Human-readable denial reason from the egress guard.
+        reason: String,
+    },
+
+    /// The semantic tool-selection step narrowed the route's allow-list before
+    /// building the cortex invocation request (E7 S7.3.4).
+    ///
+    /// Satisfies E7 S7.3 exit criterion 2: "selection is deterministic for
+    /// fixed inputs."  Written once per cortex invocation that goes through
+    /// the scorer pipeline.
+    ToolSelection {
+        /// Agent identifier.
+        agent_id: String,
+        /// Task description used as the scoring query.
+        task_description: String,
+        /// Number of tools scored (= size of the tier allow-list).
+        candidates_scored: usize,
+        /// Number of tools kept after `length_robust_filter`.
+        kept: usize,
+        /// The `tau_rel` threshold applied to the filter.
+        tau_rel: f32,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────
