@@ -7,14 +7,22 @@ pub mod audit;
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
+#[cfg(feature = "std")]
+pub mod dispatch;
 pub mod episodic;
 pub mod gate;
 pub mod identity;
 pub mod kv_gate;
+#[cfg(feature = "std")]
+pub mod metacognition;
+#[cfg(feature = "std")]
+pub mod prospective;
 pub mod router;
 #[cfg(feature = "std")]
 pub mod sensors;
 pub mod sleep;
+#[cfg(feature = "std")]
+pub mod watchdog;
 
 pub use audit::{AuditEntry, AuditLog};
 #[cfg(feature = "std")]
@@ -25,6 +33,8 @@ pub use cortex_bridge::{
 };
 #[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;
+#[cfg(feature = "std")]
+pub use dispatch::{redact_url, EgressAwareDispatcher};
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
     unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
@@ -41,6 +51,13 @@ pub use kv_gate::{
     effective_budget_under_pressure, gate_working_context, gate_working_context_with_signals,
     ContextBlock, GatePassResult,
 };
+#[cfg(feature = "std")]
+pub use metacognition::{CalibrationRecord, ConfidenceScore, ConfidenceTracker, HelpRequest};
+#[cfg(feature = "std")]
+pub use prospective::{
+    inject_due_intentions, CompletionOutcome, Intention, IntentionStore, IntentionStoreError,
+    DEFAULT_OVERDUE_GRACE_NS,
+};
 pub use router::{
     build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
     validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
@@ -49,6 +66,8 @@ pub use router::{
 #[cfg(feature = "std")]
 pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
+#[cfg(feature = "std")]
+pub use watchdog::{AgentSnapshot, CognitiveWatchdog, WatchdogConfig, WatchdogTrip};
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -566,6 +585,18 @@ pub async fn somatic_execution_loop(
             let prompt = match &pkt.packet {
                 SensoryPacket::Text(t) => t.clone(),
                 SensoryPacket::Pcm(samples) => format!("[PCM {} samples]", samples.len()),
+                SensoryPacket::Image {
+                    mime,
+                    bytes,
+                    caption,
+                } => format!(
+                    "[Image {} B {mime}{}]",
+                    bytes.len(),
+                    caption
+                        .as_deref()
+                        .map(|c| format!(" caption={c:?}"))
+                        .unwrap_or_default()
+                ),
             };
 
             // E6.6: operator-force override — record an audited gate decision

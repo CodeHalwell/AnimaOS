@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anima-self = { path = "../self" }
+constitution = { path = "../constitution" }
 
 [dev-dependencies]
 anima-self = { path = "../self" }
