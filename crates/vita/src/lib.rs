@@ -29,9 +29,9 @@ pub mod watchdog;
 pub use audit::{AuditEntry, AuditLog};
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
-    archive_episode, cortex_handle, CortexBackend, CortexError, CortexHandle,
+    archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
     CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
-    PythonCortexBridge, ToolDispatcher, ToolSpec,
+    PythonCortexBridge, ToolDispatcher, ToolSpec, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURNS,
 };
 #[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;

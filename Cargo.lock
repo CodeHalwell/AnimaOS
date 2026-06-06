@@ -2272,6 +2272,7 @@ dependencies = [
  "defence",
  "interoception",
  "kv-controller",
+ "llm-backends",
  "memory",
  "motivation",
  "scheduler",
