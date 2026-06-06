@@ -1319,6 +1319,117 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
 
 ---
 
+## Stage 7 — Autonomous Agent Layer
+
+Forward epics E7–E15 build the autonomous-agent capabilities on top of the
+somatic core completed in Stages 1–6.  The dependency graph and recommended
+build sequence are documented in `docs/18-forward-epics.md`.
+
+### Epic E12 — Motivation ✅
+
+**Scope.** Six-tier drive hierarchy (Viability → Integrity → Service →
+Epistemic → Achievement → SelfActualisation) feeding the Striatal Gate
+`value_score`; state-dependent priority lattice with corrigibility ceiling;
+curiosity and mastery intrinsic rewards with satiation; endogenous goal
+generation (idle-when-viable); affective state (valence + arousal) as a
+compressed drive read-out; economic agency (cost–benefit model-tier
+selection); full interpretability surface (drive-decomposed `anima why`,
+audit entries).
+
+**Dependencies.** E5.2 (Striatal Gate integration point), E5.7
+(interoception signals as Tier-0), E5.6 (defence-enforced corrigibility).
+
+**Stories.**
+- S12.1 Drive model & registry. ✅ (`crates/motivation/src/drive.rs` —
+  `DriveTier` (6 tiers, `Viability`=0 through `SelfActualisation`=5);
+  `DriveRegistry` with `InteroceptiveSignals` as Tier-0 input; `CuriosityState`
+  with exponential satiation decay; `MasteryState` with EMA competence tracking;
+  `DriveStateSnapshot`; `DriveActionCandidate`; `DriveRegistryConfig`)
+- S12.2 Value integration with the gate. ✅ (`crates/motivation/src/integrator.rs` —
+  `DriveValueIntegrator::augment()` adds drive delta additively behind
+  `DriveIntegratorConfig::enabled` flag (opt-in, A/B-able against today's
+  baseline); `DriveAugmentedValue` with full `decomposition` for audit;
+  `DriveContribution` per tier; `reasoning_string()` for `anima why`)
+- S12.3 State-dependent weighting & priority lattice. ✅
+  (`crates/motivation/src/lattice.rs` — `PriorityLattice::compute_weights()`
+  applies multiplicative suppression from lower-tier urgency to higher tiers;
+  configurable `suppression_threshold`, `suppression_factor`, `min_weight`;
+  corrigibility ceiling enforced by `CorrigibilityGuard` outside the lattice)
+- S12.4 Intrinsic reward signals (Tier 3). ✅ (`CuriosityState` — urgency
+  inversely proportional to recent novelty, exponential satiation decay,
+  satiation floor preventing Goodharting; `MasteryState` — urgency = aspiration
+  gap, EMA competence accreting from task outcomes; both drive `DriveRegistry`
+  Tier-3 urgency)
+- S12.5 Goal representation & endogenous generation. ✅
+  (`crates/motivation/src/goal.rs` — `Goal` with `id/description/success_criteria/
+  provenance/priority/completed`; `GoalProvenance::{Exogenous,Endogenous}`;
+  `GoalRegistry` with capacity-bounded storage and completed-goal eviction;
+  `EndogenousGoalGenerator::propose_goals()` proposes Epistemic and Achievement
+  goals when viable + idle and drive urgency > threshold; all proposals pass
+  `CorrigibilityGuard`)
+- S12.6 Operator-endorsed objectives & values. ✅ (`DriveRegistry::set_pending_objectives()`
+  feeds operator-objective count into Tier-2 service urgency; `DriveActionCandidate::is_operator_objective`
+  adds bonus in value contributions; identity memory integration point documented
+  for E9 onboarding to seed objectives)
+- S12.7 Interpretability surface. ✅ (`crates/vita/src/audit.rs` — five new
+  `AuditEntry` variants: `DriveStateSnapshot` (per-tier urgencies + drive_delta +
+  lattice_suppression_active), `GoalSpawned`, `GoalCompleted`, `CorrigibilityHold`,
+  `AffectStateSnapshot`; `kernels/hosted/src/main.rs` — `print_audit()` renders
+  all five new variants with emoji prefixes; `DriveValueIntegrator::reasoning_string()`
+  extends `anima why` decomposition)
+- S12.8 Learned value model — deferred to a later iteration (see doc §5, S12.8).
+- S12.9 Affective state (global mood). ✅ (`crates/motivation/src/affect.rs` —
+  `AffectState::from_drives()` derives `valence` ([−1, 1]: distress counts double)
+  and `arousal` ([0, 1]: mean urgency); `is_content()`, `is_stressed()`;
+  `gate_threshold_nudge()` in [0.9, 1.1] — nudges but never overrides lattice or
+  corrigibility; `AuditEntry::AffectStateSnapshot` carries all three fields)
+- S12.10 Economic agency. ✅ (`crates/motivation/src/economics.rs` —
+  `ModelTier` (CheapLocal/MidTier/Frontier) mirroring gate `CostClass`;
+  `CostBenefitAnalysis::net_value()` = `capability × drive_value − cost_penalty`;
+  `choose_tier()` with financial/power budget gates and tiebreak-to-cheapest;
+  `marginal_value()` for upgrade justification)
+
+**Exit criteria.**
+1. Drive registry computes Tier-0 urgencies directly from `InteroceptiveSignals`
+   with no new sensing. ✅ (`neutral_signals_produce_low_viability_urgency`,
+   `stressed_signals_produce_high_viability_urgency`, `all_urgencies_are_clamped_to_unit_interval`)
+2. Value integration is additive, opt-in, and bounded by `max_drive_delta`. ✅
+   (`disabled_integrator_returns_base_value_unchanged`,
+   `drive_delta_bounded_by_max_drive_delta`, `total_value_clamped_to_unit_interval`,
+   `decomposition_has_one_entry_per_tier`)
+3. Priority lattice suppresses Tier-3+ under Tier-0 stress; suppression is
+   monotone and never drops weights below `min_weight`. ✅
+   (`high_viability_urgency_suppresses_epistemic_tier`,
+   `suppression_is_monotone_with_urgency`,
+   `weights_never_fall_below_min_weight`,
+   `viability_tier_weight_unaffected_by_its_own_urgency`)
+4. Curiosity saturates with repeated novelty exposure and recovers after decay. ✅
+   (`curiosity_saturates_after_many_observations`,
+   `curiosity_recovers_after_decay`)
+5. Endogenous goals are proposed when viable + idle; survival stress suppresses
+   generation; corrigibility guard vetoes resistance/acquisition/self-modification. ✅
+   (`endogenous_generator_proposes_goals_when_viable_and_idle`,
+   `endogenous_generator_suppressed_under_survival_stress`,
+   `endogenous_generator_does_not_duplicate_active_goals`,
+   `corrigibility_guard_holds_resistance_goal`,
+   `corrigibility_guard_holds_resource_acquisition_endogenous`)
+6. Affect is derived from drive constellation; valence negative under viability
+   stress; gate nudge bounded to [0.9, 1.1]. ✅
+   (`high_viability_urgency_produces_negative_valence`,
+   `stressed_state_detected_correctly`, `content_state_detected_correctly`,
+   `gate_threshold_nudge_conservative_under_stress`,
+   `gate_threshold_nudge_bounded_between_0_9_and_1_1`)
+7. Economic agency chooses cheapest sufficient tier; budget constraints enforced. ✅
+   (`choose_cheap_local_when_all_tiers_equally_capable`,
+   `choose_frontier_when_it_has_much_higher_capability`,
+   `critically_low_financial_budget_blocks_frontier`,
+   `critically_low_power_budget_forces_cheap_local`)
+
+**Total: 53 unit tests across 6 modules; workspace builds clean (std + no_std);
+clippy -D warnings clean; cargo fmt clean.**
+
+---
+
 ## Stage 4 — Bare-Metal Isolation and Production Verification
 
 Port to the microVM target, integrate `smoltcp` and `rustls`, complete
