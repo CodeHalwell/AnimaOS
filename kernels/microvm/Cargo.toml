@@ -140,7 +140,7 @@ smoltcp = { version = "0.13", default-features = false, features = [
 #   RNG is our RDRAND-backed RdRand struct in tls.rs.
 #
 # der: DER / ASN.1 parsing for loading the build-time-generated ECDSA key.
-p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "pkcs8"] }
+p256 = { version = "0.14.0-rc.10", default-features = false, features = ["ecdh", "ecdsa", "pkcs8"] }
 # sha2 0.11 + hmac 0.13 + hkdf 0.13 all sit on the digest 0.11 / crypto-common
 # 0.2 generation; they must be bumped in lockstep so `Hkdf<Sha256>` and
 # `Hmac<Sha256>` type-check against the same `Digest` traits.
