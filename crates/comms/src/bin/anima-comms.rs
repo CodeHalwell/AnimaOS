@@ -146,13 +146,6 @@ fn main() {
 
     println!(
         "anima-comms: bridge has {} packet(s) queued for somatic loop",
-        {
-            let b = gateway.bridge();
-            let mut n = 0usize;
-            while b.next_packet().is_some() {
-                n += 1;
-            }
-            n
-        }
+        gateway.bridge().queue_len()
     );
 }

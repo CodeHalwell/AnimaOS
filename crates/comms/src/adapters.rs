@@ -80,7 +80,7 @@ impl TelegramAdapter {
     pub fn with_fixture(messages: Vec<FixtureMessage>) -> Self {
         Self {
             fixture: FixtureQueue::new(messages),
-            live: false,
+            live: std::env::var("ANIMA_COMMS_LIVE").is_ok(),
         }
     }
 
@@ -142,7 +142,7 @@ impl SlackAdapter {
     pub fn with_fixture(messages: Vec<FixtureMessage>) -> Self {
         Self {
             fixture: FixtureQueue::new(messages),
-            live: false,
+            live: std::env::var("ANIMA_COMMS_LIVE").is_ok(),
         }
     }
 

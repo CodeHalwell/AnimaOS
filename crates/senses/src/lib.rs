@@ -398,6 +398,11 @@ impl SensoryBridge {
                 reason: "image MIME type must not be empty".into(),
             });
         }
+        if !mime.starts_with("image/") {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "MIME type must start with 'image/'".into(),
+            });
+        }
         if let Some(max_bytes) = self.active_bounds.lock().expect("poisoned").max_image_bytes {
             if bytes.len() > max_bytes {
                 return Err(SensoryBridgeError::PolicyViolation {
@@ -428,6 +433,11 @@ impl SensoryBridge {
     /// Returns `true` when at least one packet is waiting to be consumed.
     pub fn has_packets(&self) -> bool {
         !self.queue.lock().expect("poisoned").is_empty()
+    }
+
+    /// Returns the number of packets currently queued in the bridge.
+    pub fn queue_len(&self) -> usize {
+        self.queue.lock().expect("poisoned").len()
     }
 
     /// Pops the next sensory packet (priority stripped), if any.
@@ -889,5 +899,31 @@ mod tests {
             pkt.packet,
             SensoryPacket::Image { caption: None, .. }
         ));
+    }
+
+    #[test]
+    fn packetize_image_checked_rejects_non_image_mime() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_image_checked(vec![1, 2, 3], "text/plain", None, SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn queue_len_reflects_enqueued_packets() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        assert_eq!(bridge.queue_len(), 0);
+        bridge
+            .packetize_image_checked(vec![1], "image/png", None, SensoryPriority::Normal)
+            .unwrap();
+        assert_eq!(bridge.queue_len(), 1);
+        bridge
+            .packetize_image_checked(vec![2], "image/jpeg", None, SensoryPriority::Normal)
+            .unwrap();
+        assert_eq!(bridge.queue_len(), 2);
+        bridge.next_packet();
+        assert_eq!(bridge.queue_len(), 1);
     }
 }

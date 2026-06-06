@@ -265,9 +265,14 @@ impl ChannelGateway {
         let mut outcomes = Vec::new();
 
         for adapter in &self.adapters {
+            let mut count = 0usize;
             while let Some(msg) = adapter.receive() {
                 let outcome = self.ingest(adapter.id(), msg);
                 outcomes.push(outcome);
+                count += 1;
+                if count >= 50 {
+                    break;
+                }
             }
         }
 
