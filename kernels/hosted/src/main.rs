@@ -36,6 +36,27 @@
 //! Inspects and edits the agent's identity memory stored in
 //! `~/.anima/anima/identity.json`.  Every `set` is recorded in an in-process
 //! audit log that is printed on exit, satisfying E5.5 exit criterion 1.
+//!
+//! # `anima doctor` subcommand (E9 S9.3)
+//!
+//! Running `cargo run --bin anima-hosted -- doctor` detects GPU capabilities,
+//! available RAM, local inference providers (Ollama, LM Studio, vLLM, llama.cpp),
+//! and configured API keys, then prints a tier recommendation.
+//!
+//! # `anima init` subcommand (E9 S9.1)
+//!
+//! Running `cargo run --bin anima-hosted -- init` runs the guided first-run
+//! wizard: preflight → provider binding → identity bootstrap → config snippet.
+//! State is persisted in `~/.anima/anima/onboarding.json` so the wizard is
+//! idempotent and re-runs skip completed steps.
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- init
+//! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
+//! ```
+
+mod doctor;
+mod init;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -799,6 +820,17 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("serve") {
         cmd_serve();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("doctor") {
+        let report = doctor::run_doctor();
+        doctor::print_report(&report);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        let non_interactive = args.iter().any(|a| a == "--non-interactive");
+        let reset = args.iter().any(|a| a == "--reset");
+        init::run_init("anima", non_interactive, reset);
         return;
     }
 
