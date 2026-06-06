@@ -153,6 +153,112 @@ fn prompt_with_default(msg: &str, default: &str) -> String {
     }
 }
 
+// ── Identity interview I/O abstraction (E9 S9.2) ─────────────────────────────
+
+/// Abstraction over the question/answer I/O used by the identity interview.
+///
+/// Decoupling the interview *logic* from real stdin makes
+/// [`run_identity_interview`] unit-testable: a scripted [`ScriptedIo`] feeds a
+/// canned transcript with no terminal, while [`StdinIo`] drives the real
+/// prompts in interactive mode.
+pub trait InterviewIo {
+    /// Ask one question.  `default`, when present, is offered as the value used
+    /// if the user just hits Enter.  Returns the answer, or `None` when the user
+    /// declines / EOF and no default applies.
+    fn ask(&mut self, prompt: &str, default: Option<&str>) -> Option<String>;
+}
+
+/// Stdin-backed [`InterviewIo`] reusing the existing [`prompt`] /
+/// [`prompt_with_default`] helpers.
+pub struct StdinIo;
+
+impl InterviewIo for StdinIo {
+    fn ask(&mut self, prompt_msg: &str, default: Option<&str>) -> Option<String> {
+        match default {
+            Some(d) => Some(prompt_with_default(prompt_msg, d)),
+            None => prompt(&format!("{prompt_msg}: ")),
+        }
+    }
+}
+
+/// One identity interview question: the fact `key` it seeds, the `prompt` text,
+/// and an optional default applied when the user provides no answer.
+struct InterviewQuestion {
+    key: &'static str,
+    prompt: &'static str,
+    default: Option<&'static str>,
+}
+
+/// The structured interview question set, aligned with the `onboarding-interview`
+/// builtin skill.  Each entry seeds one identity fact.
+fn interview_questions() -> Vec<InterviewQuestion> {
+    vec![
+        InterviewQuestion {
+            key: "operator_name",
+            prompt: "What's your name, and what would you like me to call you?",
+            default: Some("Operator"),
+        },
+        InterviewQuestion {
+            key: "working_hours",
+            prompt: "What are your typical working hours (e.g. 09:00-18:00 UTC)?",
+            default: Some("09:00-18:00 UTC"),
+        },
+        InterviewQuestion {
+            key: "primary_goals",
+            prompt: "What kinds of tasks do you expect to use me for most?",
+            default: Some("general assistance"),
+        },
+        InterviewQuestion {
+            key: "boundaries",
+            prompt: "Are there any topics or capabilities you'd like me to avoid?",
+            default: Some("none"),
+        },
+        InterviewQuestion {
+            key: "preferred_channel",
+            prompt: "Do you prefer brief and direct replies, or detailed explanations?",
+            default: Some("brief and direct"),
+        },
+    ]
+}
+
+/// Run the conversational identity interview, writing each collected answer as
+/// an identity fact through [`vita::IdentityMemory::set_fact`] +
+/// [`flush_document`](vita::IdentityMemory::flush_document).
+///
+/// The function is I/O-agnostic: drive it with [`StdinIo`] for the real wizard
+/// or a [`ScriptedIo`] in tests.  It returns the `(key, value)` pairs it set, in
+/// order, so callers (and tests) can assert on exactly what was seeded.
+///
+/// Errors writing a single fact are logged but do not abort the interview, so a
+/// transient write failure on one key never loses the remaining answers.
+pub fn run_identity_interview(
+    io: &mut dyn InterviewIo,
+    identity: &mut vita::IdentityMemory,
+    agent_id: &str,
+) -> Vec<(String, String)> {
+    let mut log = vita::AuditLog::new();
+    let mut set: Vec<(String, String)> = Vec::new();
+
+    for q in interview_questions() {
+        let answer = io
+            .ask(q.prompt, q.default)
+            .or_else(|| q.default.map(str::to_string));
+        let value = match answer {
+            Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+            _ => continue, // no answer and no default — skip this fact.
+        };
+        match identity.set_fact(q.key, &value, &mut log, agent_id) {
+            Ok(()) => set.push((q.key.to_string(), value)),
+            Err(e) => eprintln!("  warning: could not set {:?} ({e})", q.key),
+        }
+    }
+
+    if let Err(e) = identity.flush_document() {
+        eprintln!("  warning: could not persist identity ({e})");
+    }
+    set
+}
+
 // ── Wizard steps ──────────────────────────────────────────────────────────────
 
 /// Print the initial banner.
@@ -238,40 +344,126 @@ fn step_identity(state: &mut OnboardingState, agent_id: &str, interactive: bool)
         return;
     }
 
+    // Open (or create) the identity store at its canonical path.
+    let path = vita::IdentityMemory::default_path(agent_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut identity =
+        vita::IdentityMemory::open(&path).unwrap_or_else(|_| vita::IdentityMemory::in_memory());
+
     if interactive {
         println!(
             "Your agent stores a lightweight identity document so it can address you\n\
-             correctly and respect your preferences across sessions.\n"
+             correctly and respect your preferences across sessions.\n\
+             I'll ask a few short questions — press Enter to accept a default.\n"
         );
-        let name = prompt("  What is your name (or how should the agent address you)? ")
-            .unwrap_or_else(|| "Operator".to_string());
 
-        // Write fact through the existing IdentityMemory path.
-        let path = vita::IdentityMemory::default_path(agent_id);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut identity =
-            vita::IdentityMemory::open(&path).unwrap_or_else(|_| vita::IdentityMemory::in_memory());
-        let mut log = vita::AuditLog::new();
-        let _ = identity.set_fact("operator_name", &name, &mut log, agent_id);
-        if let Err(e) = identity.flush_document() {
-            eprintln!("  warning: could not persist identity ({e})");
-        }
+        // Optional cortex-assisted warm opening (graceful fallback to the
+        // deterministic line when no backend is configured).
+        println!("  {}\n", cortex_opening_line(agent_id));
 
-        state.operator_name = Some(name.clone());
+        let mut io = StdinIo;
+        let set = run_identity_interview(&mut io, &mut identity, agent_id);
+
+        // Mirror the operator name into onboarding state for the config step.
+        if let Some((_, name)) = set.iter().find(|(k, _)| k == "operator_name") {
+            state.operator_name = Some(name.clone());
+        }
         state.identity_bootstrapped = true;
-        println!("\n  Saved: operator_name = {name:?}\n");
-        println!("  You can update this later with:\n");
-        println!("    anima-hosted identity set operator_name \"your name\"\n");
+
+        println!("\n  Saved {} identity fact(s):", set.len());
+        for (k, v) in &set {
+            println!("    {k} = {v:?}");
+        }
+        println!("\n  You can update any of these later with:\n");
+        println!("    anima-hosted identity set <key> \"<value>\"\n");
     } else {
-        // Non-interactive: just document what the user should do.
-        println!(
-            "  Non-interactive mode: seed identity manually after first boot:\n\n\
-             \x20\x20  anima-hosted identity set operator_name \"Your Name\"\n\
-             \x20\x20  anima-hosted identity set working_hours \"09:00-18:00 UTC\"\n"
-        );
+        // Non-interactive: seed sensible, deterministic defaults so a scripted
+        // run produces a complete identity document without prompting, and also
+        // print the manual edit hints for operators who want to customise.
+        let mut io = DefaultsIo;
+        let set = run_identity_interview(&mut io, &mut identity, agent_id);
+        if let Some((_, name)) = set.iter().find(|(k, _)| k == "operator_name") {
+            state.operator_name = Some(name.clone());
+        }
         state.identity_bootstrapped = true;
+
+        println!(
+            "  Non-interactive mode: seeded {} default identity fact(s).\n\
+             \x20 Customise after first boot, e.g.:\n\n\
+             \x20\x20  anima-hosted identity set operator_name \"Your Name\"\n\
+             \x20\x20  anima-hosted identity set working_hours \"09:00-18:00 UTC\"\n",
+            set.len()
+        );
+    }
+}
+
+/// Non-interactive [`InterviewIo`] that always returns each question's default
+/// (or `None` when a question has no default).  Drives the deterministic
+/// CI / scripted path so onboarding produces a complete identity document
+/// without blocking on stdin.
+struct DefaultsIo;
+
+impl InterviewIo for DefaultsIo {
+    fn ask(&mut self, _prompt: &str, default: Option<&str>) -> Option<String> {
+        default.map(str::to_string)
+    }
+}
+
+/// Returns a warm opening line for the identity interview.
+///
+/// OPTIONAL E9 S9.2 enhancement: when a chat backend is configured (the cortex
+/// seam from Part A), this asks the cortex — primed with the
+/// `onboarding-interview` skill body — to generate a one-line greeting.  It
+/// always falls back to a deterministic line, so the interview never depends on
+/// a live backend.
+fn cortex_opening_line(agent_id: &str) -> String {
+    const FALLBACK: &str = "Let's get you set up — a few quick questions and we're ready to go.";
+
+    // Only attempt the cortex path when a live backend is explicitly configured;
+    // otherwise the fixture would just echo a sentinel, so we skip it.
+    if std::env::var("ANIMA_COMPAT_LIVE").as_deref() != Ok("1")
+        || std::env::var("ANIMA_COMPAT_URL").is_err()
+    {
+        return FALLBACK.to_string();
+    }
+
+    // Load the onboarding-interview skill body as task framing.
+    let task = skills::SkillRegistry::with_builtins()
+        .load_body("onboarding-interview")
+        .map(|b| {
+            format!(
+                "Using this onboarding guide, write ONE warm, single-sentence \
+                 greeting to open the interview (no preamble):\n\n{}",
+                b.instructions
+            )
+        })
+        .unwrap_or_else(|_| {
+            "Write ONE warm, single-sentence greeting to open a first-run setup interview."
+                .to_string()
+        });
+
+    let registry = std::sync::Arc::new(crate::build_default_tool_registry());
+    let dispatcher = crate::cortex::RegistryToolDispatcher::new(std::sync::Arc::clone(&registry));
+    let bridge = crate::cortex::build_chat_cortex([], 2, 0);
+
+    let request = vita::InvokeRequest {
+        task_id: format!("onboarding-greeting-{agent_id}"),
+        agent_id: agent_id.to_string(),
+        description: task,
+        tools: vec![],
+        identity: serde_json::Value::Null,
+        route_id: None,
+        memory_scope: None,
+        max_turns: Some(1),
+        max_tool_calls: Some(0),
+    };
+    let mut audit = vita::AuditLog::new();
+    use vita::CortexBackend;
+    match bridge.invoke(request, &dispatcher, &mut audit) {
+        Ok(result) if !result.output.trim().is_empty() => result.output.trim().to_string(),
+        _ => FALLBACK.to_string(),
     }
 }
 
@@ -544,6 +736,115 @@ mod tests {
     #[test]
     fn infer_backend_env_value_falls_back_to_mock() {
         assert_eq!(infer_backend_env_value("mock (no local provider)"), "mock");
+    }
+
+    // ── Identity interview (E9 S9.2) ──────────────────────────────────────────
+
+    /// Scripted [`InterviewIo`] that replays a fixed list of answers in order,
+    /// then yields each question's default (so the interview always completes).
+    struct ScriptedIo {
+        answers: std::collections::VecDeque<String>,
+    }
+
+    impl ScriptedIo {
+        fn new(answers: &[&str]) -> Self {
+            Self {
+                answers: answers.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+    }
+
+    impl InterviewIo for ScriptedIo {
+        fn ask(&mut self, _prompt: &str, default: Option<&str>) -> Option<String> {
+            self.answers
+                .pop_front()
+                .or_else(|| default.map(str::to_string))
+        }
+    }
+
+    #[test]
+    fn run_identity_interview_writes_expected_facts() {
+        let mut identity = vita::IdentityMemory::in_memory();
+        let mut io = ScriptedIo::new(&[
+            "Alice",
+            "08:00-16:00 CET",
+            "research and writing",
+            "no legal advice",
+            "detailed explanations",
+        ]);
+        let set = run_identity_interview(&mut io, &mut identity, "anima");
+
+        assert_eq!(set.len(), 5);
+        assert_eq!(identity.get_fact("operator_name"), Some("Alice"));
+        assert_eq!(identity.get_fact("working_hours"), Some("08:00-16:00 CET"));
+        assert_eq!(
+            identity.get_fact("primary_goals"),
+            Some("research and writing")
+        );
+        assert_eq!(identity.get_fact("boundaries"), Some("no legal advice"));
+        assert_eq!(
+            identity.get_fact("preferred_channel"),
+            Some("detailed explanations")
+        );
+    }
+
+    #[test]
+    fn run_identity_interview_uses_defaults_for_empty_answers() {
+        // No scripted answers → every question falls back to its default.
+        let mut identity = vita::IdentityMemory::in_memory();
+        let mut io = ScriptedIo::new(&[]);
+        let set = run_identity_interview(&mut io, &mut identity, "anima");
+
+        assert_eq!(set.len(), 5);
+        assert_eq!(identity.get_fact("operator_name"), Some("Operator"));
+        assert_eq!(identity.get_fact("working_hours"), Some("09:00-18:00 UTC"));
+        assert_eq!(
+            identity.get_fact("preferred_channel"),
+            Some("brief and direct")
+        );
+    }
+
+    #[test]
+    fn run_identity_interview_is_idempotent() {
+        // Running twice with the same answers leaves the same facts (last write
+        // wins; no duplication or error).
+        let mut identity = vita::IdentityMemory::in_memory();
+        let answers = ["Bob", "all hours", "ops", "none", "brief and direct"];
+        let first = run_identity_interview(&mut ScriptedIo::new(&answers), &mut identity, "anima");
+        let second = run_identity_interview(&mut ScriptedIo::new(&answers), &mut identity, "anima");
+
+        assert_eq!(first, second);
+        assert_eq!(identity.get_fact("operator_name"), Some("Bob"));
+        assert_eq!(identity.get_fact("primary_goals"), Some("ops"));
+    }
+
+    #[test]
+    fn defaults_io_yields_each_default() {
+        let mut io = DefaultsIo;
+        assert_eq!(io.ask("q", Some("d")).as_deref(), Some("d"));
+        assert_eq!(io.ask("q", None), None);
+    }
+
+    #[test]
+    fn non_interactive_identity_step_does_not_panic() {
+        // Drive the non-interactive branch end-to-end against a temp HOME so it
+        // writes to an isolated identity store and seeds deterministic defaults.
+        let tmp_home =
+            std::env::temp_dir().join(format!("anima_init_identity_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_home);
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp_home);
+
+        let mut state = OnboardingState::default();
+        step_identity(&mut state, "test-agent", /* interactive = */ false);
+        assert!(state.identity_bootstrapped);
+
+        // Restore env + clean up.
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp_home);
     }
 
     // ── State path helper ─────────────────────────────────────────────────────

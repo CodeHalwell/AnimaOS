@@ -43,6 +43,20 @@
 //! available RAM, local inference providers (Ollama, LM Studio, vLLM, llama.cpp),
 //! and configured API keys, then prints a tier recommendation.
 //!
+//! # `anima ask` subcommand (E7 S7.4 — cortex invocation seam)
+//!
+//! Running `cargo run --bin anima-hosted -- ask "<task>"` builds a
+//! [`vita::InvokeRequest`] from the task text, the default tool registry, and
+//! the agent's identity memory, then drives it through a
+//! [`vita::ChatCortexBridge`].  The chat backend is a CI-safe fixture by default
+//! (text-only, no tool dispatch); a live tool-calling OpenAI-compatible backend
+//! is opt-in via `ANIMA_COMPAT_LIVE=1` + `ANIMA_COMPAT_URL`.  Tool calls the
+//! cortex emits are routed back through the registry.
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- ask "summarise the AnimaOS project"
+//! ```
+//!
 //! # `anima init` subcommand (E9 S9.1)
 //!
 //! Running `cargo run --bin anima-hosted -- init` runs the guided first-run
@@ -55,6 +69,7 @@
 //! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
 //! ```
 
+mod cortex;
 mod doctor;
 mod init;
 
@@ -108,7 +123,7 @@ fn env_flag(name: &str) -> bool {
 /// `extract`) backed by [`MockBrowserDriver`].  Live drivers (SearXNG,
 /// Playwright) remain opt-in behind their own env/feature gates and are never
 /// wired here, so this path stays hermetic.
-fn build_default_tool_registry() -> praxis::ToolRegistry {
+pub(crate) fn build_default_tool_registry() -> praxis::ToolRegistry {
     use actuators::browser::{
         BrowserExtractTool, BrowserNavigateTool, BrowserReadTextTool, MockBrowserDriver, MockPage,
     };
@@ -1586,6 +1601,115 @@ description: Summarises overnight logs into a short operator digest.
     }
 }
 
+// ── `anima ask` subcommand (E7 S7.4 — cortex invocation seam) ────────────────
+
+/// Implements the `anima ask "<task>"` subcommand.
+///
+/// Builds a [`vita::InvokeRequest`] (fresh task id, the agent id, the task text
+/// as the description, [`ToolSpec`]s derived from the default tool registry, and
+/// the agent's identity-memory document as the `identity` JSON), then runs it
+/// through a [`vita::ChatCortexBridge`] backed by a CI-safe fixture chat backend
+/// (live tool-calling backends are opt-in via `ANIMA_COMPAT_LIVE`).
+///
+/// Tool calls the cortex emits are routed back through the registry by
+/// [`cortex::RegistryToolDispatcher`].  On completion the output, the number of
+/// tool calls made, and a short audit tail are printed.
+///
+/// # CI safety
+///
+/// The shipped fixture backend returns text only, so in CI / fixture mode this
+/// returns a deterministic text answer (the fixture sentinel) without
+/// dispatching any tools.  That is expected; live backends drive real tool use.
+fn cmd_ask(args: &[String]) {
+    use cortex::{build_chat_cortex, RegistryToolDispatcher};
+    use vita::{CortexBackend, InvokeRequest};
+
+    const AGENT_ID: &str = "anima";
+
+    let task = args.join(" ");
+    let task = task.trim();
+    if task.is_empty() {
+        eprintln!("usage: anima-hosted ask \"<task>\"");
+        return;
+    }
+
+    // Tool registry + dispatcher seam (cortex tool calls → praxis registry).
+    let registry = Arc::new(build_default_tool_registry());
+    let dispatcher = RegistryToolDispatcher::new(Arc::clone(&registry));
+    let tools = dispatcher.tool_specs();
+
+    // Identity snapshot as JSON, used to frame the cortex system prompt.
+    let identity_path = IdentityMemory::default_path(AGENT_ID);
+    let identity_json = IdentityMemory::open(&identity_path)
+        .map(|store| store.to_json())
+        .unwrap_or(serde_json::Value::Null);
+
+    // Fresh task id for audit correlation.
+    let task_id = format!(
+        "ask-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let request = InvokeRequest {
+        task_id: task_id.clone(),
+        agent_id: AGENT_ID.to_string(),
+        description: task.to_string(),
+        tools,
+        identity: identity_json,
+        route_id: None,
+        memory_scope: None,
+        max_turns: None,
+        max_tool_calls: None,
+    };
+
+    // Seed the fixture so an offline `ask` always echoes a usable answer keyed
+    // on the task text; live backends ignore the fixture map entirely.
+    let fixtures = [(
+        task.to_string(),
+        vec![format!("(fixture cortex) acknowledged task: {task}")],
+    )];
+    let bridge = build_chat_cortex(
+        fixtures,
+        vita::DEFAULT_MAX_TURNS,
+        vita::DEFAULT_MAX_TOOL_CALLS,
+    );
+
+    let mut audit = AuditLog::new();
+    match bridge.invoke(request, &dispatcher, &mut audit) {
+        Ok(result) => {
+            println!("=== anima ask — cortex result ===");
+            println!("task_id        : {}", result.task_id);
+            println!("tool_calls_made: {}", result.tool_calls_made);
+            println!(
+                "latency_to_1st : {} ms",
+                result.latency_to_first_action.as_millis()
+            );
+            println!("\n--- output ---\n{}\n", result.output);
+            if !result.episode_summary.is_empty() {
+                println!("--- episode summary ---\n{}\n", result.episode_summary);
+            }
+
+            // Short audit tail (last few entries).
+            let entries = audit.entries();
+            let tail_start = entries.len().saturating_sub(5);
+            println!(
+                "--- audit tail ({} of {} entries) ---",
+                entries.len() - tail_start,
+                entries.len()
+            );
+            for entry in &entries[tail_start..] {
+                println!("  {entry:?}");
+            }
+        }
+        Err(e) => {
+            eprintln!("ask: cortex invocation failed: {e}");
+        }
+    }
+}
+
 /// The agent starts idle: it sleeps until operator guidance (or another sensory
 /// event) wakes it, demonstrating the human-as-a-sense model directly. The
 /// console never touches the lifecycle — it shares the `SensoryBridge` for
@@ -1979,6 +2103,12 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("tools") {
         cmd_tools(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("ask")
+        || args.first().map(String::as_str) == Some("cortex")
+    {
+        cmd_ask(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("serve") {
