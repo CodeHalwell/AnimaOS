@@ -1,0 +1,23 @@
+[package]
+name = "actuators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# E7 — Embodiment: network driver substrate, egress guard, web-search tool,
+# and semantic tool selection. All functionality is std-only (network I/O),
+# consistent with the `llm-backends` precedent.
+[features]
+default = []
+# Enable live HTTP backends (SearxngProvider). Off by default to keep CI hermetic.
+live = ["dep:reqwest"]
+
+[dependencies]
+praxis = { path = "../praxis" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Optional: reqwest is only needed for the live SearxngProvider HTTP path.
+reqwest = { version = "0.12", features = ["blocking", "json"], default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

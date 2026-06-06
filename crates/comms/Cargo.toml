@@ -1,0 +1,13 @@
+[package]
+name = "comms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Channel gateway framework for AnimaOS: Telegram/Slack adapters, image/voice modality, anima-comms host process (E10)."
+
+[[bin]]
+name = "anima-comms"
+path = "src/bin/anima-comms.rs"
+
+[dependencies]
+senses = { path = "../senses" }

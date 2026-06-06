@@ -9,7 +9,7 @@ license.workspace = true
 # a no_std-compatible layer.
 [features]
 default = ["std"]
-std = ["dep:sha2"]
+std = ["dep:sha2", "dep:actuators"]
 
 [dependencies]
 memory = { path = "../memory" }
@@ -18,6 +18,7 @@ scheduler = { path = "../scheduler" }
 senses = { path = "../senses" }
 kv-controller = { path = "../kv-controller" }
 defence = { path = "../defence" }
+skills = { path = "../skills" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # Optional, std-only: HMAC-SHA256 tamper-evidence sidecar for the audit log
@@ -25,6 +26,8 @@ serde_json = { workspace = true }
 # clean, and the dep is pulled in only by the `std` feature so the microVM
 # image budget is never touched.
 sha2 = { version = "0.11", default-features = false, optional = true }
+# E7 — Embodiment: egress guard for motor-gate hook at dispatch (S7.0.3).
+actuators = { path = "../actuators", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
