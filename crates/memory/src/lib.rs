@@ -39,6 +39,8 @@ pub mod archival;
 #[cfg(feature = "std")]
 pub mod compilation;
 #[cfg(feature = "std")]
+pub mod knowledge;
+#[cfg(feature = "std")]
 pub mod l2_cache;
 #[cfg(feature = "std")]
 pub mod replay;
@@ -59,6 +61,10 @@ pub use compilation::{
     compile_traces_to_pairs, emergency_consolidate, AlpacaRecord, AuditTraceEntry,
     ChainOfThoughtRecord, CompilationConfig, CompilationReport, ConversationRecord,
     ConversationTurn, TrainingFormat, TrainingPair,
+};
+#[cfg(feature = "std")]
+pub use knowledge::{
+    embed_text_knowledge, ingest_document, ingest_document_embedded, query_knowledge_corpus,
 };
 // run_dream_walk (L3Archive version) is std-only
 #[cfg(feature = "std")]
