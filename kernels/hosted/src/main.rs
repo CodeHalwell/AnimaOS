@@ -36,6 +36,27 @@
 //! Inspects and edits the agent's identity memory stored in
 //! `~/.anima/anima/identity.json`.  Every `set` is recorded in an in-process
 //! audit log that is printed on exit, satisfying E5.5 exit criterion 1.
+//!
+//! # `anima doctor` subcommand (E9 S9.3)
+//!
+//! Running `cargo run --bin anima-hosted -- doctor` detects GPU capabilities,
+//! available RAM, local inference providers (Ollama, LM Studio, vLLM, llama.cpp),
+//! and configured API keys, then prints a tier recommendation.
+//!
+//! # `anima init` subcommand (E9 S9.1)
+//!
+//! Running `cargo run --bin anima-hosted -- init` runs the guided first-run
+//! wizard: preflight → provider binding → identity bootstrap → config snippet.
+//! State is persisted in `~/.anima/anima/onboarding.json` so the wizard is
+//! idempotent and re-runs skip completed steps.
+//!
+//! ```text
+//! cargo run --bin anima-hosted -- init
+//! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
+//! ```
+
+mod doctor;
+mod init;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -407,6 +428,50 @@ fn print_audit(manager: &LifecycleManager) {
                 println!(
                     "  🔍 skill_reflection episodes={episodes_analysed} \
                      patterns={patterns_found} proposals={proposals_generated}"
+                );
+            }
+            // ── E10 — Presence ─────────────────────────────────────────────
+            AuditEntry::ChannelMessageReceived {
+                channel,
+                from,
+                modality,
+                ..
+            } => {
+                println!("  📨 channel_received channel={channel} from={from} modality={modality}");
+            }
+            AuditEntry::ChannelMessageSent {
+                channel,
+                to,
+                modality,
+                ..
+            } => {
+                println!("  📤 channel_sent channel={channel} to={to} modality={modality}");
+            }
+            AuditEntry::ModalityUnsupported {
+                channel, modality, ..
+            } => {
+                println!(
+                    "  ⚠️  modality_unsupported channel={channel} modality={modality}"
+                );
+            }
+            // E7 — Embodiment egress audit entries
+            AuditEntry::EgressRequested { tool_id, url } => {
+                println!("  🌐 egress_requested tool={tool_id} url={url}");
+            }
+            AuditEntry::EgressBlocked { tool_id, url, reason } => {
+                println!("  🚫 egress_blocked tool={tool_id} url={url} reason={reason:?}");
+            }
+            // E7 — Tool selection audit entry
+            AuditEntry::ToolSelection {
+                agent_id,
+                candidates_scored,
+                kept,
+                tau_rel,
+                ..
+            } => {
+                println!(
+                    "  🔍 tool_selection agent={agent_id} scored={candidates_scored} \
+                     kept={kept} tau_rel={tau_rel:.2}"
                 );
             }
         }
@@ -1101,6 +1166,17 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("serve") {
         cmd_serve();
+        return;
+    }
+    if args.first().map(String::as_str) == Some("doctor") {
+        let report = doctor::run_doctor();
+        doctor::print_report(&report);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        let non_interactive = args.iter().any(|a| a == "--non-interactive");
+        let reset = args.iter().any(|a| a == "--reset");
+        init::run_init("anima", non_interactive, reset);
         return;
     }
 

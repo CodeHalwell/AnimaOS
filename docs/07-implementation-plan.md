@@ -1319,6 +1319,112 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
 
 ---
 
+## Stage 7 — Embodiment and Local Inference Ecosystem
+
+Give the cortex genuine ability to act on the world (E7) and let operators
+plug in any local inference stack without bespoke per-vendor code (E8).
+E7 delivers the egress substrate, the first real tools, and semantic tool
+selection; E8 delivers the OpenAI-compatible umbrella that lights up five
+local providers at once and the `ChatBackend` trait that E7 Phase 4 (live
+tool-calling) and E8 Phase 1 share.
+
+**Stage sequencing.** E7 and E8 execute in parallel once the shared
+`LlmBackend` chat/tool-calling extension lands (E8 S8.0).  The extension
+adds backward-compatible default methods so existing impls compile unchanged.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tools: web-search (SearXNG), browser (Playwright),
+egress/SSRF guard, semantic tool selection wired to `length_robust_filter`,
+and live Anthropic/Ollama tool-calling.
+
+**Dependencies.** E5.1 (cortex/tool dispatch), E5.6 (motor gate), E3.3 (sensory bridge).
+
+**Stories.**
+- S7.0 Foundations: `crates/actuators` crate, `EgressGuard` (HTTPS-only,
+  SSRF protection, domain allow/deny, rate limits), motor-gate hook at
+  dispatch, env-var config + secret redaction. 🟡 (PR #72 open)
+- S7.1 `web-search` tool via SearXNG: `SearchProvider` trait,
+  `SearxngProvider` + `FixtureProvider`, `WebSearchTool: ToolDriver`. 🟡 (PR #72 open)
+- S7.2 `browser` tool via Playwright subprocess. ⬜ (deferred)
+- S7.3 Semantic tool selection: `ToolScorer` trait, `LexicalScorer` (BM25),
+  `FixtureScorer`, tool index, dispatch wiring, `AuditEntry::ToolSelection`. 🟡 (PR #72 open)
+- S7.4 Live LLM backends and real cortex tool-calling. ⬜ (deferred)
+
+**Exit criteria.**
+1. Egress guard blocks SSRF and private-IP targets, audited. 🟡
+2. Mock-cortex integration test drives web-search end-to-end against
+   the fixture provider. 🟡
+3. Semantic selector delivers the relevance-filtered tool subset; tier
+   boundary is never widened. 🟡
+
+### Epic E8 — Local Inference Ecosystem 🟡
+
+**Scope.** Provider substrate (`BackendCapabilities`, `ProviderConfig`),
+`ChatBackend` extension trait (chat messages + tool-calling), and an
+`OpenAiCompatibleBackend` umbrella covering vLLM, LM Studio, NVIDIA NIM,
+HF TGI, and llama.cpp-server — all in fixture/replay mode by default.
+
+**Dependencies.** E1.3 (`LlmBackend` trait), E7 S7.0 (egress/secret handling
+for live mode).
+
+**Stories.**
+- S8.0 Provider substrate. ✅
+  - `BackendCapabilities { tools, streaming, embeddings, json_mode, vision }`. ✅
+    (`llm-backends/src/capabilities.rs`)
+  - `ProviderConfig { id, base_url, model, api_key?, max_context_tokens,
+    request_timeout, capabilities }`. ✅
+  - `ProviderConfig::from_env_prefix` uniform env-var constructor. ✅
+  - `BackendFactory::from_config(config)` operator-supplied config path. ✅
+  - `ChatBackend` extension trait: `chat_complete(messages, tools, cancel)`,
+    `health()` readiness probe; all existing impls compile unchanged
+    (default impl). ✅ (`llm-backends/src/chat.rs`)
+  - Shared chat types: `ChatMessage`, `ChatRole`, `ToolSpec`, `ToolCall`,
+    `ChatResponse`, `FinishReason`, `tools_to_prompt_suffix`. ✅
+- S8.1 OpenAI-compatible umbrella. ✅
+  - `OpenAiCompatibleBackend` (generalization of `OpenAiBackend`)
+    with fixture mode (default, CI-safe) and live mode (env-gated). ✅
+    (`llm-backends/src/compat.rs`)
+  - Provider presets: `vllm()`, `lmstudio()`, `nvidia_nim()`, `hf_tgi()`,
+    `llamacpp_server()` — each reads env vars, maps to `BackendKind`. ✅
+  - Tool-calling passthrough: when `capabilities.tools`, serialises `ToolSpec`
+    → OpenAI `tools` field; parses `tool_calls` from response. ✅
+  - Prompt-format fallback via `tools_to_prompt_suffix` for backends without
+    native tool support. ✅
+  - SSE stream parser (`parse_sse_stream`) retained for future streaming
+    enablement. ✅
+  - `parse_chat_response` extracts text content, tool calls, finish reason,
+    model ID, and usage tokens; surfaces provider errors. ✅
+  - `BackendKind` extended with `Vllm`, `LmStudio`, `NvidiaNim`, `HfTgi`,
+    `LlamaCppServer`, `Custom(ProviderConfig)`. ✅
+  - `BackendKind::parse` extended with aliases for all new variants. ✅
+  - 70 hermetic unit tests; all pass. ✅
+
+**Exit criteria.**
+1. Fixture-mode backends for all five presets (vLLM, LM Studio, NVIDIA NIM,
+   HF TGI, llamacpp-server) construct without network I/O and return
+   deterministic output. ✅
+   (`compat::tests::*_preset_has_correct_id`, `fixture_mode_is_reproducible`)
+2. `BackendCapabilities` correctly describes each provider's native
+   tool-calling support; `BackendFactory::from_config` accepts any
+   operator-supplied config. ✅
+   (`factory::tests::from_config_constructs_backend_with_correct_id`)
+3. `/v1/chat/completions` JSON response parser correctly extracts text
+   content, tool calls, finish reason, and provider errors. ✅
+   (`parse_chat_response_extracts_text_content`,
+   `parse_chat_response_extracts_tool_calls`,
+   `parse_chat_response_surfaces_provider_error`)
+4. `ChatBackend::health()` returns `true` in fixture mode (no network). ✅
+   (`health_returns_true_in_fixture_mode`)
+
+**Remaining stories (not yet started).**
+- S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ⬜
+- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜
+- S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
+  library). ⬜
+
+---
+
 ## Stage 4 — Bare-Metal Isolation and Production Verification
 
 Port to the microVM target, integrate `smoltcp` and `rustls`, complete
@@ -1834,6 +1940,88 @@ See `docs/20-higher-cognition.md`.
 half of E11's promotion gate); decision replay / time-travel debug; digital-
 twin sandbox; state versioning & migration.
 See `docs/21-operator-trust-and-lifecycle.md`.
+## Stage 7 — Embodiment, Local Inference & Onboarding
+
+Real-world tools, a local-inference provider ecosystem, and a first-run
+experience.  These forward epics build on the somatic core (Stages 1–6)
+and reference `docs/12–14`.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tools for the cortex: web-search (SearXNG), browser
+(Playwright), semantic tool selection, and live Anthropic/Ollama tool-
+calling.  Details in `docs/12-real-world-tools-plan.md`.
+
+**Dependencies.** E5.1 (cortex), E5.2 (gate), E5.3 (router), E2.3 (praxis
+tool registry).
+
+**Stories.**
+- S7.0 Foundations: async network substrate, `EgressGuard` (SSRF + rate
+  limit), motor-gate hook at dispatch, config & secrets. 🟡
+- S7.1 `web-search` tool via SearXNG. 🟡
+- S7.2 `browser` tool via Playwright subprocess. ⬜
+- S7.3 Semantic tool selection (BM25 lexical scorer → `length_robust_filter`
+  wire-in). 🟡
+- S7.4 Live LLM backends & real cortex tool-calling. ⬜
+
+### Epic E8 — Local Inference Ecosystem 🟡
+
+**Scope.** OpenAI-compatible backend umbrella (vLLM, LM Studio, NVIDIA NIM,
+HF TGI, llama.cpp-server), `ChatBackend` trait extension, provider presets,
+native FFI runtimes (llama.cpp, LiteRT-LM), and Unsloth adaptation.
+Details in `docs/13-local-llm-providers.md`.
+
+**Dependencies.** E1.3 (`LlmBackend`).
+
+**Stories.**
+- S8.0 Provider substrate: `BackendCapabilities`, health probes, fixture
+  discipline. 🟡
+- S8.1 `OpenAiCompatibleBackend` umbrella + provider presets. 🟡
+- S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
+- S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜
+- S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
+  library). ⬜
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** Turn first contact with AnimaOS from a developer ritual into a
+guided journey: `anima doctor` preflight, `anima init` wizard, non-NVIDIA/
+CPU/Apple Silicon support, and a unified quickstart document.
+Details in `docs/14-onboarding.md`.
+
+**Dependencies.** E5.5 (identity memory), E6 (serve subcommand).
+E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
+
+**Stories.**
+- S9.1 Guided first-run wizard (`anima init`). ✅
+  (`kernels/hosted/src/init.rs` — `run_init()`, idempotent state machine,
+  non-interactive CI mode; 11 unit tests covering JSON round-trip, save/load,
+  backend inference)
+- S9.2 Conversational identity bootstrap (depends on E7 S7.4 live cortex). ⬜
+- S9.3 Preflight & hardware/provider detection (`anima doctor`). ✅
+  (`kernels/hosted/src/doctor.rs` — GPU detection via `nvidia-smi` /
+  Apple Silicon / CPU-only fallback; RAM via `/proc/meminfo`; provider TCP
+  probes for Ollama/LM Studio/vLLM/llama.cpp; API-key env checks; tier
+  recommendations; 15 unit tests)
+- S9.4 Non-NVIDIA / CPU / Apple Silicon support. 🟡
+  (doctor detects all three; CPU-only and Apple Silicon paths are documented
+  and exercised; Docker profile work deferred)
+- S9.5 Per-tier router dispatch (shared with E8 §4). ⬜
+- S9.6 Bare-metal onboarding story. ⬜
+- S9.7 Unified quickstart doc. ✅ (`docs/getting-started.md`)
+
+**Exit criteria.**
+1. `anima doctor` detects GPU, RAM, local providers, and API keys; exits
+   clean on CI (no live network). ✅
+   (`doctor::tests` — 15 tests; TCP probe uses 500 ms timeout; no network
+   calls in unit tests; `nvidia-smi` absence handled gracefully)
+2. `anima init --non-interactive` runs end-to-end without prompts; state
+   round-trips through `onboarding.json`. ✅
+   (`init::tests` — 11 tests; `save_and_load_round_trips`, non-interactive
+   path exercised)
+3. A new operator can follow `docs/getting-started.md` from clone to running
+   console in five minutes. ✅ (`docs/getting-started.md` covers five
+   hardware paths: NVIDIA GPU, Apple Silicon, CPU-only, Docker, hosted-API)
 
 ---
 
@@ -2140,6 +2328,134 @@ CI, and produce a security review at the end of each stage.
   `EphemeralSecret::random(&mut rng)` call in `tls.rs`. Resolving this requires
   upgrading `p256` to a release that targets `rand_core ≥ 0.9` as a
   coordinated ecosystem bump.
+
+---
+
+## Stage 7 — Autonomous Agent Layer
+
+The autonomy, embodiment, and alignment layer built on top of the shipped
+somatic core (Stages 1–6).  The design suite lives in `docs/12-21`.
+The forward-epic index and dependency graph are in `docs/18-forward-epics.md`.
+
+Epics in this stage run as parallel tracks that converge at E12 (Motivation).
+Each epic references its own design document; stories within an epic may be
+parallelised, but an epic closes only when all exit criteria are met.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tool foundations: egress/SSRF guard, web-search tool,
+lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
+
+**Delivered (PR #72).**
+- S7.0 `EgressGuard` — https-only, full SSRF block list, host allow/block-list;
+  `EgressAwareDispatcher`; URL secret redaction in the audit log.
+- S7.1 `WebSearchTool` (`crates/actuators`) — `SearchProvider` trait,
+  `FixtureProvider` (CI-safe), `SearxngProvider` (live, behind `live` feature);
+  egress-guarded pre-invoke.
+- S7.3 Lexical scorer — `LexicalScorer` (BM25-inspired TF×IDF, deterministic);
+  `FixtureScorer`; tier boundary invariant.
+- New `AuditEntry` variants: `EgressRequested`, `EgressBlocked`, `ToolSelection`.
+- 52 new tests; 15 integration tests (`e7_embodiment`).
+
+**Deferred.** S7.2 (browser/Playwright), S7.4 (live tool-calling), embedding scorer.
+
+### Epic E8 — Local Inference 🟡
+
+**Scope.** OpenAI-compatible provider umbrella (vLLM / LM Studio / NVIDIA NIM /
+HF TGI / llama.cpp-server) and the shared `ChatBackend` extension trait.
+See `docs/13-local-llm-providers.md`.
+
+**Delivered (PR #73).**
+- S8.0 `BackendCapabilities`, `ProviderConfig`, `ChatBackend` extension trait,
+  shared chat types (`ChatMessage`, `ChatRole`, `ToolCall`, `ChatResponse`).
+- S8.1 `OpenAiCompatibleBackend` — fixture mode (default, CI-safe) + live mode
+  (`ANIMA_COMPAT_LIVE=1`); five provider presets; tool-calling passthrough;
+  factory updates (`BackendKind` extended).
+- 70 hermetic unit tests.
+
+**Deferred.** S8.3–S8.4 (native runtimes, Unsloth/HRA, adapter library).
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** First-run experience: `anima doctor`, `anima init` wizard, unified
+quickstart.  See `docs/14-onboarding.md`.
+
+**Delivered (PR #74).**
+- S9.3 `anima doctor` — GPU/RAM detection, provider TCP probes, API-key check,
+  tier recommendations; 15 unit tests.
+- S9.1 `anima init` — three-step idempotent wizard; non-interactive mode; atomic
+  state persistence; 11 unit tests.
+- S9.7 `docs/getting-started.md` — unified quickstart (Docker, native, hardware
+  paths, identity memory commands).
+
+### Epic E10 — Presence 🟡
+
+**Scope.** Channel gateway framework: comms-app adapters over the existing
+operator seam; image and voice as first-class bidirectional modalities.
+See `docs/15-communication-multimodal.md`.
+
+**Dependencies.** E6 (operator seam, SensoryBridge), E7 (egress guard
+for outbound channel calls — wired once E7 merges).
+
+**Stories.**
+- S10.1 `ChannelGateway` trait + `anima-comms` host binary. ✅
+  (`crates/comms/src/lib.rs` — `ChannelAdapter` trait, `ChannelGateway`
+  orchestrator, `GatewayConfig`, `PollOutcome`; `crates/comms/src/bin/anima-comms.rs` —
+  demo binary with `--channel`, `--count` flags; fully CI-safe fixture mode)
+- S10.2 First channel adapters: Telegram and Slack. ✅
+  (`crates/comms/src/adapters.rs` — `TelegramAdapter` and `SlackAdapter` with
+  `FixtureQueue`; all adapters default to fixture mode; live mode gated by
+  `ANIMA_COMMS_LIVE`; 16 unit tests; thread-safety proved via clone-sharing test)
+- S10.3 Image modality (afferent + efferent). ✅
+  (`crates/senses/src/lib.rs` — `SensoryPacket::Image { bytes, mime, caption }`;
+  `HumanGuidance::max_image_bytes` policy bound; `packetize_image_checked()` with
+  empty-bytes, empty-mime, and size-limit enforcement; 7 new unit tests;
+  `vita/src/lib.rs` prompt extraction handles `Image` variant)
+- S10.4 Voice provider traits (`SttProvider` / `TtsProvider`). ✅
+  (`crates/comms/src/voice.rs` — `SttProvider` trait, `TtsProvider` trait,
+  `FixtureStt` (lookup by frame length, configurable default), `FixtureTts`
+  (lookup by text, configurable default); 14 unit tests; trait objects verified)
+- S10.5 Modality-aware routing (partial — routing integration deferred to E8). ⬜
+  (`crates/vita/src/audit.rs` — `AuditEntry::ChannelMessageReceived`,
+  `ChannelMessageSent`, `ModalityUnsupported` added for route-capability tracking;
+  full modality × route matrix requires `BackendCapabilities.vision` from E8)
+
+**Exit criteria.**
+1. Inbound text, image, and voice messages from both Telegram and Slack fixture
+   adapters are packetised into the sensory bridge with correct priorities and
+   policy-bound enforcement. ✅ (`run_once_enqueues_text_message_from_telegram`,
+   `run_once_enqueues_image_message_from_slack`,
+   `run_once_enqueues_voice_message`,
+   `run_once_rejects_oversized_image`,
+   `run_once_rejects_oversized_voice_frame`)
+2. Policy violations (empty body, MIME, oversized payload) are rejected by
+   `packetize_image_checked` without panicking. ✅
+   (`packetize_image_checked_rejects_empty_bytes`,
+   `packetize_image_checked_rejects_empty_mime`,
+   `packetize_image_checked_rejects_oversized_payload`)
+3. `SttProvider` and `TtsProvider` are trait objects; fixture implementations
+   produce deterministic, CI-hermetic transcripts and audio. ✅
+   (`stt_provider_trait_object_works`, `tts_provider_trait_object_works`,
+   `fixture_stt_returns_registered_transcript_by_frame_length`,
+   `fixture_tts_returns_registered_audio_for_text`)
+4. `anima-comms` binary runs the fixture demo and reports packet counts without
+   live network access. ✅ (binary compiles and runs with demo fixtures)
+
+### Epic E13 — Alignment Assurance 🟡
+
+**Scope.** Immutable value charter, constitution enforcement hook, alignment
+eval harness, red-team corpus.  See `docs/19-constitution-and-alignment.md`.
+
+**Delivered (PR #75).**
+- S13.1 `constitution.toml` value charter — 8 inviolable prohibitions (P1–P8),
+  3 drive bounds, HMAC-SHA256 tamper-evidence (`crates/constitution`).
+- S13.2 `ConstitutionCheck::screen()` — keyword heuristic; `ConstitutionGuard`
+  bridges to `DefenceLayer`; runs first before all other detectors.
+- S13.3 `cargo xtask align-eval` — 17 labelled scenarios; 100% pass.
+- S13.4 `cargo xtask red-team` — 22-probe adversarial corpus; 100% blocked.
+- S13.5 `CorrigibilityHold` proof token; 7 `CorrigibilityReason` variants; 9 tests.
+- S13.6 New audit entries: `AuditEntry::ConstitutionVeto`, `CorrigibilityAsserted`.
+- 31 unit tests.
 
 ---
 

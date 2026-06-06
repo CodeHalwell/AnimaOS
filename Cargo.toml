@@ -13,6 +13,8 @@ members = [
   "crates/console-proto",
   "crates/console",
   "crates/skills",
+  "crates/comms",
+  "crates/actuators",
   "kernels/hosted",
   "llm-backends",
 ]
