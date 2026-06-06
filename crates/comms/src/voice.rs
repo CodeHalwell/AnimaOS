@@ -300,15 +300,13 @@ mod tests {
 
     #[test]
     fn stt_provider_trait_object_works() {
-        let stt: Box<dyn SttProvider> =
-            Box::new(FixtureStt::new().with_default("transcript"));
+        let stt: Box<dyn SttProvider> = Box::new(FixtureStt::new().with_default("transcript"));
         assert_eq!(stt.transcribe(&[1, 2]).unwrap(), "transcript");
     }
 
     #[test]
     fn tts_provider_trait_object_works() {
-        let tts: Box<dyn TtsProvider> =
-            Box::new(FixtureTts::new().with_default(vec![5i16]));
+        let tts: Box<dyn TtsProvider> = Box::new(FixtureTts::new().with_default(vec![5i16]));
         assert_eq!(tts.synthesise("hello").unwrap(), vec![5i16]);
     }
 }

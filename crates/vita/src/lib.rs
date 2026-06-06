@@ -566,10 +566,17 @@ pub async fn somatic_execution_loop(
             let prompt = match &pkt.packet {
                 SensoryPacket::Text(t) => t.clone(),
                 SensoryPacket::Pcm(samples) => format!("[PCM {} samples]", samples.len()),
-                SensoryPacket::Image { mime, bytes, caption } => format!(
+                SensoryPacket::Image {
+                    mime,
+                    bytes,
+                    caption,
+                } => format!(
                     "[Image {} B {mime}{}]",
                     bytes.len(),
-                    caption.as_deref().map(|c| format!(" caption={c:?}")).unwrap_or_default()
+                    caption
+                        .as_deref()
+                        .map(|c| format!(" caption={c:?}"))
+                        .unwrap_or_default()
                 ),
             };
 

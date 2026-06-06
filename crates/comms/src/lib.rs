@@ -197,7 +197,7 @@ impl Default for GatewayConfig {
             image_priority: SensoryPriority::Normal,
             voice_priority: SensoryPriority::Normal,
             max_image_bytes: 10 * 1024 * 1024, // 10 MiB
-            max_pcm_samples: 16_000 * 60,       // 60 s at 16 kHz
+            max_pcm_samples: 16_000 * 60,      // 60 s at 16 kHz
         }
     }
 }
@@ -284,7 +284,11 @@ impl ChannelGateway {
                     .packetize_text_checked(&text, self.config.text_priority);
                 Self::outcome_from_result(channel_id, &msg.from, modality, result)
             }
-            ChannelContent::Image { bytes, mime, caption } => {
+            ChannelContent::Image {
+                bytes,
+                mime,
+                caption,
+            } => {
                 if bytes.len() > self.config.max_image_bytes {
                     return PollOutcome {
                         channel_id: channel_id.to_string(),

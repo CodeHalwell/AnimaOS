@@ -412,7 +412,11 @@ impl SensoryBridge {
             .lock()
             .expect("poisoned")
             .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Image { bytes, mime, caption },
+                packet: SensoryPacket::Image {
+                    bytes,
+                    mime,
+                    caption,
+                },
                 priority,
                 gate_override_reason: None,
             });
@@ -794,9 +798,7 @@ mod tests {
             .expect("valid image should be accepted");
         let pkt = bridge.next_prioritized_packet().unwrap();
         assert_eq!(pkt.priority, SensoryPriority::Normal);
-        assert!(
-            matches!(&pkt.packet, SensoryPacket::Image { mime, .. } if mime == "image/jpeg")
-        );
+        assert!(matches!(&pkt.packet, SensoryPacket::Image { mime, .. } if mime == "image/jpeg"));
     }
 
     #[test]
@@ -863,7 +865,11 @@ mod tests {
             .unwrap();
         let pkt = bridge.next_prioritized_packet().unwrap();
         match pkt.packet {
-            SensoryPacket::Image { mime, caption, bytes } => {
+            SensoryPacket::Image {
+                mime,
+                caption,
+                bytes,
+            } => {
                 assert_eq!(mime, "image/webp");
                 assert_eq!(caption.as_deref(), Some("my caption"));
                 assert_eq!(bytes.len(), 10);
@@ -879,6 +885,9 @@ mod tests {
             .packetize_image_checked(vec![1], "image/png", None, SensoryPriority::Normal)
             .unwrap();
         let pkt = bridge.next_prioritized_packet().unwrap();
-        assert!(matches!(pkt.packet, SensoryPacket::Image { caption: None, .. }));
+        assert!(matches!(
+            pkt.packet,
+            SensoryPacket::Image { caption: None, .. }
+        ));
     }
 }

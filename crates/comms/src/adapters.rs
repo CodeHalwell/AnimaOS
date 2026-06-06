@@ -42,10 +42,14 @@ impl FixtureQueue {
     }
 
     fn pop(&self) -> Option<ChannelMessage> {
-        self.0.lock().expect("poisoned").pop_front().map(|f| ChannelMessage {
-            from: f.from,
-            content: f.content,
-        })
+        self.0
+            .lock()
+            .expect("poisoned")
+            .pop_front()
+            .map(|f| ChannelMessage {
+                from: f.from,
+                content: f.content,
+            })
     }
 
     fn is_empty(&self) -> bool {
@@ -296,10 +300,8 @@ mod tests {
 
     #[test]
     fn slack_fixture_exhausted_tracks_correctly() {
-        let adapter = SlackAdapter::with_fixture(vec![
-            text_fixture("u1", "a"),
-            text_fixture("u2", "b"),
-        ]);
+        let adapter =
+            SlackAdapter::with_fixture(vec![text_fixture("u1", "a"), text_fixture("u2", "b")]);
         assert!(!adapter.fixture_exhausted());
         adapter.receive();
         assert!(!adapter.fixture_exhausted());
