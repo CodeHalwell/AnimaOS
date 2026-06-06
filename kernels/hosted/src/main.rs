@@ -89,6 +89,63 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// `true` when an environment flag is set to a truthy value (`1`/`true`/`yes`/`on`).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Build the default tool registry surfaced by the hosted kernel (E7 + Wave-1).
+///
+/// Registers the deterministic, CI-safe tool set: `web-search` (fixture
+/// provider) alongside the actuators browser family (`browser` / `browse` /
+/// `extract`) backed by [`MockBrowserDriver`].  Live drivers (SearXNG,
+/// Playwright) remain opt-in behind their own env/feature gates and are never
+/// wired here, so this path stays hermetic.
+fn build_default_tool_registry() -> praxis::ToolRegistry {
+    use actuators::browser::{
+        BrowserExtractTool, BrowserNavigateTool, BrowserReadTextTool, MockBrowserDriver, MockPage,
+    };
+    use actuators::web_search::{SearchResult, WebSearchTool};
+    use actuators::EgressGuard;
+
+    let registry = praxis::ToolRegistry::new();
+
+    // web-search over a deterministic fixture provider (no network).
+    registry.register(WebSearchTool::with_fixture(vec![SearchResult {
+        title: "AnimaOS".to_string(),
+        url: "https://example.com/animaos".to_string(),
+        snippet: "A self-preserving agent operating system.".to_string(),
+    }]));
+
+    // Browser family over a shared MockBrowserDriver with one canned page so the
+    // tools are exercisable offline.  Each tool gets the default HTTPS-only
+    // egress guard (defence-in-depth alongside the dispatch egress screen).
+    let canned_url = "https://example.com/animaos";
+    let mock_page = MockPage::new("AnimaOS", "AnimaOS is a self-preserving agent OS.")
+        .with_extraction("h1", vec!["AnimaOS".to_string()]);
+    registry.register(BrowserNavigateTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page.clone()),
+        EgressGuard::default(),
+    ));
+    registry.register(BrowserReadTextTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page.clone()),
+        EgressGuard::default(),
+    ));
+    registry.register(BrowserExtractTool::new(
+        MockBrowserDriver::new().with_page(canned_url, mock_page),
+        EgressGuard::default(),
+    ));
+
+    registry
+}
+
 fn build_agent(
     agent_id: &str,
     policy: &str,
@@ -1301,9 +1358,18 @@ fn cmd_skills(args: &[String]) {
                 }
             }
         }
+        Some("queue") | Some("approve") => {
+            // E11↔E15 bridge surface: demonstrate the SkillApprovalBridge driving
+            // a PendingApproval skill into the E15 ApprovalQueue and (for
+            // `approve`) promoting it back in the registry.
+            cmd_skills_approval(args, &mut log);
+        }
         Some(sub) => {
             eprintln!("unknown skills subcommand: {sub:?}");
-            eprintln!("usage: skills {{list|info|register|promote|rollback|quarantine|kill-switch|reflect}}");
+            eprintln!(
+                "usage: skills {{list|info|register|promote|rollback|quarantine|\
+                 kill-switch|reflect|queue|approve <id>}}"
+            );
         }
     }
 
@@ -1313,6 +1379,210 @@ fn cmd_skills(args: &[String]) {
         for entry in log.entries() {
             println!("  {entry:?}");
         }
+    }
+}
+
+// ── `anima tools` subcommand (E7 + Wave-1 actuators) ─────────────────────────
+
+/// Implements the `anima tools` CLI subcommand.
+///
+/// Surfaces the default tool registry — `web-search` plus the actuators browser
+/// family (`browser` / `browse` / `extract`) over a CI-safe
+/// [`actuators::browser::MockBrowserDriver`].
+///
+/// Subcommands:
+/// - `tools list`            — list every registered tool id
+/// - `tools browse <url>`    — fetch a page's readable text via the `browse` tool
+/// - `tools extract <url> <selector>` — extract elements via the `extract` tool
+fn cmd_tools(args: &[String]) {
+    use praxis::{Bus, ToolEnvelope};
+
+    let registry = build_default_tool_registry();
+
+    match args.first().map(String::as_str) {
+        Some("list") | None => {
+            let mut tools = registry.list();
+            tools.sort();
+            println!("Tool registry — registered tools:");
+            for id in &tools {
+                println!("  {id}");
+            }
+            println!("\nTotal tools: {}", tools.len());
+            println!(
+                "\n(browser tools use a MockBrowserDriver; try: \
+                 anima-hosted tools browse https://example.com/animaos)"
+            );
+        }
+        Some("browse") => {
+            let url = match args.get(1) {
+                Some(u) => u,
+                None => {
+                    eprintln!("usage: tools browse <url>");
+                    return;
+                }
+            };
+            let payload = serde_json::json!({ "url": url }).to_string().into_bytes();
+            let envelope = ToolEnvelope::new(Bus::Mcp, "browse", payload, 1);
+            match registry.dispatch(&envelope) {
+                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(v) => println!(
+                        "browse {url}:\n  text: {}",
+                        v.get("text").and_then(|t| t.as_str()).unwrap_or("(none)")
+                    ),
+                    Err(_) => println!("browse {url}: {}", String::from_utf8_lossy(&bytes)),
+                },
+                Err(e) => eprintln!("browse error: {e:?}"),
+            }
+        }
+        Some("extract") => {
+            let (url, selector) = match (args.get(1), args.get(2)) {
+                (Some(u), Some(s)) => (u, s),
+                _ => {
+                    eprintln!("usage: tools extract <url> <selector>");
+                    return;
+                }
+            };
+            let payload = serde_json::json!({ "url": url, "selector": selector })
+                .to_string()
+                .into_bytes();
+            let envelope = ToolEnvelope::new(Bus::Mcp, "extract", payload, 1);
+            match registry.dispatch(&envelope) {
+                Ok(bytes) => println!(
+                    "extract {url} [{selector}]:\n  {}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+                Err(e) => eprintln!("extract error: {e:?}"),
+            }
+        }
+        Some(sub) => {
+            eprintln!("unknown tools subcommand: {sub:?}");
+            eprintln!("usage: tools {{list|browse <url>|extract <url> <selector>}}");
+        }
+    }
+}
+
+/// Drives the E11↔E15 [`lifecycle::SkillApprovalBridge`] for the
+/// `skills queue` / `skills approve <id>` surfaces.
+///
+/// To keep the surface self-contained (the hosted `cmd_skills` registry is
+/// in-memory per invocation), this seeds one agent-authored `PendingApproval`
+/// skill, routes it through the bridge into a fresh [`lifecycle::ApprovalQueue`],
+/// and:
+/// - `queue`            — lists the pending proposals awaiting an operator.
+/// - `approve <id>`     — approves the proposal, promoting the skill in the
+///   registry (falls back to the single queued id when `<id>` is omitted).
+///
+/// Both paths emit the existing E15 `ApprovalProposal*` audit entries.
+fn cmd_skills_approval(args: &[String], log: &mut AuditLog) {
+    use lifecycle::approval::ApprovalQueue;
+    use lifecycle::skill_bridge::SkillApprovalBridge;
+    use skills::{
+        evaluate_skill_proposal, PromotionGateConfig, SkillAuthor, SkillContentScreen,
+        SkillProposal, SkillRegistry,
+    };
+
+    const AGENT_ID: &str = "anima";
+    const DEMO_SKILL: &str = "\
+---
+name: log-summariser
+description: Summarises overnight logs into a short operator digest.
+---
+
+## Steps
+
+1. Read the log window.
+2. Produce a concise digest.
+";
+
+    let mut registry = SkillRegistry::default();
+    let mut queue = ApprovalQueue::new();
+    let mut bridge = SkillApprovalBridge::new();
+
+    // Evaluate an agent-authored skill with auto-promotion OFF so it lands as
+    // PendingApproval and therefore needs an operator decision.
+    let proposal = SkillProposal {
+        skill_text: DEMO_SKILL.to_string(),
+        authored_by: SkillAuthor::Agent,
+        proposed_at_ns: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+        source_episode: None,
+    };
+    let outcome = match evaluate_skill_proposal(
+        proposal.clone(),
+        &mut registry,
+        &SkillContentScreen::default(),
+        &PromotionGateConfig {
+            auto_promote_agent_skills: false,
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("skills: proposal evaluation failed: {e}");
+            return;
+        }
+    };
+
+    let queued_id = match bridge.enqueue_skill(&mut queue, &outcome, &proposal) {
+        Ok(Some(id)) => {
+            log.push(AuditEntry::ApprovalProposalQueued {
+                agent_id: AGENT_ID.to_string(),
+                proposal_id: id.clone(),
+                kind: "new-skill".to_string(),
+                provenance: "agent (skills reflection demo)".to_string(),
+            });
+            id
+        }
+        Ok(None) => {
+            println!("skills: proposal did not require approval (auto-promoted or rejected)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("skills: enqueue failed: {e}");
+            return;
+        }
+    };
+
+    match args.first().map(String::as_str) {
+        Some("queue") => {
+            println!("Approval queue — pending proposals:");
+            for p in queue.pending() {
+                println!(
+                    "  {id:<24}  provenance={prov:?}",
+                    id = p.id,
+                    prov = p.provenance
+                );
+            }
+            println!("\nPending: {}", queue.pending().len());
+            println!("Approve with: anima-hosted skills approve {queued_id}");
+        }
+        Some("approve") => {
+            // Use the operator-supplied id when present, else the single queued id.
+            let target = args
+                .get(1)
+                .map(|s| s.to_lowercase().replace(' ', "-"))
+                .unwrap_or_else(|| queued_id.clone());
+            match bridge.approve(
+                &mut queue,
+                &mut registry,
+                &target,
+                "operator approved via CLI",
+            ) {
+                Ok(()) => {
+                    log.push(AuditEntry::ApprovalProposalDecided {
+                        agent_id: AGENT_ID.to_string(),
+                        proposal_id: target.clone(),
+                        decision: "approved".to_string(),
+                        reason: "operator approved via CLI".to_string(),
+                    });
+                    let active = registry.list_active().len();
+                    println!("approved: {target} (skill promoted; {active} active skill(s))");
+                }
+                Err(e) => eprintln!("skills approve error: {e}"),
+            }
+        }
+        _ => unreachable!("cmd_skills_approval only called for queue/approve"),
     }
 }
 
@@ -1337,6 +1607,18 @@ fn cmd_serve() {
     let provider = std::env::var("ANIMA_BACKEND").unwrap_or_else(|_| "mock".to_string());
     let backend = BackendFactory::from_env_or_mock(&provider);
 
+    // ── E9 S9.5 — per-tier router dispatch ────────────────────────────────────
+    // Resolve the cheap-local / mid-tier / frontier backends from the wizard's
+    // saved choices (overridable by ANIMA_{CHEAP,MID,FRONTIER}_BACKEND), then
+    // install them so the somatic loop dispatches each task to the bound tier.
+    let tier_choices = init::resolve_tier_choices(&agent_id);
+    let (cheap_b, mid_b, frontier_b) = tier_choices.clone().into_fixture_backends();
+    let tier_backends = vita::TierBackends::new(
+        Arc::clone(&cheap_b),
+        Arc::clone(&mid_b),
+        Arc::clone(&frontier_b),
+    );
+
     // The shared bridge: POSTed guidance lands in the very queue the loop drains.
     let bridge = SensoryBridge::new(HumanGuidance::new("operator-console"));
 
@@ -1348,10 +1630,20 @@ fn cmd_serve() {
         HumanGuidance::new("boot"),
         Arc::clone(&backend),
         None, // run forever
-    );
+    )
+    .with_tier_backends(tier_backends);
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
+
+    // E12: optionally enable drive-augmented arbitration (motivation) on the
+    // serving agent.  Off by default; opt in via ANIMA_MOTIVATION=1 so the
+    // existing gate behaviour is unchanged unless requested.
+    if env_flag("ANIMA_MOTIVATION") {
+        use vita::motivation_gate::MotivatedGate;
+        manager.enable_motivation(MotivatedGate::with_defaults(&HomeostaticSignals::neutral()));
+        println!("  motivation: enabled (drive-augmented Striatal Gate)");
+    }
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
@@ -1373,6 +1665,12 @@ fn cmd_serve() {
         println!("  auth      : bearer token required (ANIMA_CONSOLE_TOKEN)");
     }
     println!("  backend   : {} ({})", backend.id(), backend.model_id());
+    println!(
+        "  tiers     : cheap-local={} mid-tier={} frontier={}",
+        cheap_b.id(),
+        mid_b.id(),
+        frontier_b.id()
+    );
     println!("  audit log : {}", audit_path.display());
     println!(
         "\nThe agent starts idle and sleeps until a sense wakes it. Send guidance —\n\
@@ -1677,6 +1975,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("skills") {
         cmd_skills(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("tools") {
+        cmd_tools(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("serve") {

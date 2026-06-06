@@ -62,11 +62,21 @@ pub use prospective::{
     inject_due_intentions, CompletionOutcome, Intention, IntentionStore, IntentionStoreError,
     DEFAULT_OVERDUE_GRACE_NS,
 };
+#[cfg(feature = "std")]
+pub use router::TierBackends;
 pub use router::{
-    build_routed_request, default_routes, record_modulated_router_decision, record_router_decision,
-    validate_route, MemoryScope, ModelSelector, ModulationDecision, PromptScaffold, Route,
-    RouteError, RouteId, Router, StaticRouter, TerminationPolicy, ToolScope,
+    build_routed_request, default_routes, model_selector_for_cost_class,
+    record_modulated_router_decision, record_router_decision, validate_route, MemoryScope,
+    ModelSelector, ModulationDecision, PromptScaffold, Route, RouteError, RouteId, Router,
+    StaticRouter, TerminationPolicy, ToolScope,
 };
+/// Object-safe alias for the provider-agnostic LLM backend trait.
+///
+/// [`router::TierBackends`] stores `Arc<dyn LlmBackendRef>` per tier; the alias
+/// keeps the router module decoupled from the `scheduler` crate path while
+/// pointing at the very same trait the rest of `vita` already uses
+/// ([`scheduler::backend::LlmBackend`]).
+pub use scheduler::LlmBackend as LlmBackendRef;
 #[cfg(feature = "std")]
 pub use sensors::AuditSignalPublisher;
 pub use sleep::{SleepMaintenanceReport, SleepRoutine, SleepRoutineOutcome};
@@ -216,6 +226,22 @@ pub struct LifecycleManager {
     /// call and the `&self` `decide_motivated` call can both go through it.
     #[cfg(feature = "std")]
     pub motivated_gate: Option<Arc<Mutex<MotivatedGate>>>,
+    /// Optional E9 S9.5 per-tier backend map (router-aware dispatch).
+    ///
+    /// `None` by default — when absent, every task dispatches through the single
+    /// [`LifecycleManager::backend`], so behaviour is byte-for-byte identical to
+    /// before this integration.  Install it additively via
+    /// [`LifecycleManager::with_tier_backends`] /
+    /// [`LifecycleManager::set_tier_backends`].  When `Some`, the task-dispatch
+    /// path resolves the gate's [`CostClass`] (via [`ThresholdGate`]) to a
+    /// [`ModelSelector`] tier and dispatches to the backend bound to that tier,
+    /// emitting a [`AuditEntry::RouterDecision`] recording the selected tier.
+    ///
+    /// Wrapped only in the map's own `Arc`s (each tier backend is already
+    /// `Arc<dyn LlmBackendRef>`), so `LifecycleManager::clone()` shares the
+    /// backends — consistent with the single-backend field.
+    #[cfg(feature = "std")]
+    pub tier_backends: Option<router::TierBackends>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -291,7 +317,37 @@ impl LifecycleManager {
             sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
             #[cfg(feature = "std")]
             motivated_gate: None::<Arc<Mutex<MotivatedGate>>>,
+            #[cfg(feature = "std")]
+            tier_backends: None::<router::TierBackends>,
         }
+    }
+
+    /// Installs the E9 S9.5 per-tier backend map on this manager (additive).
+    ///
+    /// After this call, the task-dispatch path selects the LLM backend bound to
+    /// the gate decision's [`CostClass`] tier instead of the single
+    /// [`LifecycleManager::backend`].  Leaves the constructor signature
+    /// untouched — call this after [`LifecycleManager::new`].
+    ///
+    /// Use [`router::TierBackends::uniform`] to point all three tiers at one
+    /// backend for backward-compatible behaviour through the new code path.
+    #[cfg(feature = "std")]
+    pub fn set_tier_backends(&mut self, tiers: router::TierBackends) {
+        self.tier_backends = Some(tiers);
+    }
+
+    /// Builder variant of [`LifecycleManager::set_tier_backends`] returning
+    /// `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_tier_backends(mut self, tiers: router::TierBackends) -> Self {
+        self.set_tier_backends(tiers);
+        self
+    }
+
+    /// `true` when the per-tier backend map is installed and active.
+    #[cfg(feature = "std")]
+    pub fn tier_dispatch_enabled(&self) -> bool {
+        self.tier_backends.is_some()
     }
 
     /// Enables the E12 motivated Striatal Gate on this manager (additive).
@@ -538,6 +594,72 @@ impl LifecycleManager {
         self.max_iterations
             .map(|limit| self.iterations >= limit)
             .unwrap_or(false)
+    }
+
+    /// Resolve the LLM backend used to dispatch a task (E9 S9.5).
+    ///
+    /// When the per-tier backend map is **absent**, returns a clone of the
+    /// single [`LifecycleManager::backend`] — identical to the legacy path.
+    ///
+    /// When the map is **present**, derives the gate [`CostClass`] for the task's
+    /// MLFQ priority tier (via [`cost_class_for_mlfq_tier`]), maps it onto the
+    /// router's [`ModelSelector`], selects the backend bound to that tier, and
+    /// pushes a [`AuditEntry::RouterDecision`] recording the selected tier and
+    /// backend so the routing is permanently traceable (reusing the existing
+    /// E5.3 router-decision audit variant — no new audit variants added).
+    #[cfg(feature = "std")]
+    fn resolve_dispatch_backend(&mut self, task_id: u64, mlfq_tier: u8) -> Arc<dyn LlmBackend> {
+        match &self.tier_backends {
+            None => Arc::clone(&self.backend),
+            Some(tiers) => {
+                let cost_class = cost_class_for_mlfq_tier(mlfq_tier);
+                let selector = router::model_selector_for_cost_class(cost_class);
+                let backend = Arc::clone(tiers.backend_for(selector));
+                // Reuse the E5.3 RouterDecision audit entry to record the
+                // per-tier backend selection (model_selector carries the tier;
+                // tool_scope_name carries the chosen backend id for traceability).
+                self.audit.push(AuditEntry::RouterDecision {
+                    agent_id: self.agent_id.clone(),
+                    event_id: format!("dispatch-{task_id}"),
+                    route_id: selector.as_str().to_string(),
+                    model_selector: selector.as_str().to_string(),
+                    tool_scope_name: backend.id().to_string(),
+                    tools_available: 0,
+                    tools_permitted: 0,
+                    memory_scope_identity: true,
+                    memory_scope_l1: true,
+                    memory_scope_l2: !matches!(selector, ModelSelector::CheapLocal),
+                    memory_scope_l3: matches!(selector, ModelSelector::Frontier),
+                    max_turns: 0,
+                    max_tool_calls: 0,
+                });
+                backend
+            }
+        }
+    }
+}
+
+/// Map an MLFQ priority tier onto a gate [`CostClass`] for per-tier dispatch
+/// (E9 S9.5).
+///
+/// The somatic loop's normal task path does not run the full Striatal Gate
+/// (only operator-forced packets are gated), so the per-tier backend map keys
+/// off the task's MLFQ priority instead — a deterministic, audit-friendly proxy
+/// for the cost tier:
+///
+/// | MLFQ tier | Priority origin            | Cost class   |
+/// |-----------|----------------------------|--------------|
+/// | `0`       | Critical / High / forced   | `Frontier`   |
+/// | `1`       | Normal interaction         | `MidTier`    |
+/// | `≥ 2`     | Low / background           | `CheapLocal` |
+///
+/// This mirrors [`priority_to_mlfq_tier`] in reverse so the highest-priority
+/// work reaches the most capable bound backend.
+pub fn cost_class_for_mlfq_tier(mlfq_tier: u8) -> CostClass {
+    match mlfq_tier {
+        0 => CostClass::Frontier,
+        1 => CostClass::MidTier,
+        _ => CostClass::CheapLocal,
     }
 }
 
@@ -821,6 +943,13 @@ pub async fn somatic_execution_loop(
             });
 
             let cancel = lifecycle.install_fresh_cancel();
+            // E9 S9.5: when a per-tier backend map is installed, resolve the
+            // dispatch backend for this task's cost-class tier and record the
+            // routing decision; otherwise fall back to the single backend so
+            // the default path is unchanged.
+            #[cfg(feature = "std")]
+            let backend = lifecycle.resolve_dispatch_backend(task_id, tier);
+            #[cfg(not(feature = "std"))]
             let backend = Arc::clone(&lifecycle.backend);
             let dispatch_result = lifecycle
                 .scheduler
@@ -1200,6 +1329,135 @@ mod tests {
             m.motivation_enabled(),
             "with_motivation builder must install the gate"
         );
+    }
+
+    // ── E9 S9.5 — Per-tier backend dispatch wired into LifecycleManager ───────
+
+    /// A tier map with three distinguishable mock backends.
+    fn distinct_tiers() -> crate::router::TierBackends {
+        crate::router::TierBackends::new(
+            Arc::new(MockLlmBackend::with_id("cheap")),
+            Arc::new(MockLlmBackend::with_id("mid")),
+            Arc::new(MockLlmBackend::with_id("frontier")),
+        )
+    }
+
+    /// The backend id recorded by the most recent tier-dispatch RouterDecision
+    /// (we stash the chosen backend id in `tool_scope_name`).
+    fn dispatched_backend_id(m: &LifecycleManager) -> Option<String> {
+        m.audit.entries().iter().rev().find_map(|e| match e {
+            AuditEntry::RouterDecision {
+                tool_scope_name, ..
+            } => Some(tool_scope_name.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn tier_dispatch_disabled_by_default() {
+        let m = manager("agent-no-tiers", Some(1));
+        assert!(!m.tier_dispatch_enabled());
+    }
+
+    #[test]
+    fn with_tier_backends_builder_installs_map() {
+        let m = manager("agent-tier-builder", Some(1)).with_tier_backends(distinct_tiers());
+        assert!(m.tier_dispatch_enabled());
+    }
+
+    #[test]
+    fn frontier_tier_task_dispatches_to_frontier_backend() {
+        // MLFQ tier 0 (Critical/High) → Frontier cost class → frontier backend.
+        let mut m =
+            manager("agent-frontier-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(1, 0, "high priority work"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("frontier"),
+            "a tier-0 (Frontier) task must dispatch to the frontier backend"
+        );
+    }
+
+    #[test]
+    fn cheap_local_tier_task_dispatches_to_cheap_backend() {
+        // MLFQ tier 2 (Low/background) → CheapLocal cost class → cheap backend.
+        let mut m = manager("agent-cheap-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(7, 2, "background chore"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("cheap"),
+            "a tier-2 (CheapLocal) task must dispatch to the cheap backend"
+        );
+    }
+
+    #[test]
+    fn mid_tier_task_dispatches_to_mid_backend() {
+        let mut m = manager("agent-mid-dispatch", Some(1)).with_tier_backends(distinct_tiers());
+        m.agenda.push(Task::new(3, 1, "normal interaction"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(
+            dispatched_backend_id(&m).as_deref(),
+            Some("mid"),
+            "a tier-1 (MidTier) task must dispatch to the mid backend"
+        );
+    }
+
+    #[test]
+    fn uniform_tier_map_preserves_single_backend_behaviour() {
+        // A uniform map routes every tier to one backend: behaviour through the
+        // new path matches the legacy single-backend dispatch.
+        let tiers = crate::router::TierBackends::uniform(Arc::new(MockLlmBackend::with_id("solo")));
+        let mut m = manager("agent-uniform", Some(1)).with_tier_backends(tiers);
+        m.agenda.push(Task::new(9, 0, "anything"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(dispatched_backend_id(&m).as_deref(), Some("solo"));
+    }
+
+    #[test]
+    fn no_tier_map_emits_no_router_decision_and_uses_single_backend() {
+        // Backward compatibility: without a tier map the dispatch path is
+        // unchanged — no RouterDecision entry, single backend used.
+        let mut m = manager("agent-legacy-dispatch", Some(1));
+        m.agenda.push(Task::new(11, 0, "legacy task"));
+
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        monitor.record_ttft(1.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert!(
+            dispatched_backend_id(&m).is_none(),
+            "no RouterDecision entry must be emitted when no tier map is installed"
+        );
+    }
+
+    #[test]
+    fn cost_class_for_mlfq_tier_maps_priorities() {
+        assert_eq!(cost_class_for_mlfq_tier(0), CostClass::Frontier);
+        assert_eq!(cost_class_for_mlfq_tier(1), CostClass::MidTier);
+        assert_eq!(cost_class_for_mlfq_tier(2), CostClass::CheapLocal);
+        assert_eq!(cost_class_for_mlfq_tier(5), CostClass::CheapLocal);
     }
 
     #[test]

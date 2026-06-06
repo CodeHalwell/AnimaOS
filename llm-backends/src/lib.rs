@@ -40,7 +40,7 @@ pub use chat::{
     ChatBackend, ChatMessage, ChatResponse, ChatRole, FinishReason, ToolCall, ToolSpec,
 };
 pub use compat::OpenAiCompatibleBackend;
-pub use factory::{BackendFactory, BackendKind};
+pub use factory::{BackendFactory, BackendKind, TierBackendChoices};
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 

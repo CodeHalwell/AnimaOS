@@ -30,6 +30,8 @@ pub struct OnboardingState {
     pub preflight_ok: bool,
     /// Chosen `ANIMA_BACKEND` value for cheap-local tier.
     pub cheap_local_backend: Option<String>,
+    /// Chosen backend value for the mid-tier tier (E9 S9.5 per-tier dispatch).
+    pub mid_tier_backend: Option<String>,
     /// Chosen `ANIMA_BACKEND` value for frontier tier.
     pub frontier_backend: Option<String>,
     /// Whether the identity bootstrap step has been run.
@@ -90,6 +92,7 @@ fn serialise_state(s: &OnboardingState) -> String {
         "schema_version": s.schema_version,
         "preflight_ok": s.preflight_ok,
         "cheap_local_backend": s.cheap_local_backend,
+        "mid_tier_backend": s.mid_tier_backend,
         "frontier_backend": s.frontier_backend,
         "identity_bootstrapped": s.identity_bootstrapped,
         "operator_name": s.operator_name,
@@ -104,6 +107,7 @@ fn parse_state(text: &str) -> Option<OnboardingState> {
         schema_version: v["schema_version"].as_u64().unwrap_or(0) as u32,
         preflight_ok: v["preflight_ok"].as_bool().unwrap_or(false),
         cheap_local_backend: v["cheap_local_backend"].as_str().map(|s| s.to_string()),
+        mid_tier_backend: v["mid_tier_backend"].as_str().map(|s| s.to_string()),
         frontier_backend: v["frontier_backend"].as_str().map(|s| s.to_string()),
         identity_bootstrapped: v["identity_bootstrapped"].as_bool().unwrap_or(false),
         operator_name: v["operator_name"].as_str().map(|s| s.to_string()),
@@ -202,16 +206,23 @@ fn step_providers(state: &mut OnboardingState, report: &DoctorReport, interactiv
             "Accept cheap-local recommendation?  (press Enter to accept, or type a value)",
             &rec.cheap_local,
         );
+        let mid = prompt_with_default(
+            "Accept mid-tier recommendation?  (press Enter to accept, or type a value)",
+            &rec.mid_tier,
+        );
         let frontier = prompt_with_default(
             "Accept frontier recommendation?  (press Enter to accept, or type a value)",
             &rec.frontier,
         );
         state.cheap_local_backend = Some(cheap);
+        state.mid_tier_backend = Some(mid);
         state.frontier_backend = Some(frontier);
     } else {
         state.cheap_local_backend = Some(rec.cheap_local.clone());
+        state.mid_tier_backend = Some(rec.mid_tier.clone());
         state.frontier_backend = Some(rec.frontier.clone());
         println!("  cheap-local  → {}", rec.cheap_local);
+        println!("  mid-tier     → {}", rec.mid_tier);
         println!("  frontier     → {}", rec.frontier);
     }
     println!();
@@ -273,6 +284,11 @@ fn step_config_snippet(state: &OnboardingState) {
         .as_deref()
         .map(infer_backend_env_value)
         .unwrap_or("mock");
+    let mid = state
+        .mid_tier_backend
+        .as_deref()
+        .map(infer_backend_env_value)
+        .unwrap_or(cheap);
     let frontier = state
         .frontier_backend
         .as_deref()
@@ -280,15 +296,65 @@ fn step_config_snippet(state: &OnboardingState) {
         .unwrap_or("mock");
 
     println!("  Add to your shell profile or `.env` file:\n");
-    println!("  # AnimaOS — E9 onboarding config");
+    println!("  # AnimaOS — E9 onboarding config (per-tier router dispatch, S9.5)");
+    // Keep the legacy single-backend selector for backward compatibility …
     println!("  export ANIMA_BACKEND={cheap}");
-    if frontier != cheap {
-        println!("  # For frontier routing, the router will use: {frontier}");
-    }
+    // … and the per-tier overrides consumed by TierBackendChoices::from_env.
+    println!("  export ANIMA_CHEAP_BACKEND={cheap}");
+    println!("  export ANIMA_MID_BACKEND={mid}");
+    println!("  export ANIMA_FRONTIER_BACKEND={frontier}");
     println!();
     println!("  Start the agent:");
     println!("  cargo run --bin anima-hosted -- serve");
     println!("  # or: docker compose up --build\n");
+}
+
+/// Resolve the per-tier backend choices for runtime dispatch (E9 S9.5).
+///
+/// Precedence, per tier (cheap-local / mid-tier / frontier):
+/// 1. The per-tier env override (`ANIMA_CHEAP_BACKEND` / `ANIMA_MID_BACKEND` /
+///    `ANIMA_FRONTIER_BACKEND`) when set — operator's explicit runtime choice.
+/// 2. The value persisted by the `anima init` wizard in `onboarding.json`.
+/// 3. The CI-hermetic default from [`TierBackendChoices::from_env`]
+///    (mock unless a provider is configured/hinted).
+///
+/// This is the function `main.rs` calls to turn the wizard's "pick a model per
+/// tier" choices into a live `vita::router::TierBackends` map.
+pub fn resolve_tier_choices(agent_id: &str) -> llm_backends::TierBackendChoices {
+    use llm_backends::{BackendKind, TierBackendChoices};
+
+    // Env + defaults baseline (handles ANIMA_*_BACKEND overrides and fallbacks).
+    let mut choices = TierBackendChoices::from_env();
+
+    // Fold in saved wizard choices only where the operator did not set an
+    // explicit per-tier env override (env always wins).
+    let state = load_state(&default_state_path(agent_id)).unwrap_or_default();
+    // Parse a stored choice: try the raw value first so canonical provider names
+    // (lmstudio, vllm, …) round-trip exactly; fall back to the lossy
+    // `infer_backend_env_value` mapping for descriptive recommendation strings
+    // (e.g. "ollama (GGUF via Ollama)").
+    let from_state = |stored: &Option<String>| -> Option<BackendKind> {
+        let raw = stored.as_deref()?;
+        BackendKind::parse(raw.trim()).or_else(|| BackendKind::parse(infer_backend_env_value(raw)))
+    };
+
+    if std::env::var("ANIMA_CHEAP_BACKEND").is_err() {
+        if let Some(kind) = from_state(&state.cheap_local_backend) {
+            choices.cheap_local = kind;
+        }
+    }
+    if std::env::var("ANIMA_MID_BACKEND").is_err() {
+        if let Some(kind) = from_state(&state.mid_tier_backend) {
+            choices.mid_tier = kind;
+        }
+    }
+    if std::env::var("ANIMA_FRONTIER_BACKEND").is_err() {
+        if let Some(kind) = from_state(&state.frontier_backend) {
+            choices.frontier = kind;
+        }
+    }
+
+    choices
 }
 
 /// Map a recommendation string back to an `ANIMA_BACKEND` env value.
@@ -383,6 +449,7 @@ mod tests {
             schema_version: 1,
             preflight_ok: true,
             cheap_local_backend: Some("ollama".to_string()),
+            mid_tier_backend: Some("lmstudio".to_string()),
             frontier_backend: Some("anthropic".to_string()),
             identity_bootstrapped: true,
             operator_name: Some("Alice".to_string()),
@@ -394,6 +461,7 @@ mod tests {
         assert_eq!(parsed.schema_version, 1);
         assert!(parsed.preflight_ok);
         assert_eq!(parsed.cheap_local_backend.as_deref(), Some("ollama"));
+        assert_eq!(parsed.mid_tier_backend.as_deref(), Some("lmstudio"));
         assert_eq!(parsed.frontier_backend.as_deref(), Some("anthropic"));
         assert!(parsed.identity_bootstrapped);
         assert_eq!(parsed.operator_name.as_deref(), Some("Alice"));
@@ -431,6 +499,7 @@ mod tests {
             schema_version: 1,
             preflight_ok: true,
             cheap_local_backend: Some("ollama".to_string()),
+            mid_tier_backend: Some("lmstudio".to_string()),
             frontier_backend: Some("anthropic".to_string()),
             identity_bootstrapped: false,
             operator_name: None,
@@ -439,6 +508,7 @@ mod tests {
         save_state(&path, &state).expect("save must succeed");
         let loaded = load_state(&path).expect("load must succeed");
         assert_eq!(loaded.cheap_local_backend.as_deref(), Some("ollama"));
+        assert_eq!(loaded.mid_tier_backend.as_deref(), Some("lmstudio"));
         assert_eq!(loaded.frontier_backend.as_deref(), Some("anthropic"));
         std::fs::remove_file(&path).ok();
     }
