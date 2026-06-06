@@ -364,6 +364,30 @@ fn print_audit(manager: &LifecycleManager) {
                      (eviction more aggressive under pressure)"
                 );
             }
+            // ── E10 — Presence ─────────────────────────────────────────────
+            AuditEntry::ChannelMessageReceived {
+                channel,
+                from,
+                modality,
+                ..
+            } => {
+                println!("  📨 channel_received channel={channel} from={from} modality={modality}");
+            }
+            AuditEntry::ChannelMessageSent {
+                channel,
+                to,
+                modality,
+                ..
+            } => {
+                println!("  📤 channel_sent channel={channel} to={to} modality={modality}");
+            }
+            AuditEntry::ModalityUnsupported {
+                channel, modality, ..
+            } => {
+                println!(
+                    "  ⚠️  modality_unsupported channel={channel} modality={modality}"
+                );
+            }
             // E7 — Embodiment egress audit entries
             AuditEntry::EgressRequested { tool_id, url } => {
                 println!("  🌐 egress_requested tool={tool_id} url={url}");

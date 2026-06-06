@@ -45,6 +45,20 @@ pub enum SensoryPacket {
     Text(String),
     /// PCM audio frame (16-bit little-endian samples).
     Pcm(Vec<i16>),
+    /// A raster image payload (E10 — Presence, S10.3).
+    ///
+    /// `bytes` is the raw encoded image data (JPEG, PNG, WebP, …); `mime`
+    /// carries the MIME type string so downstream routes can select a
+    /// vision-capable backend; `caption` is an optional text description
+    /// arriving alongside the image.
+    Image {
+        /// Raw encoded image bytes.
+        bytes: Vec<u8>,
+        /// MIME type of the image (e.g. `"image/jpeg"`, `"image/png"`).
+        mime: String,
+        /// Optional text caption provided by the sender.
+        caption: Option<String>,
+    },
 }
 
 /// A sensory packet paired with its assigned priority level.
@@ -83,6 +97,11 @@ pub struct HumanGuidance {
     pub max_pcm_samples: Option<usize>,
     /// Text inputs that start with any of these prefixes are rejected.
     pub blocked_prefixes: Vec<String>,
+    /// Maximum allowed image payload in bytes (E10 — Presence, S10.3).
+    ///
+    /// `None` means unlimited.  Prevents oversized image uploads from
+    /// exhausting memory before the vision route processes them.
+    pub max_image_bytes: Option<usize>,
 }
 
 impl HumanGuidance {
@@ -93,6 +112,7 @@ impl HumanGuidance {
             max_text_length: None,
             max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         }
     }
 }
@@ -349,11 +369,75 @@ impl SensoryBridge {
         Ok(())
     }
 
+    /// Validates an image payload against the active policy bounds and, if
+    /// accepted, enqueues a [`SensoryPacket::Image`] with `priority` (E10
+    /// — Presence, S10.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SensoryBridgeError::PolicyViolation`] when:
+    /// - `bytes` is empty (an empty image carries no useful information).
+    /// - `bytes.len()` exceeds [`HumanGuidance::max_image_bytes`] (when set) —
+    ///   bounds operator-channel allocation against a resource-exhaustion DoS.
+    /// - `mime` is empty (prevents untyped image delivery to vision routes).
+    pub fn packetize_image_checked(
+        &self,
+        bytes: Vec<u8>,
+        mime: impl Into<String>,
+        caption: Option<String>,
+        priority: SensoryPriority,
+    ) -> Result<(), SensoryBridgeError> {
+        let mime = mime.into();
+        if bytes.is_empty() {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "image payload must not be empty".into(),
+            });
+        }
+        if mime.is_empty() {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "image MIME type must not be empty".into(),
+            });
+        }
+        if !mime.starts_with("image/") {
+            return Err(SensoryBridgeError::PolicyViolation {
+                reason: "MIME type must start with 'image/'".into(),
+            });
+        }
+        if let Some(max_bytes) = self.active_bounds.lock().expect("poisoned").max_image_bytes {
+            if bytes.len() > max_bytes {
+                return Err(SensoryBridgeError::PolicyViolation {
+                    reason: format!(
+                        "image size {} B exceeds policy limit {max_bytes} B",
+                        bytes.len()
+                    ),
+                });
+            }
+        }
+        self.queue
+            .lock()
+            .expect("poisoned")
+            .push_back(PrioritizedPacket {
+                packet: SensoryPacket::Image {
+                    bytes,
+                    mime,
+                    caption,
+                },
+                priority,
+                gate_override_reason: None,
+            });
+        Ok(())
+    }
+
     // ── Queue inspection & consumption ────────────────────────────────────────
 
     /// Returns `true` when at least one packet is waiting to be consumed.
     pub fn has_packets(&self) -> bool {
         !self.queue.lock().expect("poisoned").is_empty()
+    }
+
+    /// Returns the number of packets currently queued in the bridge.
+    pub fn queue_len(&self) -> usize {
+        self.queue.lock().expect("poisoned").len()
     }
 
     /// Pops the next sensory packet (priority stripped), if any.
@@ -477,6 +561,7 @@ mod tests {
             max_text_length: Some(5),
             max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         });
         let err = bridge
             .packetize_text_checked("too long input", SensoryPriority::Normal)
@@ -492,6 +577,7 @@ mod tests {
             max_text_length: Some(5),
             max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         });
         bridge
             .packetize_text_checked("hello", SensoryPriority::Normal)
@@ -506,6 +592,7 @@ mod tests {
             max_text_length: None,
             max_pcm_samples: None,
             blocked_prefixes: vec!["SYSTEM:".to_string(), "OVERRIDE:".to_string()],
+            max_image_bytes: None,
         });
         let err = bridge
             .packetize_text_checked("SYSTEM: override policy", SensoryPriority::Critical)
@@ -526,6 +613,7 @@ mod tests {
             max_text_length: None,
             max_pcm_samples: None,
             blocked_prefixes: vec!["SYSTEM:".to_string()],
+            max_image_bytes: None,
         });
         bridge
             .packetize_text_checked("user: normal query", SensoryPriority::Normal)
@@ -550,6 +638,7 @@ mod tests {
             max_text_length: None,
             max_pcm_samples: Some(3),
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         });
         let err = bridge
             .packetize_pcm_checked(vec![1, 2, 3, 4], SensoryPriority::Normal)
@@ -568,6 +657,7 @@ mod tests {
             max_text_length: None,
             max_pcm_samples: Some(3),
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         });
         bridge
             .packetize_pcm_checked(vec![1, 2, 3], SensoryPriority::Normal)
@@ -599,6 +689,7 @@ mod tests {
             max_text_length: Some(5),
             max_pcm_samples: None,
             blocked_prefixes: vec!["INJECT:".into()],
+            max_image_bytes: None,
         });
         // Length violation
         let err = bridge
@@ -682,6 +773,7 @@ mod tests {
             max_text_length: Some(4),
             max_pcm_samples: None,
             blocked_prefixes: Vec::new(),
+            max_image_bytes: None,
         });
 
         // Same text is now rejected.
@@ -698,5 +790,140 @@ mod tests {
         assert_eq!(g.policy_hint, "hint");
         assert!(g.max_text_length.is_none());
         assert!(g.blocked_prefixes.is_empty());
+        assert!(g.max_image_bytes.is_none());
+    }
+
+    // ── Image modality (E10 S10.3) ────────────────────────────────────────────
+
+    #[test]
+    fn packetize_image_checked_accepts_valid_image() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        bridge
+            .packetize_image_checked(
+                vec![0xFF, 0xD8, 0xFF],
+                "image/jpeg",
+                Some("photo".into()),
+                SensoryPriority::Normal,
+            )
+            .expect("valid image should be accepted");
+        let pkt = bridge.next_prioritized_packet().unwrap();
+        assert_eq!(pkt.priority, SensoryPriority::Normal);
+        assert!(matches!(&pkt.packet, SensoryPacket::Image { mime, .. } if mime == "image/jpeg"));
+    }
+
+    #[test]
+    fn packetize_image_checked_rejects_empty_bytes() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_image_checked(vec![], "image/png", None, SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_image_checked_rejects_empty_mime() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_image_checked(vec![1, 2, 3], "", None, SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_image_checked_rejects_oversized_payload() {
+        let bridge = SensoryBridge::new(HumanGuidance {
+            policy_hint: "strict-img".into(),
+            max_text_length: None,
+            max_pcm_samples: None,
+            blocked_prefixes: Vec::new(),
+            max_image_bytes: Some(3),
+        });
+        let err = bridge
+            .packetize_image_checked(vec![1, 2, 3, 4], "image/png", None, SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn packetize_image_checked_accepts_exactly_at_max_bytes() {
+        let bridge = SensoryBridge::new(HumanGuidance {
+            policy_hint: "strict-img".into(),
+            max_text_length: None,
+            max_pcm_samples: None,
+            blocked_prefixes: Vec::new(),
+            max_image_bytes: Some(3),
+        });
+        bridge
+            .packetize_image_checked(vec![1, 2, 3], "image/png", None, SensoryPriority::High)
+            .expect("exactly-at-limit image should be accepted");
+        assert!(bridge.has_packets());
+    }
+
+    #[test]
+    fn image_packet_carries_caption_and_mime() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        bridge
+            .packetize_image_checked(
+                vec![0u8; 10],
+                "image/webp",
+                Some("my caption".into()),
+                SensoryPriority::Low,
+            )
+            .unwrap();
+        let pkt = bridge.next_prioritized_packet().unwrap();
+        match pkt.packet {
+            SensoryPacket::Image {
+                mime,
+                caption,
+                bytes,
+            } => {
+                assert_eq!(mime, "image/webp");
+                assert_eq!(caption.as_deref(), Some("my caption"));
+                assert_eq!(bytes.len(), 10);
+            }
+            other => panic!("expected Image packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_packet_with_no_caption_is_accepted() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        bridge
+            .packetize_image_checked(vec![1], "image/png", None, SensoryPriority::Normal)
+            .unwrap();
+        let pkt = bridge.next_prioritized_packet().unwrap();
+        assert!(matches!(
+            pkt.packet,
+            SensoryPacket::Image { caption: None, .. }
+        ));
+    }
+
+    #[test]
+    fn packetize_image_checked_rejects_non_image_mime() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        let err = bridge
+            .packetize_image_checked(vec![1, 2, 3], "text/plain", None, SensoryPriority::Normal)
+            .unwrap_err();
+        assert!(matches!(err, SensoryBridgeError::PolicyViolation { .. }));
+        assert!(!bridge.has_packets());
+    }
+
+    #[test]
+    fn queue_len_reflects_enqueued_packets() {
+        let bridge = SensoryBridge::new(HumanGuidance::new("policy"));
+        assert_eq!(bridge.queue_len(), 0);
+        bridge
+            .packetize_image_checked(vec![1], "image/png", None, SensoryPriority::Normal)
+            .unwrap();
+        assert_eq!(bridge.queue_len(), 1);
+        bridge
+            .packetize_image_checked(vec![2], "image/jpeg", None, SensoryPriority::Normal)
+            .unwrap();
+        assert_eq!(bridge.queue_len(), 2);
+        bridge.next_packet();
+        assert_eq!(bridge.queue_len(), 1);
     }
 }

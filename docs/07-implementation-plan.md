@@ -2200,6 +2200,134 @@ CI, and produce a security review at the end of each stage.
 
 ---
 
+## Stage 7 — Autonomous Agent Layer
+
+The autonomy, embodiment, and alignment layer built on top of the shipped
+somatic core (Stages 1–6).  The design suite lives in `docs/12-21`.
+The forward-epic index and dependency graph are in `docs/18-forward-epics.md`.
+
+Epics in this stage run as parallel tracks that converge at E12 (Motivation).
+Each epic references its own design document; stories within an epic may be
+parallelised, but an epic closes only when all exit criteria are met.
+
+### Epic E7 — Embodiment 🟡
+
+**Scope.** Real-world tool foundations: egress/SSRF guard, web-search tool,
+lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
+
+**Delivered (PR #72).**
+- S7.0 `EgressGuard` — https-only, full SSRF block list, host allow/block-list;
+  `EgressAwareDispatcher`; URL secret redaction in the audit log.
+- S7.1 `WebSearchTool` (`crates/actuators`) — `SearchProvider` trait,
+  `FixtureProvider` (CI-safe), `SearxngProvider` (live, behind `live` feature);
+  egress-guarded pre-invoke.
+- S7.3 Lexical scorer — `LexicalScorer` (BM25-inspired TF×IDF, deterministic);
+  `FixtureScorer`; tier boundary invariant.
+- New `AuditEntry` variants: `EgressRequested`, `EgressBlocked`, `ToolSelection`.
+- 52 new tests; 15 integration tests (`e7_embodiment`).
+
+**Deferred.** S7.2 (browser/Playwright), S7.4 (live tool-calling), embedding scorer.
+
+### Epic E8 — Local Inference 🟡
+
+**Scope.** OpenAI-compatible provider umbrella (vLLM / LM Studio / NVIDIA NIM /
+HF TGI / llama.cpp-server) and the shared `ChatBackend` extension trait.
+See `docs/13-local-llm-providers.md`.
+
+**Delivered (PR #73).**
+- S8.0 `BackendCapabilities`, `ProviderConfig`, `ChatBackend` extension trait,
+  shared chat types (`ChatMessage`, `ChatRole`, `ToolCall`, `ChatResponse`).
+- S8.1 `OpenAiCompatibleBackend` — fixture mode (default, CI-safe) + live mode
+  (`ANIMA_COMPAT_LIVE=1`); five provider presets; tool-calling passthrough;
+  factory updates (`BackendKind` extended).
+- 70 hermetic unit tests.
+
+**Deferred.** S8.3–S8.4 (native runtimes, Unsloth/HRA, adapter library).
+
+### Epic E9 — Onboarding 🟡
+
+**Scope.** First-run experience: `anima doctor`, `anima init` wizard, unified
+quickstart.  See `docs/14-onboarding.md`.
+
+**Delivered (PR #74).**
+- S9.3 `anima doctor` — GPU/RAM detection, provider TCP probes, API-key check,
+  tier recommendations; 15 unit tests.
+- S9.1 `anima init` — three-step idempotent wizard; non-interactive mode; atomic
+  state persistence; 11 unit tests.
+- S9.7 `docs/getting-started.md` — unified quickstart (Docker, native, hardware
+  paths, identity memory commands).
+
+### Epic E10 — Presence 🟡
+
+**Scope.** Channel gateway framework: comms-app adapters over the existing
+operator seam; image and voice as first-class bidirectional modalities.
+See `docs/15-communication-multimodal.md`.
+
+**Dependencies.** E6 (operator seam, SensoryBridge), E7 (egress guard
+for outbound channel calls — wired once E7 merges).
+
+**Stories.**
+- S10.1 `ChannelGateway` trait + `anima-comms` host binary. ✅
+  (`crates/comms/src/lib.rs` — `ChannelAdapter` trait, `ChannelGateway`
+  orchestrator, `GatewayConfig`, `PollOutcome`; `crates/comms/src/bin/anima-comms.rs` —
+  demo binary with `--channel`, `--count` flags; fully CI-safe fixture mode)
+- S10.2 First channel adapters: Telegram and Slack. ✅
+  (`crates/comms/src/adapters.rs` — `TelegramAdapter` and `SlackAdapter` with
+  `FixtureQueue`; all adapters default to fixture mode; live mode gated by
+  `ANIMA_COMMS_LIVE`; 16 unit tests; thread-safety proved via clone-sharing test)
+- S10.3 Image modality (afferent + efferent). ✅
+  (`crates/senses/src/lib.rs` — `SensoryPacket::Image { bytes, mime, caption }`;
+  `HumanGuidance::max_image_bytes` policy bound; `packetize_image_checked()` with
+  empty-bytes, empty-mime, and size-limit enforcement; 7 new unit tests;
+  `vita/src/lib.rs` prompt extraction handles `Image` variant)
+- S10.4 Voice provider traits (`SttProvider` / `TtsProvider`). ✅
+  (`crates/comms/src/voice.rs` — `SttProvider` trait, `TtsProvider` trait,
+  `FixtureStt` (lookup by frame length, configurable default), `FixtureTts`
+  (lookup by text, configurable default); 14 unit tests; trait objects verified)
+- S10.5 Modality-aware routing (partial — routing integration deferred to E8). ⬜
+  (`crates/vita/src/audit.rs` — `AuditEntry::ChannelMessageReceived`,
+  `ChannelMessageSent`, `ModalityUnsupported` added for route-capability tracking;
+  full modality × route matrix requires `BackendCapabilities.vision` from E8)
+
+**Exit criteria.**
+1. Inbound text, image, and voice messages from both Telegram and Slack fixture
+   adapters are packetised into the sensory bridge with correct priorities and
+   policy-bound enforcement. ✅ (`run_once_enqueues_text_message_from_telegram`,
+   `run_once_enqueues_image_message_from_slack`,
+   `run_once_enqueues_voice_message`,
+   `run_once_rejects_oversized_image`,
+   `run_once_rejects_oversized_voice_frame`)
+2. Policy violations (empty body, MIME, oversized payload) are rejected by
+   `packetize_image_checked` without panicking. ✅
+   (`packetize_image_checked_rejects_empty_bytes`,
+   `packetize_image_checked_rejects_empty_mime`,
+   `packetize_image_checked_rejects_oversized_payload`)
+3. `SttProvider` and `TtsProvider` are trait objects; fixture implementations
+   produce deterministic, CI-hermetic transcripts and audio. ✅
+   (`stt_provider_trait_object_works`, `tts_provider_trait_object_works`,
+   `fixture_stt_returns_registered_transcript_by_frame_length`,
+   `fixture_tts_returns_registered_audio_for_text`)
+4. `anima-comms` binary runs the fixture demo and reports packet counts without
+   live network access. ✅ (binary compiles and runs with demo fixtures)
+
+### Epic E13 — Alignment Assurance 🟡
+
+**Scope.** Immutable value charter, constitution enforcement hook, alignment
+eval harness, red-team corpus.  See `docs/19-constitution-and-alignment.md`.
+
+**Delivered (PR #75).**
+- S13.1 `constitution.toml` value charter — 8 inviolable prohibitions (P1–P8),
+  3 drive bounds, HMAC-SHA256 tamper-evidence (`crates/constitution`).
+- S13.2 `ConstitutionCheck::screen()` — keyword heuristic; `ConstitutionGuard`
+  bridges to `DefenceLayer`; runs first before all other detectors.
+- S13.3 `cargo xtask align-eval` — 17 labelled scenarios; 100% pass.
+- S13.4 `cargo xtask red-team` — 22-probe adversarial corpus; 100% blocked.
+- S13.5 `CorrigibilityHold` proof token; 7 `CorrigibilityReason` variants; 9 tests.
+- S13.6 New audit entries: `AuditEntry::ConstitutionVeto`, `CorrigibilityAsserted`.
+- 31 unit tests.
+
+---
+
 ## Parallelisation Notes
 
 - Stage-1 epics E1.3, E1.4, and E1.5 can proceed in parallel once E1.2
