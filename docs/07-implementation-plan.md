@@ -3120,8 +3120,8 @@ to operator attention, mirroring the defence layer's escalation pattern (E5.6).
   `Operator` unlimited. Configurable at runtime via `QuotaPolicy`. ✅
   (`crates/quota/src/lib.rs` — `TierLimits`, `QuotaPolicy`, `QuotaPolicy::for_tier`)
 - S18.2 `UserQuotaTracker` with rolling-window accounting: `check_and_consume(user_id,
-  tier, tokens, now_ns) -> QuotaResult` applies the hourly-token, daily-token, and
-  hourly-request limits in priority order; stale window entries are lazily drained on
+  tier, tokens, now_ns) -> QuotaResult` applies the hourly-request, hourly-token, and
+  daily-token limits in that order (cheapest check first); stale window entries are lazily drained on
   each call; `Operator` tier bypasses all checks. `QuotaResult::Allowed` returns
   remaining capacity; `QuotaResult::Exceeded` carries the `ExceededReason` and a
   `retry_after_ns` hint. ✅

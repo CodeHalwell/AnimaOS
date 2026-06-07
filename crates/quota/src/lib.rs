@@ -396,8 +396,12 @@ impl UserQuotaTracker {
     ) -> QuotaResult {
         let limits = self.policy.for_tier(tier);
 
-        // Operator tier bypasses all checks.
+        // Operator tier bypasses all checks and clears stale violations so that
+        // should_escalate / snapshot don't reflect pre-promotion denials.
         if limits.is_unlimited() {
+            if let Some(u) = self.usage.get_mut(user_id) {
+                u.consecutive_violations = 0;
+            }
             return QuotaResult::Allowed {
                 remaining_hourly_tokens: u64::MAX,
                 remaining_daily_tokens: u64::MAX,
@@ -437,19 +441,26 @@ impl UserQuotaTracker {
         // Check hourly token limit.
         if hourly_tokens.saturating_add(tokens) > limits.tokens_per_hour {
             usage.consecutive_violations += 1;
-            let mut accumulated = 0u64;
-            let mut retry_after_ns = now_ns.saturating_add(HOUR_NS);
-            for &(ts, t) in &usage.hourly_tokens {
-                accumulated = accumulated.saturating_add(t);
-                if hourly_tokens
-                    .saturating_sub(accumulated)
-                    .saturating_add(tokens)
-                    <= limits.tokens_per_hour
-                {
-                    retry_after_ns = ts.saturating_add(HOUR_NS);
-                    break;
+            // If the request itself exceeds the per-hour cap it can never be served
+            // regardless of window state — signal that with u64::MAX.
+            let retry_after_ns = if tokens > limits.tokens_per_hour {
+                u64::MAX
+            } else {
+                let mut accumulated = 0u64;
+                let mut hint = now_ns.saturating_add(HOUR_NS);
+                for &(ts, t) in &usage.hourly_tokens {
+                    accumulated = accumulated.saturating_add(t);
+                    if hourly_tokens
+                        .saturating_sub(accumulated)
+                        .saturating_add(tokens)
+                        <= limits.tokens_per_hour
+                    {
+                        hint = ts.saturating_add(HOUR_NS);
+                        break;
+                    }
                 }
-            }
+                hint
+            };
             return QuotaResult::Exceeded {
                 user_id: user_id.to_owned(),
                 reason: ExceededReason::HourlyTokenLimit {
@@ -463,19 +474,25 @@ impl UserQuotaTracker {
         // Check daily token limit.
         if daily_tokens.saturating_add(tokens) > limits.tokens_per_day {
             usage.consecutive_violations += 1;
-            let mut accumulated = 0u64;
-            let mut retry_after_ns = now_ns.saturating_add(DAY_NS);
-            for &(ts, t) in &usage.daily_tokens {
-                accumulated = accumulated.saturating_add(t);
-                if daily_tokens
-                    .saturating_sub(accumulated)
-                    .saturating_add(tokens)
-                    <= limits.tokens_per_day
-                {
-                    retry_after_ns = ts.saturating_add(DAY_NS);
-                    break;
+            // Same logic: if the request exceeds the per-day cap it can never succeed.
+            let retry_after_ns = if tokens > limits.tokens_per_day {
+                u64::MAX
+            } else {
+                let mut accumulated = 0u64;
+                let mut hint = now_ns.saturating_add(DAY_NS);
+                for &(ts, t) in &usage.daily_tokens {
+                    accumulated = accumulated.saturating_add(t);
+                    if daily_tokens
+                        .saturating_sub(accumulated)
+                        .saturating_add(tokens)
+                        <= limits.tokens_per_day
+                    {
+                        hint = ts.saturating_add(DAY_NS);
+                        break;
+                    }
                 }
-            }
+                hint
+            };
             return QuotaResult::Exceeded {
                 user_id: user_id.to_owned(),
                 reason: ExceededReason::DailyTokenLimit {
@@ -652,6 +669,53 @@ mod tests {
         for _ in 0..20 {
             let r = t.check_and_consume("op:1", TrustTier::Operator, 100_000, now());
             assert!(r.is_allowed(), "operator should never be rate-limited");
+        }
+    }
+
+    #[test]
+    fn operator_tier_clears_stale_violations() {
+        let policy = QuotaPolicy {
+            unknown: TierLimits {
+                tokens_per_hour: 5,
+                tokens_per_day: 100,
+                requests_per_hour: 100,
+            },
+            ..QuotaPolicy::default()
+        };
+        let mut t = UserQuotaTracker::new(policy);
+        let now = now();
+        // Deny twice as Unknown to accumulate violations.
+        t.check_and_consume("u:1", TrustTier::Unknown, 5, now);
+        t.check_and_consume("u:1", TrustTier::Unknown, 1, now);
+        t.check_and_consume("u:1", TrustTier::Unknown, 1, now);
+        assert!(t.consecutive_violations("u:1") > 0);
+        // After a single Operator-tier call violations must be cleared.
+        t.check_and_consume("u:1", TrustTier::Operator, 1_000_000, now);
+        assert_eq!(t.consecutive_violations("u:1"), 0);
+    }
+
+    #[test]
+    fn tokens_exceeding_hourly_cap_returns_max_retry() {
+        let policy = QuotaPolicy {
+            unknown: TierLimits {
+                tokens_per_hour: 10,
+                tokens_per_day: 1_000,
+                requests_per_hour: 1_000,
+            },
+            ..QuotaPolicy::default()
+        };
+        let mut t = UserQuotaTracker::new(policy);
+        // Request more tokens than the hourly cap in a single call — can never succeed.
+        let r = t.check_and_consume("u:1", TrustTier::Unknown, 11, now());
+        match r {
+            QuotaResult::Exceeded { retry_after_ns, .. } => {
+                assert_eq!(
+                    retry_after_ns,
+                    u64::MAX,
+                    "unsatisfiable request must signal u64::MAX"
+                );
+            }
+            _ => panic!("expected Exceeded"),
         }
     }
 

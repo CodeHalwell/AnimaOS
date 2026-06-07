@@ -1415,14 +1415,8 @@ fn cmd_quota(args: &[String]) {
                 println!("note: quota state is in-process only; this resets the demo tracker, not a running daemon");
                 tracker.reset(user_id);
                 println!("quota: reset usage windows for {user_id:?}");
-                // Emit an audit entry so the reset is traceable.
-                log.push(vita::AuditEntry::UserTrustUpdated {
-                    agent_id: AGENT_ID.to_owned(),
-                    user_id: user_id.clone(),
-                    old_tier: "n/a".to_owned(),
-                    new_tier: "quota_reset".to_owned(),
-                });
                 println!("quota: reset complete");
+                let _ = &mut log; // log unused in this path; kept for future persistence hook
             }
             None => eprintln!("usage: anima-hosted quota reset <user_id>"),
         },
