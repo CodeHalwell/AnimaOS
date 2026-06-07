@@ -1708,7 +1708,20 @@ for live mode).
     (`llm-backends/src/hub.rs` — `HfModelInfo`, `HubError`, fixture/live modes,
     context-window and tool-support extraction, `OnceLock`-cached fixture IDs;
     17 unit tests including serde round-trip and `parse_hub_response`)
-- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜ (external/live-gated FFI)
+- S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). 🟡 — abstraction + fixture
+  layer DONE: `llm-backends/src/native.rs` ships `NativeRuntime` trait (hook point for live
+  FFI), `NativeRuntimeConfig` (env-var-driven, common to both runtimes),
+  `LlamaCppNativeBackend` (`"llama-cpp-native"` id; GGUF model; fixture default;
+  env-gated `ANIMA_LLAMACPP_NATIVE_LIVE=1`; 4 builtin fixture prompts;
+  `with_custom_fixtures` / `from_env` / `config()` API; 11 tests),
+  `LiteRtLmBackend` (`"litert-lm"` id; MediaPipe Task bundle; fixture default;
+  env-gated `ANIMA_LITERT_LM_LIVE=1`; 4 builtin fixture prompts;
+  same API surface; 11 tests), and `FixtureNativeRuntime` shim satisfying the trait
+  for CI. `BackendKind::LlamaCppNative` and `BackendKind::LiteRtLm` added to
+  `BackendFactory::fixture` and `BackendKind::parse`; re-exported from
+  `llm-backends/src/lib.rs`. 26 new tests; `cargo test --workspace` green.
+  Real llama.cpp FFI and LiteRT-LM live bindings remain behind future feature
+  flags (`llama-native-live` / `litert-lm-live`) not yet wired. ⬜
 - S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
   library). 🟡 — S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs` —
   `FinetuneArgs` + `run_finetune`: JSONL loader, fixture mode default, HRA/LoRA/QLoRA
