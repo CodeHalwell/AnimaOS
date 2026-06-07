@@ -55,7 +55,7 @@ impl QualityReport {
         let mut star_sum = 0u64;
         let mut star_count = 0usize;
         let mut score_sum = 0.0f64;
-        let mut category_map: HashMap<String, usize> = HashMap::new();
+        let mut category_map: HashMap<crate::record::FeedbackCategory, usize> = HashMap::new();
         let mut correction_map: HashMap<String, usize> = HashMap::new();
         let mut rated_map: HashMap<String, usize> = HashMap::new();
 
@@ -74,14 +74,22 @@ impl QualityReport {
             score_sum += rec.rating.as_score();
 
             for cat in &rec.categories {
-                *category_map.entry(cat.as_str().to_string()).or_insert(0) += 1;
+                *category_map.entry(*cat).or_insert(0) += 1;
             }
 
             if rec.has_correction() {
-                *correction_map.entry(rec.invocation_id.clone()).or_insert(0) += 1;
+                if let Some(count) = correction_map.get_mut(&rec.invocation_id) {
+                    *count += 1;
+                } else {
+                    correction_map.insert(rec.invocation_id.clone(), 1);
+                }
             }
 
-            *rated_map.entry(rec.invocation_id.clone()).or_insert(0) += 1;
+            if let Some(count) = rated_map.get_mut(&rec.invocation_id) {
+                *count += 1;
+            } else {
+                rated_map.insert(rec.invocation_id.clone(), 1);
+            }
         }
 
         let avg_stars = if star_count > 0 {
@@ -104,7 +112,10 @@ impl QualityReport {
             negative_count: negative,
             avg_stars,
             avg_score: score_sum / total as f64,
-            category_counts: category_map,
+            category_counts: category_map
+                .into_iter()
+                .map(|(k, v)| (k.as_str().to_string(), v))
+                .collect(),
             top_corrected_invocations: top_corrected,
             top_rated_invocations: top_rated,
         }
@@ -158,10 +169,11 @@ pub struct WeightedTrainingHint {
 pub fn build_training_hints(records: &[FeedbackRecord]) -> Vec<WeightedTrainingHint> {
     let mut inv_map: HashMap<String, Vec<&FeedbackRecord>> = HashMap::new();
     for rec in records {
-        inv_map
-            .entry(rec.invocation_id.clone())
-            .or_default()
-            .push(rec);
+        if let Some(recs) = inv_map.get_mut(&rec.invocation_id) {
+            recs.push(rec);
+        } else {
+            inv_map.insert(rec.invocation_id.clone(), vec![rec]);
+        }
     }
 
     let mut hints: Vec<WeightedTrainingHint> = inv_map

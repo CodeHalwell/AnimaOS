@@ -191,10 +191,12 @@ impl FeedbackRecord {
         rating: FeedbackRating,
         created_at_ns: u64,
     ) -> Self {
+        let user_id = user_id.into();
+        let invocation_id = invocation_id.into();
         Self {
-            id: format!("fb-{created_at_ns}"),
-            user_id: user_id.into(),
-            invocation_id: invocation_id.into(),
+            id: format!("fb-{user_id}-{invocation_id}-{created_at_ns}"),
+            user_id,
+            invocation_id,
             session_id: None,
             rating,
             categories: Vec::new(),

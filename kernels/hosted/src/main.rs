@@ -1346,11 +1346,20 @@ fn cmd_feedback(args: &[String]) {
                                         }
                                         j += 2;
                                         continue;
+                                    } else {
+                                        eprintln!("feedback record: --category requires a value");
+                                        return;
                                     }
                                 }
                                 j += 1;
                             }
                             if !cats.is_empty() {
+                                // Preserve the Corrected marker if --correct was also supplied.
+                                if rec.has_correction()
+                                    && !cats.contains(&FeedbackCategory::Corrected)
+                                {
+                                    cats.push(FeedbackCategory::Corrected);
+                                }
                                 rec = rec.with_categories(cats);
                             }
 
