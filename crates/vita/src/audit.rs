@@ -1192,6 +1192,51 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E24 — Response Quality & Feedback Collection ──────────────────────────
+    /// Explicit quality feedback was received for a cortex invocation (E24 S24.5).
+    ///
+    /// Emitted immediately after the feedback record is stored.
+    FeedbackReceived {
+        /// Agent identifier.
+        agent_id: String,
+        /// User who submitted the feedback.
+        user_id: String,
+        /// Cortex invocation that was rated.
+        invocation_id: String,
+        /// Human-readable rating label (`"👍"`, `"👎"`, `"3★"`, …).
+        rating_label: String,
+        /// Normalised quality score in `[0.0, 1.0]`.
+        score: f64,
+        /// Number of reason-code categories attached to this feedback.
+        category_count: usize,
+    },
+
+    /// A quality report was generated over feedback records (E24 S24.3).
+    QualityReportGenerated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Total number of feedback records included in the report.
+        total_feedback: usize,
+        /// Satisfaction rate as a percentage (0–100), or `None` if no
+        /// positive-or-negative records exist.
+        satisfaction_pct: Option<u32>,
+        /// Mean quality score across all records, scaled to `[0, 100]`.
+        avg_score_pct: u32,
+    },
+
+    /// An operator-supplied correction was recorded for an invocation (E24 S24.5).
+    ///
+    /// Separate entry from `FeedbackReceived` so corrections can be queried
+    /// independently in the audit trail.
+    FeedbackCorrectionRecorded {
+        /// Agent identifier.
+        agent_id: String,
+        /// User who provided the correction.
+        user_id: String,
+        /// Cortex invocation that was corrected.
+        invocation_id: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

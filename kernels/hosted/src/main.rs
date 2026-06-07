@@ -901,6 +901,41 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E24 Response Quality & Feedback Collection ─────────────────
+            AuditEntry::FeedbackReceived {
+                agent_id,
+                user_id,
+                invocation_id,
+                rating_label,
+                score,
+                category_count,
+            } => {
+                println!(
+                    "  💬 feedback_received agent={agent_id} user={user_id} \
+                     inv={invocation_id} rating={rating_label} \
+                     score={score:.2} categories={category_count}"
+                );
+            }
+            AuditEntry::QualityReportGenerated {
+                agent_id,
+                total_feedback,
+                satisfaction_pct,
+                avg_score_pct,
+            } => {
+                let sat = satisfaction_pct
+                    .map(|p| format!("{p}%"))
+                    .unwrap_or_else(|| "n/a".to_string());
+                println!(
+                    "  📊 quality_report agent={agent_id} total={total_feedback} \
+                     satisfaction={sat} avg_score={avg_score_pct}%"
+                );
+            }
+            AuditEntry::FeedbackCorrectionRecorded { agent_id, user_id, invocation_id } => {
+                println!(
+                    "  ✏️  feedback_correction agent={agent_id} user={user_id} \
+                     inv={invocation_id}"
+                );
+            }
         }
     }
 }
@@ -1210,6 +1245,302 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+        }
+    }
+}
+
+// ── `anima feedback` subcommand (E24) ────────────────────────────────────────
+
+/// Implements the `anima feedback` subcommands for recording and reviewing
+/// response quality feedback.
+///
+/// Subcommands:
+/// - `record <invocation_id> <user_id> <up|down|stars:N> [--correct <text>]`
+///   Record explicit feedback on a cortex invocation.
+/// - `list [--user <user_id>]`
+///   List stored feedback records (optionally filtered by user).
+/// - `analyze [--user <user_id>]`
+///   Print an aggregated quality report.
+/// - `export [--output <path>]`
+///   Write the feedback store to a JSON file (default: stdout).
+fn cmd_feedback(args: &[String]) {
+    use std::str::FromStr;
+
+    use feedback::{
+        build_training_hints, FeedbackCategory, FeedbackRating, FeedbackRecord, FeedbackStore,
+        QualityReport,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let path = FeedbackStore::default_path(AGENT_ID);
+    let mut store = FeedbackStore::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open feedback store ({e}); using in-memory fallback");
+        FeedbackStore::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    // Helper: emit and print audit entries for feedback events.
+    let emit_feedback_audit = |log: &mut AuditLog, rec: &FeedbackRecord| {
+        log.push(AuditEntry::FeedbackReceived {
+            agent_id: AGENT_ID.to_owned(),
+            user_id: rec.user_id.clone(),
+            invocation_id: rec.invocation_id.clone(),
+            rating_label: rec.rating.label(),
+            score: rec.rating.as_score(),
+            category_count: rec.categories.len(),
+        });
+        if rec.has_correction() {
+            log.push(AuditEntry::FeedbackCorrectionRecorded {
+                agent_id: AGENT_ID.to_owned(),
+                user_id: rec.user_id.clone(),
+                invocation_id: rec.invocation_id.clone(),
+            });
+        }
+    };
+
+    match args.first().map(String::as_str) {
+        Some("record") => {
+            // feedback record <invocation_id> <user_id> <rating> [--correct <text>]
+            match (args.get(1), args.get(2), args.get(3)) {
+                (Some(inv_id), Some(user_id), Some(rating_str)) => {
+                    match FeedbackRating::from_str(rating_str) {
+                        Ok(rating) => {
+                            // Wall-clock nanos for the record ID; stub value for
+                            // determinism in tests.
+                            let ts_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64;
+
+                            let mut rec = FeedbackRecord::new(user_id, inv_id, rating, ts_ns);
+
+                            // Parse optional --correct <text>
+                            let mut i = 4usize;
+                            while i < args.len() {
+                                if args[i] == "--correct" {
+                                    if let Some(text) = args.get(i + 1) {
+                                        rec = rec.with_correction(text.clone());
+                                        i += 2;
+                                        continue;
+                                    } else {
+                                        eprintln!("feedback record: --correct requires a value");
+                                        return;
+                                    }
+                                }
+                                i += 1;
+                            }
+
+                            // Parse optional --category <cat>
+                            let mut cats = Vec::new();
+                            let mut j = 4usize;
+                            while j < args.len() {
+                                if args[j] == "--category" {
+                                    if let Some(cat_str) = args.get(j + 1) {
+                                        match FeedbackCategory::from_str(cat_str) {
+                                            Ok(cat) => cats.push(cat),
+                                            Err(e) => {
+                                                eprintln!("feedback record: {e}");
+                                                return;
+                                            }
+                                        }
+                                        j += 2;
+                                        continue;
+                                    }
+                                }
+                                j += 1;
+                            }
+                            if !cats.is_empty() {
+                                rec = rec.with_categories(cats);
+                            }
+
+                            emit_feedback_audit(&mut log, &rec);
+                            match store.record(rec) {
+                                Ok(()) => {
+                                    println!(
+                                        "feedback: recorded for invocation={inv_id} \
+                                         user={user_id}"
+                                    );
+                                    if let Err(e) = store.flush() {
+                                        eprintln!("feedback: flush failed: {e}");
+                                    }
+                                }
+                                Err(e) => eprintln!("feedback: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("feedback record: invalid rating — {e}"),
+                    }
+                }
+                _ => eprintln!(
+                    "usage: anima-hosted feedback record \
+                     <invocation_id> <user_id> <up|down|stars:N> \
+                     [--correct <text>] [--category <cat>]"
+                ),
+            }
+        }
+
+        Some("list") => {
+            // feedback list [--user <user_id>]
+            let user_filter: Option<&str> = args
+                .iter()
+                .position(|a| a == "--user")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let records: Vec<_> = if let Some(uid) = user_filter {
+                store.list_for_user(uid)
+            } else {
+                store.list().iter().collect()
+            };
+
+            if records.is_empty() {
+                println!("(no feedback records)");
+            } else {
+                println!(
+                    "{:<24}  {:<16}  {:<24}  {:<6}  correction",
+                    "id", "user_id", "invocation_id", "rating"
+                );
+                println!("{}", "-".repeat(82));
+                for rec in records {
+                    let corr = if rec.has_correction() { "yes" } else { "no" };
+                    println!(
+                        "{:<24}  {:<16}  {:<24}  {:<6}  {}",
+                        rec.id,
+                        rec.user_id,
+                        rec.invocation_id,
+                        rec.rating.label(),
+                        corr
+                    );
+                }
+            }
+        }
+
+        Some("analyze") => {
+            // feedback analyze [--user <user_id>]
+            let user_filter: Option<&str> = args
+                .iter()
+                .position(|a| a == "--user")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let records: Vec<_> = if let Some(uid) = user_filter {
+                store.list_for_user(uid).into_iter().cloned().collect()
+            } else {
+                store.list().to_vec()
+            };
+
+            let report = QualityReport::generate(&records);
+
+            println!("Quality Report");
+            println!("{}", "=".repeat(40));
+            println!("  total_feedback  : {}", report.total_feedback);
+            println!("  positive        : {}", report.positive_count);
+            println!("  negative        : {}", report.negative_count);
+            println!(
+                "  satisfaction    : {}",
+                report
+                    .satisfaction_pct()
+                    .map(|p| format!("{p}%"))
+                    .unwrap_or_else(|| "n/a".to_string())
+            );
+            println!("  avg_score       : {:.2}", report.avg_score);
+            if let Some(stars) = report.avg_stars {
+                println!("  avg_stars       : {stars:.1}");
+            }
+
+            if !report.category_counts.is_empty() {
+                println!("  categories:");
+                let mut cats: Vec<_> = report.category_counts.iter().collect();
+                cats.sort_by_key(|(k, _)| k.as_str());
+                for (cat, count) in cats {
+                    println!("    {cat:<12} : {count}");
+                }
+            }
+
+            if !report.top_corrected_invocations.is_empty() {
+                println!("  most corrected invocations:");
+                for (inv, count) in &report.top_corrected_invocations {
+                    println!("    {inv} ({count} corrections)");
+                }
+            }
+
+            let hints = build_training_hints(&records);
+            if !hints.is_empty() {
+                println!("  training hints  : {} invocations", hints.len());
+                let reinforcement = hints.iter().filter(|h| h.is_reinforcement).count();
+                let correction = hints.iter().filter(|h| !h.is_reinforcement).count();
+                println!("    reinforcement : {reinforcement}");
+                println!("    correction    : {correction}");
+            }
+
+            log.push(AuditEntry::QualityReportGenerated {
+                agent_id: AGENT_ID.to_owned(),
+                total_feedback: report.total_feedback,
+                satisfaction_pct: report.satisfaction_pct(),
+                avg_score_pct: (report.avg_score * 100.0).round() as u32,
+            });
+        }
+
+        Some("export") => {
+            // feedback export [--output <path>]
+            let out_path: Option<&str> = args
+                .iter()
+                .position(|a| a == "--output")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let json = match serde_json::to_string_pretty(store.list()) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("feedback export: serialise failed: {e}");
+                    return;
+                }
+            };
+
+            if let Some(out) = out_path {
+                match std::fs::write(out, &json) {
+                    Ok(()) => println!("feedback: exported {} records to {out}", store.len()),
+                    Err(e) => eprintln!("feedback export: write failed: {e}"),
+                }
+            } else {
+                println!("{json}");
+            }
+        }
+
+        _ => {
+            eprintln!(
+                "usage: anima-hosted feedback record \
+                 <invocation_id> <user_id> <up|down|stars:N> \
+                 [--correct <text>] [--category <cat>]"
+            );
+            eprintln!("       anima-hosted feedback list [--user <user_id>]");
+            eprintln!("       anima-hosted feedback analyze [--user <user_id>]");
+            eprintln!("       anima-hosted feedback export [--output <path>]");
+        }
+    }
+
+    // Print any audit entries generated during this command.
+    if !log.is_empty() {
+        println!();
+        for entry in log.entries() {
+            match entry {
+                AuditEntry::FeedbackReceived {
+                    user_id,
+                    invocation_id,
+                    rating_label,
+                    ..
+                } => println!("  audit: feedback_received user={user_id} inv={invocation_id} rating={rating_label}"),
+                AuditEntry::FeedbackCorrectionRecorded { user_id, invocation_id, .. } => {
+                    println!("  audit: correction_recorded user={user_id} inv={invocation_id}")
+                }
+                AuditEntry::QualityReportGenerated { total_feedback, satisfaction_pct, .. } => {
+                    let sat = satisfaction_pct
+                        .map(|p| format!("{p}%"))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    println!("  audit: quality_report total={total_feedback} satisfaction={sat}")
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -2549,6 +2880,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("feedback") {
+        cmd_feedback(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

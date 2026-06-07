@@ -3098,3 +3098,71 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E24 — Response Quality & Feedback Collection ✅
+
+**Scope.** Closes the cortex feedback loop: users and operators can attach
+explicit quality signals (thumbs-up/down, star ratings, corrections) to
+completed invocations. Feedback is stored durably, surfaced as aggregated
+quality reports, and consumed by the E8 fine-tuning pipeline as weighted
+training hints.
+
+**Dependencies.** E17 (user profiles — `user_id` comes from `UserProfile`),
+E5.1 (cortex invocations — `invocation_id` references `AuditEntry::CortexCompleted`),
+E8 (fine-tuning pipeline — `WeightedTrainingHint` is the hand-off type).
+
+**New crate: `crates/feedback`.** Zero new external dependencies (`serde` +
+`serde_json` only). `#![forbid(unsafe_code)]`. 32 unit tests.
+
+**Stories.**
+- S24.1 `FeedbackRecord` schema: `id`, `user_id`, `invocation_id`, `session_id?`,
+  `rating` (`ThumbsUp` / `ThumbsDown` / `Stars(1–5)`), `categories`
+  (`Wrong` / `Incomplete` / `Unsafe` / `TooSlow` / `Excellent` / `Corrected`),
+  `correction?`, `created_at_ns`. `FeedbackRating::as_score()` normalises to
+  `[0.0, 1.0]`. `FeedbackRating::FromStr` accepts `up|down|stars:N`. ✅
+  (`crates/feedback/src/record.rs` — 15 unit tests)
+- S24.2 `FeedbackStore` with atomic JSON persistence: `record()` (idempotency
+  guard on duplicate ID), `list()`, `list_for_user()`, `list_for_invocation()`,
+  `flush()` (write-to-.tmp-then-rename), `open()` / `in_memory()`, `default_path()`. ✅
+  (`crates/feedback/src/store.rs` — 9 unit tests)
+- S24.3 `QualityReport` aggregation: `positive_count`, `negative_count`,
+  `avg_stars`, `avg_score`, `category_counts`, `top_corrected_invocations`,
+  `top_rated_invocations`; `satisfaction_rate()` / `satisfaction_pct()`. ✅
+  `WeightedTrainingHint` and `build_training_hints()` — one hint per
+  `invocation_id`, sorted descending by mean score, carries `correction_text`
+  for contrastive training pairs. ✅
+  (`crates/feedback/src/report.rs` — 8 unit tests)
+- S24.5 Three new `AuditEntry` variants: `FeedbackReceived` (rating label,
+  normalised score, category count), `QualityReportGenerated` (total, satisfaction
+  pct, avg score pct), `FeedbackCorrectionRecorded` (user + invocation IDs). ✅
+  (`crates/vita/src/audit.rs`; `print_audit` arms in `kernels/hosted/src/main.rs`
+  with 💬 / 📊 / ✏️ prefixes)
+- S24.6 `anima feedback` CLI: `record`, `list [--user]`, `analyze [--user]`,
+  `export [--output]`. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_feedback()`)
+
+**Exit criteria.**
+1. `FeedbackRecord` and `FeedbackRating` round-trip through JSON; `FromStr`
+   accepts all documented tokens and rejects out-of-range stars. ✅
+   (`rating_from_str_round_trips`, `record_round_trips_through_json`,
+   `rating_from_str_rejects_out_of_range_stars`)
+2. `FeedbackStore` CRUD and disk persistence tested; duplicate guard returns
+   `StoreError::Duplicate`; flush and reload round-trips intact. ✅
+   (`flush_and_reload_round_trip`, `duplicate_id_returns_error`,
+   `open_creates_empty_store_when_file_absent`, `in_memory_flush_is_no_op`)
+3. `QualityReport` aggregates satisfaction rate, avg stars, and category counts
+   correctly; `build_training_hints` weights by mean score and surfaces
+   correction text. ✅
+   (`all_thumbs_up_has_full_satisfaction`, `category_counts_are_correct`,
+   `build_training_hints_weights_correctly`, `build_training_hints_carries_correction_text`,
+   `build_training_hints_sorted_descending_by_weight`)
+4. All three `AuditEntry` variants are emitted by `cmd_feedback` and rendered
+   by `print_audit`. ✅ (audit entries verified in `cmd_feedback` inline audit
+   print; `print_audit` arms cover `FeedbackReceived`, `QualityReportGenerated`,
+   `FeedbackCorrectionRecorded`)
+5. `cargo test --workspace` green; 32 new feedback tests + all prior tests
+   pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
