@@ -2888,7 +2888,7 @@ fn cmd_replay(args: &[String]) {
 /// Implements the `anima webhook` subcommands for managing webhook endpoints.
 ///
 /// ```text
-/// anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]
+/// anima-hosted webhook add <url> [--filter <cat,...>] [--signing-key <k>]
 /// anima-hosted webhook list
 /// anima-hosted webhook remove <id>
 /// anima-hosted webhook test <id>
@@ -2919,24 +2919,24 @@ fn cmd_webhook(args: &[String]) {
                 Some(u) => u.clone(),
                 None => {
                     eprintln!(
-                        "usage: anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]"
+                        "usage: anima-hosted webhook add <url> [--filter <cat,...>] [--signing-key <k>]"
                     );
                     return;
                 }
             };
 
-            let mut secret = String::new();
+            let mut signing_key = String::new();
             let mut filter = EventFilter::all();
 
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--secret" => {
+                    "--signing-key" => {
                         if let Some(s) = args.get(i + 1) {
-                            secret = s.clone();
+                            signing_key = s.clone();
                             i += 2;
                         } else {
-                            eprintln!("webhook add: --secret requires a value");
+                            eprintln!("webhook add: --signing-key requires a value");
                             return;
                         }
                     }
@@ -2980,7 +2980,7 @@ fn cmd_webhook(args: &[String]) {
             let id = format!("wh-{}", &format!("{:016x}", now_ns)[..12]);
             let mut ep = WebhookEndpoint::new(id.clone(), url.clone())
                 .with_filter(filter)
-                .with_secret(secret);
+                .with_secret(signing_key);
             ep.created_at_ns = now_ns;
 
             let filter_summary = ep.filter_summary();
@@ -3086,7 +3086,9 @@ fn cmd_webhook(args: &[String]) {
             None => eprintln!("usage: anima-hosted webhook test <id>"),
         },
         _ => {
-            eprintln!("usage: anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]");
+            eprintln!(
+                "usage: anima-hosted webhook add <url> [--filter <cat,...>] [--signing-key <k>]"
+            );
             eprintln!("       anima-hosted webhook list");
             eprintln!("       anima-hosted webhook remove <id>");
             eprintln!("       anima-hosted webhook test <id>");
