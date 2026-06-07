@@ -42,6 +42,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anima-finetune"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "anima-self"
 version = "0.1.0"
 
@@ -2551,6 +2559,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "anima-finetune",
  "anyhow",
  "chrono",
  "clap",

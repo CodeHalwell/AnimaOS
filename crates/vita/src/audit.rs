@@ -1057,6 +1057,47 @@ pub enum AuditEntry {
         /// The `tau_rel` threshold applied to the filter.
         tau_rel: f32,
     },
+
+    // ── E8 S8.4.3 — Sleep-cycle consolidation hook ────────────────────────────
+    /// The consolidation hook was skipped because fewer training pairs were
+    /// compiled than [`crate::consolidation::ConsolidationConfig::min_pairs`]
+    /// required.
+    ConsolidationSkipped {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of pairs available this cycle.
+        pairs_available: usize,
+        /// Minimum threshold required to trigger fine-tuning.
+        min_required: usize,
+    },
+
+    /// The consolidation hook started a fine-tune run on the compiled pairs.
+    ConsolidationStarted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of training pairs submitted to the tuner.
+        pairs_trained: usize,
+    },
+
+    /// A consolidation fine-tune run completed and an adapter was produced.
+    ConsolidationCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Adapter id returned by the tuner.
+        adapter_id: String,
+        /// Number of training pairs used.
+        pairs_trained: usize,
+        /// Whether the adapter was registered in the configured library.
+        registered: bool,
+    },
+
+    /// A consolidation fine-tune run failed.
+    ConsolidationFailed {
+        /// Agent identifier.
+        agent_id: String,
+        /// Error description from the tuner.
+        error: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

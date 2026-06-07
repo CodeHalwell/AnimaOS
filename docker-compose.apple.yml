@@ -1,0 +1,56 @@
+# Apple Silicon standalone compose — for macOS hosts with Apple Silicon.
+#
+# Docker Desktop on macOS does not expose Metal to containers, so running
+# Ollama inside Docker on Apple Silicon loses all GPU acceleration.  Instead,
+# run Ollama natively on the host (where it uses Metal via llama.cpp) and
+# connect anima-hosted to it over the host network bridge.
+#
+# Prerequisites:
+#   1. Install Ollama:  brew install ollama
+#   2. Start Ollama:    ollama serve        (runs on localhost:11434)
+#   3. Pull models (example — adjust to your hardware):
+#        ollama pull hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M
+#
+# Usage:
+#   docker compose -f docker-compose.apple.yml up --build
+#
+# One-shot subcommands:
+#   docker compose -f docker-compose.apple.yml run --rm hosted why
+#   docker compose -f docker-compose.apple.yml run --rm hosted identity show
+#
+# The anima-hosted agent talks to Ollama at host.docker.internal:11434 (the
+# Docker-internal alias for the macOS host's loopback).  No ollama or
+# ollama-init service is started because Ollama runs natively on the host.
+
+services:
+  hosted:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: animaos/hosted:dev
+    container_name: anima-hosted
+    # Default: run the operator-console server.
+    # Override for one-shot subcommands, e.g. `docker compose ... run --rm hosted why`.
+    command: ["serve"]
+    ports:
+      # Operator console — bound to host loopback.
+      # Open http://127.0.0.1:8088/ in a browser for the dashboard.
+      - "127.0.0.1:8088:8088"
+    environment:
+      ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
+      # host.docker.internal resolves to the macOS host's loopback on Docker Desktop.
+      ANIMA_OLLAMA_URL: ${ANIMA_OLLAMA_URL:-http://host.docker.internal:11434}
+      # Match whatever model you pulled above; the default suits most Apple Silicon Macs.
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M}
+      ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-8192}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANIMA_CONSOLE_ADDR: 0.0.0.0:8088
+      ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-}
+      ANIMA_AUDIT_DIR: /home/anima/.anima/audit
+    volumes:
+      # Persist the identity store and audit logs across runs.
+      - anima-data:/home/anima/.anima
+
+volumes:
+  anima-data:

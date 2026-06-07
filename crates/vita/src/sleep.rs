@@ -187,6 +187,13 @@ pub struct SleepRoutineOutcome {
     /// Compilation statistics for the `PolicyCompilation` phase; `None` for
     /// other phases or when no [`CompilationContext`] was provided (E3.8).
     pub compilation: Option<CompilationReport>,
+    /// Training pairs compiled during the `PolicyCompilation` phase.
+    ///
+    /// Non-empty only for the `PolicyCompilation` phase when a
+    /// [`CompilationContext`] was supplied.  The lifecycle manager uses these
+    /// pairs to trigger the S8.4.3 consolidation hook without re-running the
+    /// compiler.
+    pub compiled_pairs: Vec<memory::compilation::TrainingPair>,
 }
 
 // ── SleepMaintenanceReport ────────────────────────────────────────────────────
@@ -306,6 +313,7 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
                 dream: None,
                 dream_candidates: Vec::new(),
                 compilation: None,
+                compiled_pairs: Vec::new(),
             }
         }
         None => SleepRoutineOutcome {
@@ -319,6 +327,7 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
             dream: None,
             dream_candidates: Vec::new(),
             compilation: None,
+            compiled_pairs: Vec::new(),
         },
     }
 }
@@ -348,6 +357,7 @@ fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
                 dream: None,
                 dream_candidates: Vec::new(),
                 compilation: None,
+                compiled_pairs: Vec::new(),
             }
         }
         None => run_routine_stub(SleepRoutine::GenerativeReplay),
@@ -379,6 +389,7 @@ fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
                 dream: Some(report),
                 dream_candidates: candidates,
                 compilation: None,
+                compiled_pairs: Vec::new(),
             }
         }
         None => run_routine_stub(SleepRoutine::DreamExploration),
@@ -393,7 +404,7 @@ fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
 fn run_compilation_phase(ctx: Option<CompilationContext<'_>>) -> SleepRoutineOutcome {
     match ctx {
         Some(c) => {
-            let (report, _pairs, _errors) = memory::compile_traces_to_pairs(c.entries, &c.config);
+            let (report, pairs, _errors) = memory::compile_traces_to_pairs(c.entries, &c.config);
             let notes = if report.pairs_compiled > 0 {
                 "training pairs compiled and persisted"
             } else {
@@ -410,6 +421,7 @@ fn run_compilation_phase(ctx: Option<CompilationContext<'_>>) -> SleepRoutineOut
                 dream: None,
                 dream_candidates: Vec::new(),
                 compilation: Some(report),
+                compiled_pairs: pairs,
             }
         }
         None => run_routine_stub(SleepRoutine::PolicyCompilation),
@@ -435,6 +447,7 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         dream: None,
         dream_candidates: Vec::new(),
         compilation: None,
+        compiled_pairs: Vec::new(),
     }
 }
 

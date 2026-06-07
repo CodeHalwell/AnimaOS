@@ -2269,6 +2269,7 @@ name = "vita"
 version = "0.1.0"
 dependencies = [
  "actuators",
+ "anima-finetune",
  "defence",
  "interoception",
  "kv-controller",

@@ -15,7 +15,7 @@ maps them.
 
 | Epic | Doc | Theme | One-line scope |
 |---|---|---|---|
-| **E7 — Embodiment** | [12](./12-real-world-tools-plan.md) | Real-world tools | web-search (SearXNG) + browser (Playwright), egress/SSRF guard + motor-gate-at-dispatch, semantic tool selection wired to `length_robust_filter`, live Anthropic/Ollama tool-calling. |
+| **E7 — Embodiment** ✅ | [12](./12-real-world-tools-plan.md) | Real-world tools | web-search (SearXNG) + browser (Playwright), egress/SSRF guard + motor-gate-at-dispatch, semantic tool selection wired to `length_robust_filter`, live Anthropic/Ollama tool-calling. |
 | **E8 — Local Inference** | [13](./13-local-llm-providers.md) | Provider ecosystem + fine-tuning | OpenAI-compatible umbrella (vLLM/LM Studio/NVIDIA NIM/HF TGI/llama.cpp-server), native FFI runtimes (llama.cpp, LiteRT-LM), Unsloth as the default trainer, HRA for the instinct tier, eval harness, adapter library + dynamic mounting. |
 | **E9 — Onboarding** | [14](./14-onboarding.md) | First-run experience | `anima init` wizard, `anima doctor` preflight, conversational identity bootstrap, non-NVIDIA/CPU/Apple-Silicon support, per-tier router dispatch, unified quickstart. |
 | **E10 — Presence** | [15](./15-communication-multimodal.md) | Communication & multimodal | comms-app channel gateways (Telegram/Slack first) over the existing operator seam; text/image/voice as first-class bidirectional modalities (vision, whisper.cpp STT, Piper TTS). |
