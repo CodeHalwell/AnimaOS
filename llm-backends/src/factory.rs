@@ -28,6 +28,7 @@ use scheduler::backend::LlmBackend;
 use crate::anthropic::AnthropicBackend;
 use crate::capabilities::ProviderConfig;
 use crate::compat::OpenAiCompatibleBackend;
+use crate::hf_transformers::HfTransformersBackend;
 use crate::ollama::OllamaBackend;
 use crate::openai::OpenAiBackend;
 
@@ -55,6 +56,9 @@ pub enum BackendKind {
     LlamaCppServer,
     /// A fully operator-supplied config (E8 S8.0).
     Custom(ProviderConfig),
+    // ── E8 S8.2 — Hugging Face transformers sidecar ───────────────────────────
+    /// Hugging Face `transformers` external Python subprocess backend (E8 S8.2.2).
+    HfTransformers,
 }
 
 impl BackendKind {
@@ -78,6 +82,7 @@ impl BackendKind {
             "llamacpp" | "llamacpp-server" | "llama-cpp" | "llama_cpp" => {
                 Some(Self::LlamaCppServer)
             }
+            "hf-transformers" | "hf_transformers" | "transformers" => Some(Self::HfTransformers),
             _ => None,
         }
     }
@@ -107,6 +112,8 @@ impl BackendFactory {
             BackendKind::LlamaCppServer => Arc::new(OpenAiCompatibleBackend::llamacpp_server()),
             // E8 S8.0 — operator-supplied config.
             BackendKind::Custom(config) => Arc::new(OpenAiCompatibleBackend::from_config(config)),
+            // E8 S8.2.2 — HF transformers sidecar (fixture-mode by default).
+            BackendKind::HfTransformers => Arc::new(HfTransformersBackend::from_env()),
         }
     }
 

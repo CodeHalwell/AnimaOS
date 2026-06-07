@@ -1698,7 +1698,16 @@ for live mode).
    (`health_returns_true_in_fixture_mode`)
 
 **Remaining stories.**
-- S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ⬜
+- S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ✅
+  - S8.2.2 `HfTransformersBackend` — Python `transformers` sidecar via UDS IPC
+    (`llm-backends/src/hf_transformers.rs` — fixture/live modes, wire protocol
+    helpers, `locate_worker_script`, `BackendKind::HfTransformers` in factory;
+    `cortex/transformers_worker.py` — Python side with greedy decoding and
+    token streaming; 9 unit tests)
+  - S8.2.3 `HfHubClient` — HF Hub model discovery REST API
+    (`llm-backends/src/hub.rs` — `HfModelInfo`, `HubError`, fixture/live modes,
+    context-window and tool-support extraction, `OnceLock`-cached fixture IDs;
+    17 unit tests including serde round-trip and `parse_hub_response`)
 - S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜ (external/live-gated FFI)
 - S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
   library). 🟡 — S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs` —
@@ -2269,7 +2278,7 @@ Details in `docs/13-local-llm-providers.md`.
 - S8.0 Provider substrate: `BackendCapabilities`, health probes, fixture
   discipline. 🟡
 - S8.1 `OpenAiCompatibleBackend` umbrella + provider presets. 🟡
-- S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
+- S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ✅
 - S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜ (external/live-gated)
 - S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
   library). 🟡 — S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs`);
