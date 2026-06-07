@@ -31,6 +31,11 @@ pub mod capabilities;
 pub mod chat;
 pub mod compat;
 pub mod factory;
+// E8 S8.2 — Hugging Face provider enhancement.
+pub mod hf_transformers;
+pub mod hub;
+// E8 S8.3 — native in-process runtimes.
+pub mod native;
 pub mod ollama;
 pub mod openai;
 
@@ -41,6 +46,11 @@ pub use chat::{
 };
 pub use compat::OpenAiCompatibleBackend;
 pub use factory::{BackendFactory, BackendKind, TierBackendChoices};
+pub use hf_transformers::HfTransformersBackend;
+pub use hub::{HfHubClient, HfModelInfo, HubError};
+pub use native::{
+    LiteRtLmBackend, LlamaCppNativeBackend, NativeRuntime, NativeRuntimeConfig, NativeRuntimeError,
+};
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 

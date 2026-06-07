@@ -1,0 +1,46 @@
+# CPU-only overlay — removes the NVIDIA GPU device reservation so the stack
+# runs on any Linux host without an NVIDIA GPU or nvidia-container-toolkit.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up --build
+#
+# One-shot subcommands:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml run --rm hosted why
+#
+# Expected throughput: ~5–20 tok/s at Q4_K_M on a modern 8-core CPU.
+# For Apple Silicon Macs, see docker-compose.apple.yml instead — Metal
+# acceleration is unavailable inside Docker Desktop containers on macOS.
+#
+# Model sizing guide:
+#   RAM ≥ 16 GB → defaults (Phi-3-mini 3.8B + Phi-3.5-mini 3.8B, ~3 GB each)
+#   RAM ≥ 8 GB  → set ANIMA_WORKHORSE_MODEL to a 1B–2B model (e.g. Phi-3-mini)
+#   RAM < 8 GB  → set ANIMA_BACKEND=mock or use a hosted API (ANTHROPIC_API_KEY)
+
+services:
+  ollama:
+    # Override the deploy block to remove the NVIDIA device reservation.
+    # Docker Compose deep-merges maps; an empty `resources` is sufficient.
+    deploy:
+      resources: {}
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"
+      # Flash Attention requires CUDA; disable it on CPU builds.
+      OLLAMA_FLASH_ATTENTION: "0"
+      # CPU cannot sustain two concurrently-loaded models at acceptable speed.
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+
+  ollama-init:
+    environment:
+      # CPU-friendly defaults — ~3 GB each at Q4_K_M, runs on 8 GB RAM.
+      # Override in .env: ANIMA_INSTINCT_MODEL / ANIMA_WORKHORSE_MODEL.
+      ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-hf.co/bartowski/Phi-3-mini-4k-instruct-GGUF:Q4_K_M}
+      ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M}
+
+  hosted:
+    environment:
+      ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
+      # Match the workhorse model pulled above.
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M}
+      # Reduce context window to keep RAM usage manageable on CPU hosts.
+      ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-4096}

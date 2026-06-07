@@ -1096,6 +1096,102 @@ pub enum AuditEntry {
         /// `true` when consent was granted; `false` when revoked.
         granted: bool,
     },
+
+    // ── E16 — Multi-Agent Coordination (A2A Substrate) ────────────────────────
+    /// A task was delegated to a named sub-agent via the A2A bus (E16, S16.3).
+    ///
+    /// Written immediately before the endpoint is invoked so the delegation
+    /// attempt is visible in the audit trail even if the endpoint fails.
+    AgentDelegated {
+        /// Identifier of the agent issuing the delegation.
+        parent_agent_id: String,
+        /// Identifier of the target sub-agent in the pool.
+        target_agent_id: String,
+        /// Unique correlation token for this delegation (matches the
+        /// subsequent [`AuditEntry::AgentDelegationCompleted`] or
+        /// [`AuditEntry::AgentDelegationFailed`] entry).
+        delegation_id: String,
+        /// Human-readable task description forwarded to the sub-agent.
+        task: String,
+    },
+
+    /// A delegated task completed and the sub-agent returned a result (E16, S16.3).
+    ///
+    /// Always paired with a preceding [`AuditEntry::AgentDelegated`] that
+    /// carries the same `delegation_id`.
+    AgentDelegationCompleted {
+        /// Identifier of the agent that issued the delegation.
+        parent_agent_id: String,
+        /// Identifier of the sub-agent that executed the task.
+        target_agent_id: String,
+        /// Correlation token matching the preceding `AgentDelegated` entry.
+        delegation_id: String,
+        /// `true` when the sub-agent considered the task successful.
+        success: bool,
+        /// Number of tool calls the sub-agent made during execution.
+        tool_calls_made: usize,
+        /// Wall-clock duration of the sub-agent invocation in milliseconds.
+        duration_ms: u64,
+        /// Short summary of what the sub-agent accomplished.
+        summary: String,
+    },
+
+    /// Delegation failed — the agent was not found or the endpoint returned
+    /// an error (E16, S16.3).
+    ///
+    /// Always paired with a preceding [`AuditEntry::AgentDelegated`] that
+    /// carries the same `delegation_id`.
+    AgentDelegationFailed {
+        /// Identifier of the agent that issued the delegation.
+        parent_agent_id: String,
+        /// Identifier of the target sub-agent (may be unknown).
+        target_agent_id: String,
+        /// Correlation token matching the preceding `AgentDelegated` entry.
+        delegation_id: String,
+        /// Human-readable failure reason.
+        reason: String,
+    },
+
+    // ── E8 S8.4.3 — Sleep-cycle consolidation hook ────────────────────────────
+    /// The consolidation hook was skipped because fewer training pairs were
+    /// compiled than [`crate::consolidation::ConsolidationConfig::min_pairs`]
+    /// required.
+    ConsolidationSkipped {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of pairs available this cycle.
+        pairs_available: usize,
+        /// Minimum threshold required to trigger fine-tuning.
+        min_required: usize,
+    },
+
+    /// The consolidation hook started a fine-tune run on the compiled pairs.
+    ConsolidationStarted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of training pairs submitted to the tuner.
+        pairs_trained: usize,
+    },
+
+    /// A consolidation fine-tune run completed and an adapter was produced.
+    ConsolidationCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Adapter id returned by the tuner.
+        adapter_id: String,
+        /// Number of training pairs used.
+        pairs_trained: usize,
+        /// Whether the adapter was registered in the configured library.
+        registered: bool,
+    },
+
+    /// A consolidation fine-tune run failed.
+    ConsolidationFailed {
+        /// Agent identifier.
+        agent_id: String,
+        /// Error description from the tuner.
+        error: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

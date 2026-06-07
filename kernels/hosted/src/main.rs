@@ -721,6 +721,44 @@ fn print_audit(manager: &LifecycleManager) {
                      kept={kept} tau_rel={tau_rel:.2}"
                 );
             }
+            // E16 — Multi-Agent Coordination (A2A bus) audit entries
+            AuditEntry::AgentDelegated {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                task,
+            } => {
+                println!(
+                    "  🤝 agent_delegated parent={parent_agent_id} → target={target_agent_id} \
+                     id={delegation_id} task={task:?}"
+                );
+            }
+            AuditEntry::AgentDelegationCompleted {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                success,
+                tool_calls_made,
+                duration_ms,
+                summary,
+            } => {
+                println!(
+                    "  ✅ agent_delegation_completed parent={parent_agent_id} \
+                     target={target_agent_id} id={delegation_id} success={success} \
+                     calls={tool_calls_made} duration={duration_ms}ms summary={summary:?}"
+                );
+            }
+            AuditEntry::AgentDelegationFailed {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                reason,
+            } => {
+                println!(
+                    "  ❌ agent_delegation_failed parent={parent_agent_id} \
+                     target={target_agent_id} id={delegation_id} reason={reason:?}"
+                );
+            }
             // E15 Trust & Lifecycle entries
             AuditEntry::DigestGenerated {
                 agent_id,
@@ -828,6 +866,40 @@ fn print_audit(manager: &LifecycleManager) {
                     "  {mark} user_consent_updated agent={agent_id} user={user_id} \
                      category={category} granted={granted}"
                 );
+            }
+            // ── E8 S8.4.3 — Sleep-cycle consolidation hook ───────────────────
+            AuditEntry::ConsolidationSkipped {
+                agent_id,
+                pairs_available,
+                min_required,
+            } => {
+                println!(
+                    "  ⏭  consolidation_skipped agent={agent_id} \
+                     pairs_available={pairs_available} min_required={min_required}"
+                );
+            }
+            AuditEntry::ConsolidationStarted {
+                agent_id,
+                pairs_trained,
+            } => {
+                println!(
+                    "  🧠 consolidation_started agent={agent_id} pairs={pairs_trained}"
+                );
+            }
+            AuditEntry::ConsolidationCompleted {
+                agent_id,
+                adapter_id,
+                pairs_trained,
+                registered,
+            } => {
+                let reg_tag = if *registered { " [registered]" } else { "" };
+                println!(
+                    "  ✓  consolidation_completed agent={agent_id} \
+                     adapter={adapter_id} pairs={pairs_trained}{reg_tag}"
+                );
+            }
+            AuditEntry::ConsolidationFailed { agent_id, error } => {
+                println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
         }
     }

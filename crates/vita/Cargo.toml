@@ -11,7 +11,7 @@ license.workspace = true
 default = ["std"]
 # E12: motivation/std follows vita/std so the Striatal Gate ↔ drive integration
 # (motivation_gate) is available in the hosted kernel while staying no_std-clean.
-std = ["dep:sha2", "dep:actuators", "dep:llm-backends", "motivation/std"]
+std = ["dep:sha2", "dep:actuators", "dep:llm-backends", "dep:anima-finetune", "motivation/std"]
 
 [dependencies]
 memory = { path = "../memory" }
@@ -40,6 +40,9 @@ actuators = { path = "../actuators", optional = true }
 # so it is gated behind vita's `std` feature and pulled in only there. No
 # dependency cycle: llm-backends → scheduler (not vita).
 llm-backends = { path = "../../llm-backends", optional = true }
+# E8 S8.4.3 — Sleep-cycle consolidation hook (dreaming → fine-tune pipeline).
+# Gated behind vita's `std` feature so the no_std/microVM path is unaffected.
+anima-finetune = { path = "../finetune", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
