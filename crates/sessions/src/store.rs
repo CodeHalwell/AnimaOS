@@ -291,7 +291,7 @@ impl SessionStore {
             })
             .collect();
 
-        results.sort_by(|a, b| b.started_at_ns.cmp(&a.started_at_ns));
+        results.sort_by_key(|s| std::cmp::Reverse(s.started_at_ns));
 
         if query.limit > 0 && results.len() > query.limit {
             results.truncate(query.limit);
