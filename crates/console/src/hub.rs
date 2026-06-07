@@ -289,7 +289,10 @@ mod tests {
         hub.update_metrics_from_json("this is not json at all");
         hub.update_metrics_from_json("{\"UnknownVariant\":{}}");
         let out = hub.render_metrics();
-        assert!(out.contains("anima_sleep_cycles_total 0"), "counters: {out}");
+        assert!(
+            out.contains("anima_sleep_cycles_total 0"),
+            "counters: {out}"
+        );
     }
 
     #[test]
