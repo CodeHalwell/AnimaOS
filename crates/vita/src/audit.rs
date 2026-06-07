@@ -1057,6 +1057,61 @@ pub enum AuditEntry {
         /// The `tau_rel` threshold applied to the filter.
         tau_rel: f32,
     },
+
+    // ── E16 — Multi-Agent Coordination (A2A Substrate) ────────────────────────
+    /// A task was delegated to a named sub-agent via the A2A bus (E16, S16.3).
+    ///
+    /// Written immediately before the endpoint is invoked so the delegation
+    /// attempt is visible in the audit trail even if the endpoint fails.
+    AgentDelegated {
+        /// Identifier of the agent issuing the delegation.
+        parent_agent_id: String,
+        /// Identifier of the target sub-agent in the pool.
+        target_agent_id: String,
+        /// Unique correlation token for this delegation (matches the
+        /// subsequent [`AuditEntry::AgentDelegationCompleted`] or
+        /// [`AuditEntry::AgentDelegationFailed`] entry).
+        delegation_id: String,
+        /// Human-readable task description forwarded to the sub-agent.
+        task: String,
+    },
+
+    /// A delegated task completed and the sub-agent returned a result (E16, S16.3).
+    ///
+    /// Always paired with a preceding [`AuditEntry::AgentDelegated`] that
+    /// carries the same `delegation_id`.
+    AgentDelegationCompleted {
+        /// Identifier of the agent that issued the delegation.
+        parent_agent_id: String,
+        /// Identifier of the sub-agent that executed the task.
+        target_agent_id: String,
+        /// Correlation token matching the preceding `AgentDelegated` entry.
+        delegation_id: String,
+        /// `true` when the sub-agent considered the task successful.
+        success: bool,
+        /// Number of tool calls the sub-agent made during execution.
+        tool_calls_made: usize,
+        /// Wall-clock duration of the sub-agent invocation in milliseconds.
+        duration_ms: u64,
+        /// Short summary of what the sub-agent accomplished.
+        summary: String,
+    },
+
+    /// Delegation failed — the agent was not found or the endpoint returned
+    /// an error (E16, S16.3).
+    ///
+    /// Always paired with a preceding [`AuditEntry::AgentDelegated`] that
+    /// carries the same `delegation_id`.
+    AgentDelegationFailed {
+        /// Identifier of the agent that issued the delegation.
+        parent_agent_id: String,
+        /// Identifier of the target sub-agent (may be unknown).
+        target_agent_id: String,
+        /// Correlation token matching the preceding `AgentDelegated` entry.
+        delegation_id: String,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

@@ -1397,7 +1397,7 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
 
 ## Stage 7 — Autonomy & Operator Trust (Forward Epics)
 
-The forward epics (E7–E15) build the autonomous-agent layer on top of the
+The forward epics (E7–E16) build the autonomous-agent layer on top of the
 shipped somatic core.  Full dependency graph and build sequence live in
 `docs/18-forward-epics.md`.  This stage section records closed forward epics
 only; open or unstarted epics remain in `docs/18-forward-epics.md`.
@@ -1480,7 +1480,7 @@ Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.  Workspace root
    snapshot and emits a `SnapshotCreated` audit entry. ✅
 ## Stage 7 — Autonomous Agent Layer
 
-Forward epics E7–E15 build the autonomous-agent capabilities on top of the
+Forward epics E7–E16 build the autonomous-agent capabilities on top of the
 somatic core completed in Stages 1–6.  The dependency graph and recommended
 build sequence are documented in `docs/18-forward-epics.md`.
 
@@ -2090,11 +2090,11 @@ test are all in-tree.
 
 ---
 
-## Stage 7 — Autonomous Agent Layer (Forward Epics E7–E15)
+## Stage 7 — Autonomous Agent Layer (Forward Epics E7–E16)
 
 The forward epics catalogued in `docs/18-forward-epics.md` and the
 companion design docs (12–21) build the autonomous-agent layer on top of
-the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
+the shipped somatic core (Stages 1–6).  Epic numbers E7–E16 continue the
 stable identifier sequence; the dependency graph and recommended build
 order are recorded in `docs/18-forward-epics.md`.
 
@@ -2223,6 +2223,49 @@ See `docs/20-higher-cognition.md`.
 half of E11's promotion gate); decision replay / time-travel debug; digital-
 twin sandbox; state versioning & migration.
 See `docs/21-operator-trust-and-lifecycle.md`.
+
+### Epic E16 — Multi-Agent Coordination (A2A Substrate) ✅
+
+Agent-to-Agent delegation: A2A protocol types, `AgentPool` registry,
+`A2aDispatcher` intercept + audit pipeline, hermetic `MockAgentEndpoint`
+fixture, and full end-to-end delegation chain with audit flush.
+
+**Stories.**
+- S16.1 A2A protocol types — `A2aRequest`, `A2aResponse`, `DelegatePayload`
+  with serde round-trips and `default_max_turns()` (4). ✅
+- S16.2 `AgentPool` — `register()`, `get()`, `list()` (sorted), `len()`,
+  `is_empty()`; backed by `HashMap<String, Arc<dyn AgentEndpoint>>`. ✅
+- S16.3 `A2aDispatcher` — wraps any `ToolDispatcher`; intercepts `"delegate"`
+  calls, routes to pool endpoint, passes all other calls to `inner`.
+  `audit_buffer` accumulates entries; `flush_audit()` drains them to the
+  main `AuditLog`. ✅
+- S16.4 Audit integration — `AuditEntry::AgentDelegated` /
+  `AgentDelegationCompleted` / `AgentDelegationFailed` emitted per
+  delegation; `delegation_id` correlation key with `"dlg-{N}"` prefix;
+  failed endpoint / unknown-agent errors both produce `AgentDelegationFailed`.
+  Invalid JSON payloads are rejected without emitting any audit entries. ✅
+- S16.5 End-to-end chain — `orchestrator → summarizer + researcher`
+  sequential delegation with four audit entries flushed to main log in
+  correct `Delegated → Completed → Delegated → Completed` order. ✅
+
+**New `vita::audit::AuditEntry` variants (E16 section).**
+`AgentDelegated`, `AgentDelegationCompleted`, `AgentDelegationFailed`.
+
+**New module: `crates/vita/src/agent_pool.rs`.**
+All E16 types and logic. Gated under `#[cfg(feature = "std")]`. No new
+crate dependencies. `MockAgentEndpoint` included for hermetic CI.
+
+**Exit criteria.**
+1. `cargo test --workspace` green; 21 integration tests in
+   `kernels/hosted/tests/e16_multi_agent.rs` + 13 unit tests in
+   `vita::agent_pool` all pass. ✅
+2. `cargo clippy --workspace -- -D warnings` clean. ✅
+3. `cargo fmt --check` clean. ✅
+4. `A2aDispatcher` correctly intercepts `"delegate"` tool calls and passes
+   all others through unchanged. ✅
+5. Audit buffer holds paired entries per delegation; `flush_audit` drains
+   them into the main `AuditLog`. ✅
+
 ## Stage 7 — Embodiment, Local Inference & Onboarding
 
 Real-world tools, a local-inference provider ecosystem, and a first-run

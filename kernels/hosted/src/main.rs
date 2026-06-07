@@ -721,6 +721,44 @@ fn print_audit(manager: &LifecycleManager) {
                      kept={kept} tau_rel={tau_rel:.2}"
                 );
             }
+            // E16 — Multi-Agent Coordination (A2A bus) audit entries
+            AuditEntry::AgentDelegated {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                task,
+            } => {
+                println!(
+                    "  🤝 agent_delegated parent={parent_agent_id} → target={target_agent_id} \
+                     id={delegation_id} task={task:?}"
+                );
+            }
+            AuditEntry::AgentDelegationCompleted {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                success,
+                tool_calls_made,
+                duration_ms,
+                summary,
+            } => {
+                println!(
+                    "  ✅ agent_delegation_completed parent={parent_agent_id} \
+                     target={target_agent_id} id={delegation_id} success={success} \
+                     calls={tool_calls_made} duration={duration_ms}ms summary={summary:?}"
+                );
+            }
+            AuditEntry::AgentDelegationFailed {
+                parent_agent_id,
+                target_agent_id,
+                delegation_id,
+                reason,
+            } => {
+                println!(
+                    "  ❌ agent_delegation_failed parent={parent_agent_id} \
+                     target={target_agent_id} id={delegation_id} reason={reason:?}"
+                );
+            }
             // E15 Trust & Lifecycle entries
             AuditEntry::DigestGenerated {
                 agent_id,
