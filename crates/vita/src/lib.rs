@@ -2,6 +2,9 @@
 
 //! Self-preservation plane: autonomous lifecycle director.
 
+/// E16 — Multi-Agent Coordination: A2A pool, dispatcher, and endpoint types.
+#[cfg(feature = "std")]
+pub mod agent_pool;
 pub mod audit;
 #[cfg(feature = "std")]
 pub mod consolidation;
@@ -48,6 +51,11 @@ pub use gate::{
     HomeostaticSignals, SemanticClass, ThresholdGate,
 };
 // E12 — Motivation ↔ Striatal Gate: drive-augmented arbitration types.
+#[cfg(feature = "std")]
+pub use agent_pool::{
+    A2aDispatcher, A2aRequest, A2aResponse, AgentEndpoint, AgentPool, DelegatePayload,
+    MockAgentEndpoint,
+};
 pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
