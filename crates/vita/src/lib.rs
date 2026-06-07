@@ -4,6 +4,8 @@
 
 pub mod audit;
 #[cfg(feature = "std")]
+pub mod consolidation;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
@@ -23,8 +25,6 @@ pub mod router;
 #[cfg(feature = "std")]
 pub mod sensors;
 pub mod sleep;
-#[cfg(feature = "std")]
-pub mod consolidation;
 #[cfg(feature = "std")]
 pub mod watchdog;
 

@@ -234,18 +234,14 @@ pub fn run_consolidation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anima_finetune::{AdapterLibrary, FineTuneConfig, FixtureFineTuner};
     use crate::audit::{AuditEntry, AuditLog};
+    use anima_finetune::{AdapterLibrary, FineTuneConfig, FixtureFineTuner};
     use memory::compilation::TrainingPair as MemPair;
 
     fn config() -> ConsolidationConfig {
         ConsolidationConfig {
             tuner: Arc::new(FixtureFineTuner::new()),
-            finetune_config: FineTuneConfig::new(
-                "base-q4",
-                "episodic://test",
-                "test-adapter",
-            ),
+            finetune_config: FineTuneConfig::new("base-q4", "episodic://test", "test-adapter"),
             min_pairs: 2,
             library: None,
         }
@@ -276,7 +272,10 @@ mod tests {
         assert!(
             matches!(
                 outcome,
-                ConsolidationOutcome::Skipped { pairs_available: 1, min_required: 2 }
+                ConsolidationOutcome::Skipped {
+                    pairs_available: 1,
+                    min_required: 2
+                }
             ),
             "outcome carries correct counts"
         );
@@ -284,7 +283,11 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(matches!(
             &entries[0],
-            AuditEntry::ConsolidationSkipped { pairs_available: 1, min_required: 2, .. }
+            AuditEntry::ConsolidationSkipped {
+                pairs_available: 1,
+                min_required: 2,
+                ..
+            }
         ));
     }
 
@@ -295,7 +298,10 @@ mod tests {
         assert!(outcome.skipped());
         assert!(matches!(
             &audit.entries()[0],
-            AuditEntry::ConsolidationSkipped { pairs_available: 0, .. }
+            AuditEntry::ConsolidationSkipped {
+                pairs_available: 0,
+                ..
+            }
         ));
     }
 
@@ -307,7 +313,12 @@ mod tests {
         let outcome = run_consolidation(&two_pairs(), "agent", &config(), &mut audit);
 
         assert!(outcome.completed(), "must complete with 2 pairs >= min=2");
-        let ConsolidationOutcome::Completed { pairs_trained, registered, .. } = outcome else {
+        let ConsolidationOutcome::Completed {
+            pairs_trained,
+            registered,
+            ..
+        } = outcome
+        else {
             panic!("expected Completed");
         };
         assert_eq!(pairs_trained, 2);
@@ -357,9 +368,18 @@ mod tests {
         let out_a = run_consolidation(&pairs_a, "a", &cfg, &mut audit);
         let out_b = run_consolidation(&pairs_b, "a", &cfg, &mut audit);
 
-        let id_a = match out_a { ConsolidationOutcome::Completed { adapter_id, .. } => adapter_id, _ => panic!() };
-        let id_b = match out_b { ConsolidationOutcome::Completed { adapter_id, .. } => adapter_id, _ => panic!() };
-        assert_ne!(id_a, id_b, "different input pairs must produce different adapter ids");
+        let id_a = match out_a {
+            ConsolidationOutcome::Completed { adapter_id, .. } => adapter_id,
+            _ => panic!(),
+        };
+        let id_b = match out_b {
+            ConsolidationOutcome::Completed { adapter_id, .. } => adapter_id,
+            _ => panic!(),
+        };
+        assert_ne!(
+            id_a, id_b,
+            "different input pairs must produce different adapter ids"
+        );
     }
 
     // ── Library registration ──────────────────────────────────────────────────
@@ -373,7 +393,12 @@ mod tests {
         let mut audit = AuditLog::new();
         let outcome = run_consolidation(&two_pairs(), "agent", &cfg, &mut audit);
 
-        let ConsolidationOutcome::Completed { adapter_id, registered, .. } = outcome else {
+        let ConsolidationOutcome::Completed {
+            adapter_id,
+            registered,
+            ..
+        } = outcome
+        else {
             panic!("expected Completed");
         };
         assert!(registered, "registered flag must be true");
@@ -402,7 +427,10 @@ mod tests {
 
         assert!(matches!(
             completed,
-            AuditEntry::ConsolidationCompleted { registered: true, .. }
+            AuditEntry::ConsolidationCompleted {
+                registered: true,
+                ..
+            }
         ));
     }
 
@@ -421,13 +449,18 @@ mod tests {
 
     #[test]
     fn outcome_helpers_report_correct_state() {
-        let skipped = ConsolidationOutcome::Skipped { pairs_available: 0, min_required: 2 };
+        let skipped = ConsolidationOutcome::Skipped {
+            pairs_available: 0,
+            min_required: 2,
+        };
         let completed = ConsolidationOutcome::Completed {
             adapter_id: "x".into(),
             pairs_trained: 2,
             registered: false,
         };
-        let failed = ConsolidationOutcome::Failed { error: "oops".into() };
+        let failed = ConsolidationOutcome::Failed {
+            error: "oops".into(),
+        };
 
         assert!(skipped.skipped());
         assert!(!skipped.completed());

@@ -1059,7 +1059,6 @@ pub enum AuditEntry {
     },
 
     // ── E8 S8.4.3 — Sleep-cycle consolidation hook ────────────────────────────
-
     /// The consolidation hook was skipped because fewer training pairs were
     /// compiled than [`crate::consolidation::ConsolidationConfig::min_pairs`]
     /// required.
