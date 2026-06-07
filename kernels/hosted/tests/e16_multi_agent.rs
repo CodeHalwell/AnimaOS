@@ -5,7 +5,7 @@
 //! - S16.2: AgentPool — registration, lookup, listing.
 //! - S16.3: A2aDispatcher — delegate intercept, pass-through, audit buffering.
 //! - S16.4: Audit integration — AgentDelegated / AgentDelegationCompleted /
-//!          AgentDelegationFailed entries flushed into the main AuditLog.
+//!   AgentDelegationFailed entries flushed into the main AuditLog.
 //! - S16.5: End-to-end delegation chain with multiple sub-agents.
 //!
 //! All tests are fully hermetic (no network calls, no live LLM API keys).
