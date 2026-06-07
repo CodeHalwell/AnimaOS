@@ -1701,12 +1701,15 @@ for live mode).
 - S8.2 Hugging Face (TGI preset already shipped via S8.1; sidecar optional). ⬜
 - S8.3 Native in-process runtimes (llama.cpp FFI, LiteRT-LM). ⬜ (external/live-gated FFI)
 - S8.4 Unsloth adaptation engine (QLoRA/LoRA pipeline, HRA methods, adapter
-  library). 🟡 — abstraction + fixture layer DONE: new crate `crates/finetune`
-  (`anima-finetune`) ships `FineTuner` trait, `FixtureFineTuner`, `AdaptationMethod`
-  (incl. HRA), `AdapterLibrary` (mount/evict/provenance), and the eval harness
-  (S8.4.2/.4/.7/.8 ✅). Real Unsloth/HRA GPU training + merge/quant
-  (S8.4.5/.6) remain external/live-gated — `UnslothFineTuner` is a `live`-gated
-  skeleton returning `BackendUnavailable`. ⬜
+  library). 🟡 — S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs` —
+  `FinetuneArgs` + `run_finetune`: JSONL loader, fixture mode default, HRA/LoRA/QLoRA
+  method selector, per-run `artifact.json` + `run.json` manifest, optional
+  `AdapterLibrary` registration, `--quiet` flag; 9 unit tests; `ANIMA_FINETUNE_LIVE=1`
+  live-mode diagnostic). `crates/finetune` (`anima-finetune`) ships `FineTuner` trait,
+  `FixtureFineTuner`, `AdaptationMethod` (incl. HRA), `AdapterLibrary`
+  (mount/evict/provenance), and the eval harness (S8.4.2/.4/.7/.8 ✅). Real Unsloth/HRA
+  GPU training + merge/quant (S8.4.5/.6) remain external/live-gated —
+  `UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`. ⬜
 
 ---
 
@@ -2269,9 +2272,9 @@ Details in `docs/13-local-llm-providers.md`.
 - S8.2 Hugging Face: TGI preset, optional `transformers` sidecar. ⬜
 - S8.3 Native FFI runtimes: llama.cpp in-process, LiteRT-LM. ⬜ (external/live-gated)
 - S8.4 Unsloth adaptation engine (QLoRA, HRA, eval harness, adapter
-  library). 🟡 (abstraction + fixture layer DONE via `crates/finetune` —
-  `FineTuner`/`FixtureFineTuner`/`AdaptationMethod`/`AdapterLibrary`/eval;
-  real GPU training/merge/quant remain external/live-gated)
+  library). 🟡 — S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs`);
+  abstraction + fixture layer DONE via `crates/finetune`; real GPU training/
+  merge/quant (S8.4.5/.6) remain external/live-gated
 
 ### Epic E9 — Onboarding 🟡
 
@@ -2787,7 +2790,9 @@ See `docs/13-local-llm-providers.md`.
 **Delivered (later).** S8.4 abstraction + fixture layer 🟡 — new crate `crates/finetune`
 (`anima-finetune`) ships `FineTuner` trait, `FixtureFineTuner`, `AdaptationMethod`
 (incl. HRA), `AdapterLibrary` (mount/evict/provenance), and the eval harness
-(S8.4.2/.4/.7/.8 ✅).
+(S8.4.2/.4/.7/.8 ✅). S8.4.1 `cargo xtask finetune` CLI ✅ (`xtask/src/finetune.rs` —
+JSONL loader, fixture/live mode, HRA/LoRA/QLoRA method selector, per-run manifests,
+optional `AdapterLibrary` registration, 9 unit tests).
 
 **Deferred.** S8.3 (native FFI runtimes — external/live-gated) and S8.4.5/.6
 (real Unsloth/HRA GPU training + merge/quant — external/live-gated;
