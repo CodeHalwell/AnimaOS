@@ -1,0 +1,14 @@
+[package]
+name = "consent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consent enforcement and data lifecycle management for AnimaOS — Epic E23."
+
+[dependencies]
+users = { path = "../users" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

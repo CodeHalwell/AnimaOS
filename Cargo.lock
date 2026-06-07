@@ -248,6 +248,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "consent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "users",
+]
+
+[[package]]
 name = "console"
 version = "0.1.0"
 dependencies = [
@@ -865,6 +875,7 @@ name = "hosted"
 version = "0.1.0"
 dependencies = [
  "actuators",
+ "consent",
  "console",
  "interoception",
  "lifecycle",

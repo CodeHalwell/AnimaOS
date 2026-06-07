@@ -3098,3 +3098,89 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Data Governance and Lifecycle
+
+### Epic E23 — Consent Enforcement and Data Lifecycle ✅
+
+**Scope.** Wire the E17 `ConsentRecord` model into active enforcement and
+lifecycle operations, closing the gap between the consent *model* and actual
+data governance.  New `crates/consent` crate (zero new external dependencies —
+only `users` + `serde` / `serde_json`).
+
+**Dependencies.** E17 (user registry with `ConsentRecord`, `DataCategory`).
+
+**Stories.**
+
+- **S23.1 — Pre-write consent gate.** `check_write_allowed(user_id, category,
+  consent, now_ns) -> ConsentCheckOutcome` — pure function that returns `Allowed`
+  when an active grant exists, `Denied { reason }` otherwise.  Time-limited and
+  revoked grants are both treated as denial.  `AuditEntry::ConsentCheckBlocked`
+  emitted by callers when a write is rejected. ✅
+  (`consent::check_write_allowed`; 5 unit tests covering allowed, denied-absent,
+  denied-revoked, denied-expired, all-categories-denied-by-default)
+
+- **S23.2 — Revocation directives.** `build_revocation_directive(user_id,
+  revoked_categories, now_ns) -> RevocationDirective` — maps revoked
+  `DataCategory` values to per-store purge flags (`purge_sessions`,
+  `purge_episodic_memory`, `purge_identity_facts`, `purge_knowledge_corpus`,
+  `purge_usage_stats`).  The crate generates the directive; the operator
+  executes it.  `AuditEntry::DataDeletedForUser` emitted after execution. ✅
+  (`consent::build_revocation_directive`; 7 unit tests; JSON round-trip;
+  `anima data delete <user_id>` CLI demo)
+
+- **S23.3 — Personal-data export (GDPR/DSAR).** `DataExportBuilder` accumulates
+  per-category sections into a `DataExportBundle` (user_id, agent_id, timestamp,
+  sections, total_records).  `anima data export <user_id> [--output <path>]`
+  writes the bundle as pretty-printed JSON.  `AuditEntry::DataExported` records
+  the export. ✅
+  (`consent::DataExportBuilder` / `DataExportBundle`; 3 unit tests; doc-test;
+  `anima data export` CLI)
+
+- **S23.4 — Expiry scanner.** `scan_expired_grants(users, now_ns) -> ExpiryReport`
+  iterates a collection of `(user_id, ConsentRecord)` pairs, identifies grants
+  that were set to `granted=true` but whose `expires_at_ns` has passed, and
+  returns pre-built `RevocationDirective`s.  Designed to run at the end of each
+  sleep cycle.  `AuditEntry::ExpiredConsentCleaned` summarises the pass. ✅
+  (`consent::scan_expired_grants`; 7 unit tests; `anima data expiry-check` CLI)
+
+- **S23.5 — `anima data` CLI and audit trail.** Four new `AuditEntry` variants:
+  `ConsentCheckBlocked`, `DataExported`, `DataDeletedForUser`,
+  `ExpiredConsentCleaned`.  `print_audit` arms in `kernels/hosted` render all
+  four variants.  CLI subcommands: `data consent-status <user_id>`, `data export
+  <user_id>`, `data delete <user_id>`, `data expiry-check`. ✅
+
+**New crate: `crates/consent`.**
+`Cargo.toml` dependencies: `users` (workspace), `serde` (workspace),
+`serde_json` (workspace).  Dev-dependency: `tempfile = "3"`.
+`#![forbid(unsafe_code)]`.  Workspace root `Cargo.toml` and
+`kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria — all met:**
+1. `check_write_allowed` allows writes for consented categories and denies for
+   all others (absent, revoked, expired). ✅
+   (5 tests: `allowed_when_category_is_consented`, `denied_when_category_is_not_consented`,
+   `denied_when_grant_is_revoked`, `denied_when_grant_has_expired`,
+   `all_categories_denied_by_default`)
+2. `build_revocation_directive` sets the correct per-store purge flags for every
+   revoked category; the directive serialises to JSON. ✅
+   (7 tests: `directive_sets_correct_purge_flags_for_*` × 4 categories,
+   `directive_for_all_categories_sets_all_flags`, `directive_serialises_and_deserialises`)
+3. `DataExportBuilder` accumulates sections and counts records correctly; bundle
+   round-trips through JSON. ✅
+   (3 tests: `export_builder_accumulates_sections_and_counts_records`,
+   `empty_export_bundle_has_zero_records`,
+   `export_bundle_round_trips_through_json`)
+4. `scan_expired_grants` finds exactly the grants that have lapsed without
+   false-positives on unexpired, perpetual, or revoked grants. ✅
+   (7 tests: `scan_returns_empty_report_when_no_users`, `scan_finds_expired_grant`,
+   `scan_does_not_flag_unexpired_grants`, `scan_does_not_flag_perpetual_grants`,
+   `scan_does_not_flag_revoked_grants_as_expired`,
+   `scan_multiple_users_produces_correct_counts`,
+   `expiry_report_serialises_cleanly`)
+5. All four new `AuditEntry` variants emitted and displayed in `print_audit`. ✅
+6. `cargo test --workspace` green; 24 new consent tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

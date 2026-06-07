@@ -1192,6 +1192,74 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E23 — Consent Enforcement and Data Lifecycle ──────────────────────────
+    /// A pre-write consent check was blocked for a user/category pair (E23 S23.1).
+    ///
+    /// Written when `consent::check_write_allowed` returns `Denied` and the
+    /// calling store respects the check.  No data was written.
+    ConsentCheckBlocked {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier.
+        user_id: String,
+        /// Data category that was requested (e.g. `"episodic_memory"`).
+        category: String,
+        /// Human-readable reason returned by the consent check.
+        reason: String,
+    },
+
+    /// A personal-data export bundle was generated for a user (E23 S23.3).
+    ///
+    /// Written by the `anima data export` CLI command or any caller of the
+    /// consent export builder.  The export may be handed to the user as a
+    /// GDPR Data Subject Access Request (DSAR) response.
+    DataExported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier whose data was exported.
+        user_id: String,
+        /// Number of data categories included in the bundle.
+        section_count: usize,
+        /// Total number of records across all categories.
+        total_records: usize,
+        /// Path where the bundle was written, or `"<in-memory>"`.
+        output_path: String,
+    },
+
+    /// All retained data for a user was deleted following consent revocation
+    /// (E23 S23.2).
+    ///
+    /// Written after the operator executes a [`consent::RevocationDirective`]
+    /// and the affected stores have been purged.
+    DataDeletedForUser {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier whose data was deleted.
+        user_id: String,
+        /// Data categories that were purged (comma-separated labels).
+        categories: String,
+        /// Total number of records deleted across all stores.
+        records_deleted: usize,
+    },
+
+    /// The scheduled expiry scan found and cleaned up lapsed consent grants
+    /// (E23 S23.4).
+    ///
+    /// Written after the lifecycle engine runs [`consent::scan_expired_grants`]
+    /// and executes the resulting directives.
+    ExpiredConsentCleaned {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of users whose consent records were scanned.
+        users_scanned: usize,
+        /// Number of grants found to have expired.
+        expired_grants_found: usize,
+        /// Number of users affected (had at least one expired grant).
+        users_affected: usize,
+        /// Total records deleted across all purged stores.
+        total_records_deleted: usize,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────
