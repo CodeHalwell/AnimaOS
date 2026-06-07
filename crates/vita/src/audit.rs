@@ -1097,6 +1097,48 @@ pub enum AuditEntry {
         granted: bool,
     },
 
+    // ── E18 — Per-User Rate Limiting & Token Quotas ───────────────────────────
+    /// A user request was denied because they exceeded their token or request quota.
+    ///
+    /// Emitted by the operator-layer quota gate when
+    /// `UserQuotaTracker::check_and_consume` returns `QuotaResult::Exceeded`.
+    /// The audit trail preserves the `exceeded_reason` and `retry_after_ns`
+    /// hint so operators can review access patterns without exposing raw usage
+    /// metrics to the user.
+    QuotaExceeded {
+        /// Agent identifier.
+        agent_id: String,
+        /// The user whose quota was exceeded.
+        user_id: String,
+        /// Trust tier of the user at the time of the check.
+        trust_tier: String,
+        /// Human-readable reason (e.g. `"hourly token limit: used 10000 / 10000"`).
+        exceeded_reason: String,
+        /// Number of tokens that were requested.
+        tokens_requested: u64,
+        /// Earliest nanosecond Unix timestamp at which the user may retry.
+        retry_after_ns: u64,
+    },
+
+    /// Repeated quota violations have been escalated to operator attention.
+    ///
+    /// Emitted when a user's `consecutive_violations` reaches the policy
+    /// `escalation_threshold` (default 5) and the escalation cooldown has
+    /// elapsed.  Mirrors the defence layer's `AttentionDemandEscalated`
+    /// pattern (E5.6).
+    QuotaEscalated {
+        /// Agent identifier.
+        agent_id: String,
+        /// The user whose repeated violations triggered escalation.
+        user_id: String,
+        /// Trust tier at escalation time.
+        trust_tier: String,
+        /// Number of consecutive violations that triggered this escalation.
+        violations_in_window: u32,
+        /// Policy threshold that was reached.
+        threshold: u32,
+    },
+
     // ── E16 — Multi-Agent Coordination (A2A Substrate) ────────────────────────
     /// A task was delegated to a named sub-agent via the A2A bus (E16, S16.3).
     ///

@@ -3098,3 +3098,82 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Rate Limiting & Quota Enforcement
+
+### Epic E18 — Per-User Rate Limiting & Token Quotas ✅
+
+**Scope.** Building on E17's user identity and trust model, enforce
+configurable token and request budgets for every channel user. Unknown-tier
+users receive a tight hourly/daily budget; Operator-tier users are
+unconstrained. Quota violations are audited; repeated violations escalate
+to operator attention, mirroring the defence layer's escalation pattern (E5.6).
+
+**Dependencies.** E17 (`TrustTier`, `UserRegistry`), EX.2 (audit log).
+
+**Stories.**
+- S18.1 `TierLimits` and `QuotaPolicy`: per-tier token/request ceilings with the
+  `TierLimits::UNLIMITED` sentinel for Operator. Defaults: `Unknown` 10 K t/h /
+  50 K t/d / 10 r/h; `Verified` 50 K / 200 K / 50; `Trusted` 200 K / 1 M / 200;
+  `Operator` unlimited. Configurable at runtime via `QuotaPolicy`. ✅
+  (`crates/quota/src/lib.rs` — `TierLimits`, `QuotaPolicy`, `QuotaPolicy::for_tier`)
+- S18.2 `UserQuotaTracker` with rolling-window accounting: `check_and_consume(user_id,
+  tier, tokens, now_ns) -> QuotaResult` applies the hourly-token, daily-token, and
+  hourly-request limits in priority order; stale window entries are lazily drained on
+  each call; `Operator` tier bypasses all checks. `QuotaResult::Allowed` returns
+  remaining capacity; `QuotaResult::Exceeded` carries the `ExceededReason` and a
+  `retry_after_ns` hint. ✅
+  (`crates/quota/src/lib.rs` — `UserQuotaTracker`, `QuotaResult`, `ExceededReason`)
+- S18.3 `QuotaSnapshot`: non-mutating point-in-time read of one user's usage using
+  `_at(now_ns)` accessors that exclude stale entries without draining. Drives the
+  `quota show` CLI display. ✅
+  (`crates/quota/src/lib.rs` — `QuotaSnapshot`, `UserQuotaTracker::snapshot`)
+- S18.4 Escalation: `should_escalate(user_id, now_ns)` returns `true` when
+  `consecutive_violations ≥ escalation_threshold` (default 5) and the escalation
+  cooldown (default 5 min) has elapsed. `record_escalation` starts the cooldown.
+  Callers emit `AuditEntry::QuotaEscalated` and call `record_escalation`. ✅
+  (`crates/quota/src/lib.rs` — `UserQuotaTracker::should_escalate / record_escalation`)
+- S18.5 Audit entries: `AuditEntry::QuotaExceeded` (user, tier, reason, tokens
+  requested, retry hint) and `AuditEntry::QuotaEscalated` (user, tier, violation
+  count, threshold). Both rendered by `print_audit` in the hosted kernel. ✅
+  (`crates/vita/src/audit.rs` — two new variants; `kernels/hosted/src/main.rs` —
+  `print_audit` arms with 🚫 / 🔔 prefixes; `print_user_audit` arms)
+- S18.6 CLI — `anima quota show [<user_id>]`, `anima quota reset <user_id>`,
+  `anima quota policy`. `policy` runs a self-contained demo (tight `Unknown`-tier
+  budget) that exercises the audit pipeline end-to-end and renders quota-exceeded
+  and quota-escalated entries. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_quota()`, wired via `anima-hosted quota …`)
+
+**New crate: `crates/quota`.**
+`Cargo.toml` dependencies: `users` (workspace), `serde` (workspace),
+`serde_json` (workspace).  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `TierLimits::UNLIMITED` sentinel has all fields at `u64::MAX`; `is_unlimited()`
+   returns `true`. ✅ (`tier_limits_unlimited_sentinel_has_max_values`)
+2. `QuotaPolicy::for_tier(TrustTier::Operator)` returns unlimited; `Unknown` has the
+   tightest limits; limits are monotonically increasing across tiers. ✅
+   (`policy_for_operator_tier_is_unlimited`, `policy_for_unknown_tier_has_tight_limits`,
+   `policy_tiers_are_monotonically_increasing`)
+3. `check_and_consume` allows within limits and correctly computes remaining capacity;
+   Operator tier is always allowed. ✅
+   (`within_limits_is_allowed_and_returns_remaining`, `operator_tier_is_always_allowed`)
+4. Hourly-token, daily-token, and hourly-request limits are each independently
+   enforced with the correct `ExceededReason`. ✅
+   (`exceeding_hourly_token_limit_is_denied`, `exceeding_daily_token_limit_is_denied`,
+   `exceeding_hourly_request_limit_is_denied`)
+5. Rolling window drains stale entries; daily window is independent of hourly window.
+   ✅ (`stale_events_are_drained_before_check`,
+   `daily_window_is_independent_of_hourly_window`)
+6. Escalation fires after `escalation_threshold` consecutive violations; escalation
+   is rate-limited by `escalation_cooldown_ns`. ✅
+   (`escalation_fires_after_threshold_violations`, `escalation_is_rate_limited_by_cooldown`)
+7. `reset` clears all usage windows; snapshot correctly reflects live usage and
+   excludes stale entries. ✅ (`reset_clears_all_usage_for_user`,
+   `snapshot_reflects_current_usage`, `snapshot_excludes_stale_entries`)
+8. `cargo test --workspace` green; 23 new quota tests + all prior tests pass. ✅
+9. `cargo clippy --workspace -- -D warnings` clean. ✅
+10. `cargo fmt --check` clean. ✅

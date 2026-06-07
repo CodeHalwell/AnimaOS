@@ -901,6 +901,33 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E18 Per-User Rate Limiting & Token Quotas ─────────────────────
+            AuditEntry::QuotaExceeded {
+                agent_id,
+                user_id,
+                trust_tier,
+                exceeded_reason,
+                tokens_requested,
+                retry_after_ns,
+            } => {
+                println!(
+                    "  🚫 quota_exceeded agent={agent_id} user={user_id} tier={trust_tier} \
+                     tokens_req={tokens_requested} reason={exceeded_reason:?} \
+                     retry_after_ns={retry_after_ns}"
+                );
+            }
+            AuditEntry::QuotaEscalated {
+                agent_id,
+                user_id,
+                trust_tier,
+                violations_in_window,
+                threshold,
+            } => {
+                println!(
+                    "  🔔 quota_escalated agent={agent_id} user={user_id} tier={trust_tier} \
+                     violations={violations_in_window} threshold={threshold}"
+                );
+            }
         }
     }
 }
@@ -1018,6 +1045,33 @@ fn print_user_audit(log: &AuditLog) {
                 println!(
                     "  {mark} user_consent_updated agent={agent_id} user={user_id} \
                      category={category}"
+                );
+            }
+            // ── E18 Per-User Rate Limiting & Token Quotas ─────────────────────
+            AuditEntry::QuotaExceeded {
+                agent_id,
+                user_id,
+                trust_tier,
+                exceeded_reason,
+                tokens_requested,
+                retry_after_ns,
+            } => {
+                println!(
+                    "  🚫 quota_exceeded agent={agent_id} user={user_id} tier={trust_tier} \
+                     tokens_req={tokens_requested} reason={exceeded_reason:?} \
+                     retry_after_ns={retry_after_ns}"
+                );
+            }
+            AuditEntry::QuotaEscalated {
+                agent_id,
+                user_id,
+                trust_tier,
+                violations_in_window,
+                threshold,
+            } => {
+                println!(
+                    "  🔔 quota_escalated agent={agent_id} user={user_id} tier={trust_tier} \
+                     violations={violations_in_window} threshold={threshold}"
                 );
             }
             _ => {}
@@ -1210,6 +1264,289 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+        }
+    }
+}
+
+// ── `anima quota` subcommand (E18) ───────────────────────────────────────────
+
+/// Implements the `anima quota` subcommands for inspecting and resetting
+/// per-user token and request quotas.
+///
+/// ```text
+/// anima-hosted quota show [<user_id>]
+/// anima-hosted quota reset <user_id>
+/// anima-hosted quota policy
+/// ```
+///
+/// Demonstrates the E18 quota tracker and audit pipeline against the live
+/// user registry.
+fn cmd_quota(args: &[String]) {
+    use quota::{QuotaPolicy, UserQuotaTracker};
+    use users::{TrustTier, UserRegistry};
+
+    const AGENT_ID: &str = "anima";
+
+    let user_path = UserRegistry::default_path(AGENT_ID);
+    let registry = UserRegistry::open(&user_path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        UserRegistry::in_memory()
+    });
+
+    // Quota state is in-memory per process; a future story (E18 S18.6) may
+    // persist it across restarts via a sidecar JSON file.
+    let mut tracker = UserQuotaTracker::with_default_policy();
+    let policy = QuotaPolicy::default();
+
+    // Use a fixed demo timestamp (no system clock dependency in this command).
+    let now_ns: u64 = 1_700_000_000_000_000_000;
+
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            match args.get(1) {
+                Some(user_id) => {
+                    // Single-user snapshot.
+                    let tier = registry
+                        .get(user_id)
+                        .map(|r| r.profile.trust_tier)
+                        .unwrap_or(TrustTier::Unknown);
+                    let snap = tracker.snapshot(user_id, tier, now_ns);
+                    println!("quota for {user_id}  (tier: {})", tier);
+                    println!(
+                        "  hourly tokens : {} / {}  ({} remaining)",
+                        snap.hourly_tokens_used,
+                        if snap.hourly_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_tokens_limit.to_string()
+                        },
+                        if snap.hourly_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_tokens_remaining().to_string()
+                        },
+                    );
+                    println!(
+                        "  daily tokens  : {} / {}  ({} remaining)",
+                        snap.daily_tokens_used,
+                        if snap.daily_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.daily_tokens_limit.to_string()
+                        },
+                        if snap.daily_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.daily_tokens_remaining().to_string()
+                        },
+                    );
+                    println!(
+                        "  hourly reqs   : {} / {}  ({} remaining)",
+                        snap.hourly_requests_used,
+                        if snap.hourly_requests_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_requests_limit.to_string()
+                        },
+                        if snap.hourly_requests_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_requests_remaining().to_string()
+                        },
+                    );
+                    if snap.consecutive_violations > 0 {
+                        println!(
+                            "  violations    : {} consecutive",
+                            snap.consecutive_violations
+                        );
+                    }
+                }
+                None => {
+                    // Summary of all registered users.
+                    println!(
+                        "{:>20}  {:>10}  {:>15}  {:>15}  {:>12}",
+                        "user_id", "tier", "hourly_toks", "daily_toks", "hourly_reqs"
+                    );
+                    println!("{}", "-".repeat(78));
+                    let mut entries: Vec<_> = registry.iter().collect();
+                    entries.sort_by_key(|(id, _)| *id);
+                    for (id, rec) in entries {
+                        let tier = rec.profile.trust_tier;
+                        let snap = tracker.snapshot(id, tier, now_ns);
+                        let fmt_limit = |v: u64| {
+                            if v == u64::MAX {
+                                "∞".to_owned()
+                            } else {
+                                v.to_string()
+                            }
+                        };
+                        println!(
+                            "{:>20}  {:>10}  {:>15}  {:>15}  {:>12}",
+                            id,
+                            tier,
+                            format!(
+                                "{}/{}",
+                                snap.hourly_tokens_used,
+                                fmt_limit(snap.hourly_tokens_limit)
+                            ),
+                            format!(
+                                "{}/{}",
+                                snap.daily_tokens_used,
+                                fmt_limit(snap.daily_tokens_limit)
+                            ),
+                            format!(
+                                "{}/{}",
+                                snap.hourly_requests_used,
+                                fmt_limit(snap.hourly_requests_limit)
+                            ),
+                        );
+                    }
+                    if registry.is_empty() {
+                        println!("(no registered users — register users first with 'anima-hosted users register')");
+                    }
+                }
+            }
+        }
+        Some("reset") => match args.get(1) {
+            Some(user_id) => {
+                tracker.reset(user_id);
+                println!("quota: reset usage windows for {user_id:?}");
+                // Emit an audit entry so the reset is traceable.
+                log.push(vita::AuditEntry::UserTrustUpdated {
+                    agent_id: AGENT_ID.to_owned(),
+                    user_id: user_id.clone(),
+                    old_tier: "n/a".to_owned(),
+                    new_tier: "quota_reset".to_owned(),
+                });
+                println!("quota: reset complete");
+            }
+            None => eprintln!("usage: anima-hosted quota reset <user_id>"),
+        },
+        Some("policy") => {
+            println!("quota policy (default):");
+            println!(
+                "  unknown   : {}t/h  {}t/d  {}r/h",
+                policy.unknown.tokens_per_hour,
+                policy.unknown.tokens_per_day,
+                policy.unknown.requests_per_hour
+            );
+            println!(
+                "  verified  : {}t/h  {}t/d  {}r/h",
+                policy.verified.tokens_per_hour,
+                policy.verified.tokens_per_day,
+                policy.verified.requests_per_hour
+            );
+            println!(
+                "  trusted   : {}t/h  {}t/d  {}r/h",
+                policy.trusted.tokens_per_hour,
+                policy.trusted.tokens_per_day,
+                policy.trusted.requests_per_hour
+            );
+            println!("  operator  : ∞t/h  ∞t/d  ∞r/h  (unlimited)");
+            println!(
+                "  escalation_threshold   : {} consecutive violations",
+                policy.escalation_threshold
+            );
+            println!(
+                "  escalation_cooldown    : {}s",
+                policy.escalation_cooldown_ns / 1_000_000_000
+            );
+
+            // Demo: simulate a few requests and show the audit trail.
+            println!("\n--- demo: unknown-tier exhaustion scenario ---");
+            let demo_policy = QuotaPolicy {
+                unknown: quota::TierLimits {
+                    tokens_per_hour: 5,
+                    tokens_per_day: 20,
+                    requests_per_hour: 3,
+                },
+                // Low threshold so escalation shows in the demo.
+                escalation_threshold: 3,
+                escalation_cooldown_ns: 0,
+                ..QuotaPolicy::default()
+            };
+            let mut demo_tracker = UserQuotaTracker::new(demo_policy);
+            let demo_user = "telegram:demo";
+
+            for i in 1u64..=7 {
+                let result =
+                    demo_tracker.check_and_consume(demo_user, TrustTier::Unknown, 2, now_ns + i);
+                match &result {
+                    quota::QuotaResult::Allowed {
+                        remaining_hourly_tokens,
+                        remaining_hourly_requests,
+                        ..
+                    } => {
+                        println!(
+                            "  req {i}: allowed  remaining_hourly={}t {}r",
+                            remaining_hourly_tokens, remaining_hourly_requests
+                        );
+                    }
+                    quota::QuotaResult::Exceeded {
+                        reason,
+                        retry_after_ns,
+                        ..
+                    } => {
+                        log.push(vita::AuditEntry::QuotaExceeded {
+                            agent_id: AGENT_ID.to_owned(),
+                            user_id: demo_user.to_owned(),
+                            trust_tier: TrustTier::Unknown.as_str().to_owned(),
+                            exceeded_reason: reason.description(),
+                            tokens_requested: 2,
+                            retry_after_ns: *retry_after_ns,
+                        });
+                        // Check escalation.
+                        if demo_tracker.should_escalate(demo_user, now_ns + i) {
+                            log.push(vita::AuditEntry::QuotaEscalated {
+                                agent_id: AGENT_ID.to_owned(),
+                                user_id: demo_user.to_owned(),
+                                trust_tier: TrustTier::Unknown.as_str().to_owned(),
+                                violations_in_window: demo_tracker
+                                    .consecutive_violations(demo_user),
+                                threshold: demo_tracker.policy().escalation_threshold,
+                            });
+                            demo_tracker.record_escalation(demo_user, now_ns + i);
+                        }
+                        println!("  req {i}: EXCEEDED — {}", reason.description());
+                    }
+                }
+            }
+
+            println!("\n--- audit trail ---");
+            for entry in log.entries() {
+                match entry {
+                    vita::AuditEntry::QuotaExceeded {
+                        user_id,
+                        exceeded_reason,
+                        tokens_requested,
+                        ..
+                    } => {
+                        println!(
+                            "  🚫 quota_exceeded user={user_id} tokens_req={tokens_requested} \
+                             reason={exceeded_reason:?}"
+                        );
+                    }
+                    vita::AuditEntry::QuotaEscalated {
+                        user_id,
+                        violations_in_window,
+                        threshold,
+                        ..
+                    } => {
+                        println!(
+                            "  🔔 quota_escalated user={user_id} \
+                             violations={violations_in_window} threshold={threshold}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted quota show [<user_id>]");
+            eprintln!("       anima-hosted quota reset <user_id>");
+            eprintln!("       anima-hosted quota policy");
         }
     }
 }
@@ -2549,6 +2886,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("quota") {
+        cmd_quota(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {
