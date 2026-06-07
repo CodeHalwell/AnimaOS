@@ -3098,3 +3098,95 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Conversation History and Session Management
+
+### Epic E22 — Conversation History and Session Management ✅
+
+**Scope.** Durable, searchable conversation history for every user interaction.
+A *session* is a bounded sequence of [`ConversationTurn`]s owned by a specific
+user and managed by a specific agent.  Sessions persist across process restarts,
+are searchable by user or content, and can be exported to JSONL or Markdown.
+They are the durable record that bridges the ephemeral `somatic_execution_loop`
+with the long-term episodic memory in L3.
+
+**Dependencies.** E17 (`UserRegistry` — user identity model), E5.5 (episodic
+memory — consolidation target), E5.1 (cortex invocations as the source of
+`assistant` turns).
+
+**Stories.**
+- S22.1 `SessionRecord`, `ConversationTurn`, `ConversationRole`, `SessionStatus`.
+  ✅ (`crates/sessions/src/record.rs` —
+  `SessionRecord { id, user_id, agent_id, started_at_ns, last_active_ns, status,
+  turns, summary, total_tokens, schema_version }`;
+  `ConversationTurn { index, role, content, tool_calls, timestamp_ns, tokens }`;
+  `ConversationRole { User | Assistant | System | Tool }` with `Display` +
+  `FromStr` + `serde(rename_all = "lowercase")`;
+  `SessionStatus { Active | Archived | Deleted }` with `Display`;
+  `SessionRecord::append_turn` auto-assigns index, enforces active-session
+  invariant, accumulates `total_tokens`; `archive(summary)` + `delete()`;
+  `matches_query(q)` case-insensitive substring search across turns and summary;
+  `make_session_id(nonce)` → `"sess-<hex>"` format;
+  14 unit tests covering all core behaviours and JSON round-trip)
+- S22.2 `SessionStore` with atomic JSON persistence, `SessionQuery` filtering,
+  `ExportFormat`.
+  ✅ (`crates/sessions/src/store.rs` —
+  `SessionStore::open(path)` / `in_memory()` / `default_path(agent_id)`;
+  `flush()` uses write-to-`.tmp`-then-rename crash-safe pattern;
+  `insert`, `get`, `get_mut`, `append_turn`, `archive`, `delete` CRUD;
+  `list(query)` returns sessions sorted by `started_at_ns` descending with
+  deleted-excluded-by-default semantics;
+  `SessionQuery { user_id, status, content_query, limit }` with `for_user()`,
+  `with_content()`, `active_only()`, `with_limit()` builders;
+  `export(id, format)` → JSONL or Markdown;
+  `ExportFormat { Jsonl | Markdown }` with `FromStr` + `Display`;
+  21 unit tests covering CRUD, persistence, query, and export)
+- S22.3 Audit trail: four new `AuditEntry` variants.
+  ✅ (`crates/vita/src/audit.rs` —
+  `SessionStarted { agent_id, session_id, user_id }`,
+  `SessionTurnAppended { agent_id, session_id, role, content_len }`,
+  `SessionArchived { agent_id, session_id, turn_count, has_summary }`,
+  `SessionExported { agent_id, session_id, format, turn_count }`;
+  `print_audit()` in `kernels/hosted/src/main.rs` renders all four variants
+  with `💬` / `📁` / `📤` emoji prefixes)
+- S22.4 `anima sessions` CLI.
+  ✅ (`kernels/hosted/src/main.rs` — `cmd_sessions()` implements:
+  `sessions list [--user <user_id>]` — list all visible sessions;
+  `sessions show <session_id>` — full session detail with turn preview;
+  `sessions new <user_id>` — create a session with a nonce-derived ID;
+  `sessions append <session_id> <role> <content>` — append a turn;
+  `sessions archive <session_id> [--summary <text>]` — archive a session;
+  `sessions export <session_id> [--format jsonl|markdown]` — export;
+  `sessions search <query>` — content-search across all sessions;
+  `print_session_audit()` helper echoes E22 audit entries after each mutation)
+
+**New crate: `crates/sessions`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `SessionRecord` persists across a simulated process restart with byte-for-byte
+   identical JSON round-trip; turn indices are auto-assigned and monotone. ✅
+   (`session_json_round_trip`, `append_turn_auto_assigns_index`,
+   `flush_and_reload_round_trip`)
+2. `SessionQuery` filtering by user, status, content, and limit is correct;
+   deleted sessions are excluded from default listings. ✅
+   (`list_excludes_deleted_by_default`, `list_filters_by_user_id`,
+   `list_filters_by_content_query`, `list_respects_limit`,
+   `list_active_only_excludes_archived`)
+3. JSONL export produces one line per turn; Markdown export includes the session
+   header, summary, and all turns in labelled sections. ✅
+   (`export_jsonl_produces_one_line_per_turn`,
+   `export_markdown_contains_session_id_and_turns`,
+   `export_markdown_includes_summary_when_archived`)
+4. All four `AuditEntry` variants emitted and displayed with emoji prefixes. ✅
+   (`AuditEntry::SessionStarted`, `SessionTurnAppended`, `SessionArchived`,
+   `SessionExported` added to `vita::audit`; `print_audit` and
+   `print_session_audit` arms verified)
+5. `cargo test --workspace` green; 36 new sessions tests (35 unit + 1 doc)
+   + all prior workspace tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅

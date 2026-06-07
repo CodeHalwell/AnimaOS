@@ -1192,6 +1192,59 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E22 — Conversation History and Session Management ─────────────────────
+    /// A new conversation session was created (E22 S22.2).
+    ///
+    /// Emitted when an operator or user opens a new session context.
+    SessionStarted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier (`"sess-<hex>"`).
+        session_id: String,
+        /// User who owns this session.
+        user_id: String,
+    },
+
+    /// A turn was appended to an existing session (E22 S22.2).
+    ///
+    /// Emitted for every user, assistant, system, or tool message added.
+    SessionTurnAppended {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Speaker role (`"user"`, `"assistant"`, `"system"`, `"tool"`).
+        role: String,
+        /// Character length of the turn content (not the full text).
+        content_len: usize,
+    },
+
+    /// A session was archived (E22 S22.2).
+    ///
+    /// Emitted when an operator archives a completed session.
+    SessionArchived {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Total number of turns in the session at archive time.
+        turn_count: usize,
+        /// `true` when a summary was provided at archive time.
+        has_summary: bool,
+    },
+
+    /// A session was exported to a file or string representation (E22 S22.3).
+    SessionExported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Export format used (`"jsonl"` or `"markdown"`).
+        format: String,
+        /// Number of turns included in the export.
+        turn_count: usize,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

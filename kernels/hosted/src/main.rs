@@ -901,6 +901,51 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E22 Session Management ────────────────────────────────────────
+            AuditEntry::SessionStarted {
+                agent_id,
+                session_id,
+                user_id,
+            } => {
+                println!(
+                    "  💬 session_started agent={agent_id} \
+                     session={session_id} user={user_id}"
+                );
+            }
+            AuditEntry::SessionTurnAppended {
+                agent_id,
+                session_id,
+                role,
+                content_len,
+            } => {
+                println!(
+                    "  💬 session_turn_appended agent={agent_id} \
+                     session={session_id} role={role} len={content_len}"
+                );
+            }
+            AuditEntry::SessionArchived {
+                agent_id,
+                session_id,
+                turn_count,
+                has_summary,
+            } => {
+                let summary_tag = if *has_summary { " [summary]" } else { "" };
+                println!(
+                    "  📁 session_archived agent={agent_id} \
+                     session={session_id} turns={turn_count}{summary_tag}"
+                );
+            }
+            AuditEntry::SessionExported {
+                agent_id,
+                session_id,
+                format,
+                turn_count,
+            } => {
+                println!(
+                    "  📤 session_exported agent={agent_id} \
+                     session={session_id} format={format} turns={turn_count}"
+                );
+            }
         }
     }
 }
@@ -2506,6 +2551,300 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+// ── `anima sessions` subcommand (E22) ────────────────────────────────────────
+
+/// Implements the `anima sessions` subcommands for conversation history.
+///
+/// ```text
+/// anima-hosted sessions list [--user <user_id>]
+/// anima-hosted sessions show <session_id>
+/// anima-hosted sessions new <user_id>
+/// anima-hosted sessions append <session_id> <role> <content>
+/// anima-hosted sessions archive <session_id> [--summary <text>]
+/// anima-hosted sessions export <session_id> [--format jsonl|markdown]
+/// anima-hosted sessions search <query>
+/// ```
+fn cmd_sessions(args: &[String]) {
+    use sessions::{
+        make_session_id, ConversationRole, ConversationTurn, ExportFormat, SessionQuery,
+        SessionRecord, SessionStatus, SessionStore,
+    };
+    use std::str::FromStr;
+
+    const AGENT_ID: &str = "anima";
+    let path = SessionStore::default_path(AGENT_ID);
+    let mut store = SessionStore::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open session store ({e}); using in-memory fallback");
+        SessionStore::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        // ── list ──────────────────────────────────────────────────────────────
+        Some("list") => {
+            let user_id = args
+                .windows(2)
+                .find(|w| w[0] == "--user")
+                .map(|w| w[1].clone());
+            let mut q = SessionQuery::default();
+            if let Some(uid) = user_id {
+                q = SessionQuery::for_user(uid);
+            }
+            let sessions = store.list(&q);
+            if sessions.is_empty() {
+                println!("sessions: no sessions found");
+            } else {
+                println!("sessions ({} total):", sessions.len());
+                for s in sessions {
+                    println!(
+                        "  {} | user={} status={} turns={} started={}",
+                        s.id,
+                        s.user_id,
+                        s.status,
+                        s.turn_count(),
+                        s.started_at_ns,
+                    );
+                }
+            }
+        }
+        // ── show ──────────────────────────────────────────────────────────────
+        Some("show") => match args.get(1) {
+            Some(id) => match store.get(id) {
+                Some(s) => {
+                    println!("session: {}", s.id);
+                    println!("  user   : {}", s.user_id);
+                    println!("  agent  : {}", s.agent_id);
+                    println!("  status : {}", s.status);
+                    println!("  turns  : {}", s.turn_count());
+                    println!("  tokens : {}", s.total_tokens);
+                    if let Some(summary) = &s.summary {
+                        println!("  summary: {summary}");
+                    }
+                    println!("  ---");
+                    for turn in &s.turns {
+                        println!(
+                            "  [{}] {}: {}",
+                            turn.index,
+                            turn.role,
+                            if turn.content.len() > 80 {
+                                format!("{}…", &turn.content[..80])
+                            } else {
+                                turn.content.clone()
+                            }
+                        );
+                    }
+                }
+                None => eprintln!("sessions: session {id:?} not found"),
+            },
+            None => eprintln!("usage: anima-hosted sessions show <session_id>"),
+        },
+        // ── new ───────────────────────────────────────────────────────────────
+        Some("new") => match args.get(1) {
+            Some(user_id) => {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(42);
+                let session_id = make_session_id(nonce);
+                let session = SessionRecord::new(&session_id, user_id, AGENT_ID);
+                match store.insert(session) {
+                    Ok(()) => {
+                        store
+                            .flush()
+                            .unwrap_or_else(|e| eprintln!("sessions: flush error: {e}"));
+                        log.push(AuditEntry::SessionStarted {
+                            agent_id: AGENT_ID.to_string(),
+                            session_id: session_id.clone(),
+                            user_id: user_id.to_string(),
+                        });
+                        println!("sessions: created {session_id}");
+                        print_session_audit(&log);
+                    }
+                    Err(e) => eprintln!("sessions: error: {e}"),
+                }
+            }
+            None => eprintln!("usage: anima-hosted sessions new <user_id>"),
+        },
+        // ── append ────────────────────────────────────────────────────────────
+        Some("append") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(id), Some(role_str), Some(content)) => {
+                match ConversationRole::from_str(role_str) {
+                    Ok(role) => {
+                        let turn = ConversationTurn::new(0, role, content.clone());
+                        let content_len = content.len();
+                        match store.append_turn(id, turn) {
+                            Ok(()) => {
+                                log.push(AuditEntry::SessionTurnAppended {
+                                    agent_id: AGENT_ID.to_string(),
+                                    session_id: id.to_string(),
+                                    role: role_str.to_string(),
+                                    content_len,
+                                });
+                                println!("sessions: appended {role_str} turn to {id}");
+                                print_session_audit(&log);
+                            }
+                            Err(e) => eprintln!("sessions: error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("sessions: unknown role: {e}"),
+                }
+            }
+            _ => eprintln!("usage: anima-hosted sessions append <session_id> <role> <content>"),
+        },
+        // ── archive ───────────────────────────────────────────────────────────
+        Some("archive") => match args.get(1) {
+            Some(id) => {
+                let summary = args
+                    .windows(2)
+                    .find(|w| w[0] == "--summary")
+                    .map(|w| w[1].clone());
+                let has_summary = summary.is_some();
+                let turn_count = store.get(id).map(|s| s.turn_count()).unwrap_or(0);
+                match store.archive(id, summary) {
+                    Ok(()) => {
+                        log.push(AuditEntry::SessionArchived {
+                            agent_id: AGENT_ID.to_string(),
+                            session_id: id.to_string(),
+                            turn_count,
+                            has_summary,
+                        });
+                        println!("sessions: archived {id} ({turn_count} turns)");
+                        print_session_audit(&log);
+                    }
+                    Err(e) => eprintln!("sessions: error: {e}"),
+                }
+            }
+            None => {
+                eprintln!("usage: anima-hosted sessions archive <session_id> [--summary <text>]")
+            }
+        },
+        // ── export ────────────────────────────────────────────────────────────
+        Some("export") => match args.get(1) {
+            Some(id) => {
+                let format_str = args
+                    .windows(2)
+                    .find(|w| w[0] == "--format")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("jsonl");
+                match ExportFormat::from_str(format_str) {
+                    Ok(format) => {
+                        let turn_count = store.get(id).map(|s| s.turn_count()).unwrap_or(0);
+                        match store.export(id, &format) {
+                            Ok(output) => {
+                                log.push(AuditEntry::SessionExported {
+                                    agent_id: AGENT_ID.to_string(),
+                                    session_id: id.to_string(),
+                                    format: format.to_string(),
+                                    turn_count,
+                                });
+                                println!("{output}");
+                                print_session_audit(&log);
+                            }
+                            Err(e) => eprintln!("sessions: error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("sessions: unknown format: {e}"),
+                }
+            }
+            None => eprintln!(
+                "usage: anima-hosted sessions export <session_id> [--format jsonl|markdown]"
+            ),
+        },
+        // ── search ────────────────────────────────────────────────────────────
+        Some("search") => match args.get(1) {
+            Some(query) => {
+                let q = SessionQuery::with_content(query);
+                let sessions = store.list(&q);
+                if sessions.is_empty() {
+                    println!("sessions: no sessions match {query:?}");
+                } else {
+                    println!("sessions: {} match(es) for {query:?}:", sessions.len());
+                    for s in sessions {
+                        println!(
+                            "  {} | user={} status={} turns={}",
+                            s.id,
+                            s.user_id,
+                            s.status,
+                            s.turn_count()
+                        );
+                    }
+                }
+            }
+            None => eprintln!("usage: anima-hosted sessions search <query>"),
+        },
+        // ── help / unknown ────────────────────────────────────────────────────
+        _ => {
+            println!("anima-hosted sessions — conversation history management (E22)");
+            println!();
+            println!("  sessions list [--user <user_id>]");
+            println!("  sessions show <session_id>");
+            println!("  sessions new <user_id>");
+            println!("  sessions append <session_id> <role> <content>");
+            println!("  sessions archive <session_id> [--summary <text>]");
+            println!("  sessions export <session_id> [--format jsonl|markdown]");
+            println!("  sessions search <query>");
+        }
+    }
+
+    // Unused alias suppression for SessionStatus (referenced indirectly).
+    let _ = SessionStatus::Active;
+}
+
+/// Print E22-relevant audit entries from an in-process log.
+fn print_session_audit(log: &AuditLog) {
+    println!("--- audit trail ---");
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::SessionStarted {
+                agent_id,
+                session_id,
+                user_id,
+            } => {
+                println!(
+                    "  💬 session_started agent={agent_id} \
+                     session={session_id} user={user_id}"
+                );
+            }
+            AuditEntry::SessionTurnAppended {
+                agent_id,
+                session_id,
+                role,
+                content_len,
+            } => {
+                println!(
+                    "  💬 session_turn_appended agent={agent_id} \
+                     session={session_id} role={role} len={content_len}"
+                );
+            }
+            AuditEntry::SessionArchived {
+                agent_id,
+                session_id,
+                turn_count,
+                has_summary,
+            } => {
+                let tag = if *has_summary { " [summary]" } else { "" };
+                println!(
+                    "  📁 session_archived agent={agent_id} \
+                     session={session_id} turns={turn_count}{tag}"
+                );
+            }
+            AuditEntry::SessionExported {
+                agent_id,
+                session_id,
+                format,
+                turn_count,
+            } => {
+                println!(
+                    "  📤 session_exported agent={agent_id} \
+                     session={session_id} format={format} turns={turn_count}"
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("---");
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2549,6 +2888,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("sessions") {
+        cmd_sessions(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

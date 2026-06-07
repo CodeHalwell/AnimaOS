@@ -874,6 +874,7 @@ dependencies = [
  "scheduler",
  "senses",
  "serde_json",
+ "sessions",
  "skills",
  "users",
  "vita",
@@ -1801,6 +1802,15 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sessions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

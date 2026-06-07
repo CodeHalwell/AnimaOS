@@ -22,3 +22,4 @@ actuators = { path = "../../crates/actuators" }
 praxis = { path = "../../crates/praxis" }
 serde_json = { workspace = true }
 users = { path = "../../crates/users" }
+sessions = { path = "../../crates/sessions" }
