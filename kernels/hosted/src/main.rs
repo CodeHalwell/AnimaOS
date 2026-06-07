@@ -2511,14 +2511,12 @@ fn cmd_replay(args: &[String]) {
 /// Display Prometheus metrics derived from the agent audit log.
 ///
 /// ```text
-/// cargo run --bin anima-hosted -- metrics [--format prometheus|text]
+/// cargo run --bin anima-hosted -- metrics [--format prometheus|text] [--file <path>]
 /// ```
 ///
 /// Flags:
-/// - `--format prometheus` — emit Prometheus exposition format (default when
-///   piped to a file or another process).
-/// - `--format text` — emit a concise human-readable summary (default when
-///   the terminal is interactive).
+/// - `--format prometheus` — emit Prometheus exposition format.
+/// - `--format text` — emit a concise human-readable summary (default).
 /// - `--file <path>` — read a specific JSONL audit file instead of scanning
 ///   `$ANIMA_AUDIT_DIR`.
 ///
@@ -2574,12 +2572,13 @@ fn cmd_metrics(args: &[String]) {
                 use std::io::BufRead;
                 let reader = std::io::BufReader::new(file);
                 for line in reader.lines() {
-                    if let Ok(line) = line {
-                        let trimmed = line.trim().to_owned();
-                        if !trimmed.is_empty() {
-                            if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(&trimmed) {
-                                registry.update(&entry);
-                            }
+                    let Ok(line) = line else {
+                        continue;
+                    };
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(trimmed) {
+                            registry.update(&entry);
                         }
                     }
                 }

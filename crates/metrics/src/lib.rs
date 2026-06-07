@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # AnimaOS Metrics — Epic E21
 //!
 //! Prometheus-compatible metrics export for the AnimaOS runtime.
@@ -96,12 +97,18 @@ impl Counter {
 }
 
 /// Accumulated histogram observations.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct HistogramData {
     count: u64,
     sum: f64,
     /// Upper-bound boundaries.  We use fixed percentile-friendly buckets.
     buckets: Vec<(f64, u64)>,
+}
+
+impl Default for HistogramData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HistogramData {

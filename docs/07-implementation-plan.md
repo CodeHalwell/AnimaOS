@@ -3114,10 +3114,10 @@ infrastructure).
 **Stories.**
 
 - S21.1 `crates/metrics` — new standalone crate. ✅ (`MetricRegistry` with
-  15 families: 12 counters (tasks/completions/failures/tokens/sleep-cycles,
+  21 metric families: 12 counters (tasks/completions/failures/tokens/sleep-cycles,
   gate-decisions/invocations, defence-vetoes, constitution-vetoes,
   cortex-invocations/faults, router-modulations), 8 gauges (6 interoceptive
-  signals + gate-value-score + gate-threshold), and 1 histogram
+  signals + gate-value-score), and 1 histogram
   (`anima_gate_latency_ms` — first-action latency in 10 fixed-percentile
   buckets).  Primary ingestion via `update(&AuditEntry)`; convenience wrapper
   `registry_from_audit(&[AuditEntry])`.  Prometheus exposition format emitted
