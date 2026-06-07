@@ -57,7 +57,7 @@ pub enum BackendKind {
     /// A fully operator-supplied config (E8 S8.0).
     Custom(ProviderConfig),
     // ── E8 S8.2 — Hugging Face transformers sidecar ───────────────────────────
-    /// Hugging Face `transformers` in-process sidecar worker (E8 S8.2.2).
+    /// Hugging Face `transformers` external Python subprocess backend (E8 S8.2.2).
     HfTransformers,
 }
 

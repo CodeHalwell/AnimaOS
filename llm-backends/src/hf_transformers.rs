@@ -41,10 +41,19 @@ use scheduler::backend::{
 
 // ── Wire-protocol helpers ─────────────────────────────────────────────────────
 
+/// Maximum frame body accepted from the worker (guards against corrupt length fields).
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024; // 16 MiB
+
 fn read_frame(r: &mut impl Read) -> std::io::Result<serde_json::Value> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("worker frame too large: {len} bytes (max {MAX_FRAME_LEN})"),
+        ));
+    }
     let mut body = vec![0u8; len];
     r.read_exact(&mut body)?;
     serde_json::from_slice(&body)
@@ -234,7 +243,8 @@ impl HfTransformersBackend {
         loop {
             if cancel.is_cancelled() {
                 child.kill().ok();
-                completions.push(StreamingCompletion::Cancelled);
+                child.wait().ok();
+                std::fs::remove_file(&socket_path).ok();
                 return Err(LlmBackendError::Cancelled);
             }
             match read_frame(&mut stream) {
@@ -256,6 +266,8 @@ impl HfTransformersBackend {
                                 .and_then(|m| m.as_str())
                                 .unwrap_or("unknown worker error");
                             child.kill().ok();
+                            child.wait().ok();
+                            std::fs::remove_file(&socket_path).ok();
                             return Err(LlmBackendError::Provider(msg.to_string()));
                         }
                         _ => {}
@@ -267,6 +279,8 @@ impl HfTransformersBackend {
                 }
                 Err(e) => {
                     child.kill().ok();
+                    child.wait().ok();
+                    std::fs::remove_file(&socket_path).ok();
                     return Err(LlmBackendError::Provider(e.to_string()));
                 }
             }
@@ -310,6 +324,9 @@ impl LlmBackend for HfTransformersBackend {
     ) -> CompletionFuture<'a> {
         match self.mode {
             TransformersMode::Fixture => {
+                if cancel.is_cancelled() {
+                    return Box::pin(async { Err(LlmBackendError::Cancelled) });
+                }
                 let tokens: Vec<StreamingCompletion> = FIXTURE_TOKENS
                     .iter()
                     .map(|t| StreamingCompletion::Token(t.to_string()))
@@ -440,14 +457,13 @@ mod tests {
     #[test]
     fn cancelled_token_causes_fixture_to_return_cancelled() {
         let b = HfTransformersBackend::new();
-        // Fixture mode does not consult the cancel token — it just returns
-        // the pre-recorded stream.  This test verifies the backend does not
-        // panic on a pre-cancelled token.
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = block_on(b.stream_completion("x", &cancel));
-        // Fixture mode always succeeds (it ignores cancel for simplicity).
-        assert!(result.is_ok());
+        assert!(
+            matches!(result, Err(LlmBackendError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
     }
 
     #[test]

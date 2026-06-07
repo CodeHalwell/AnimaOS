@@ -110,6 +110,7 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
         _send_frame(conn, {"type": "error", "message": f"model load failed: {exc}"})
         return
 
+    model.eval()
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     total = 0
@@ -131,13 +132,17 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
 
                 past_key_values = outputs.past_key_values
                 next_token_id = outputs.logits[:, -1, :].argmax(dim=-1)
-                token_text = tokenizer.decode(next_token_id[0], skip_special_tokens=False)
+                # Use .item() to convert the tensor scalar to a Python int before
+                # decoding — decode() is most reliable with a plain int or list.
+                token_int = next_token_id[0].item()
+                token_text = tokenizer.decode([token_int], skip_special_tokens=False)
 
                 _send_frame(conn, {"type": "token", "text": token_text})
                 total += 1
 
-                # Stop on EOS.
-                if next_token_id.item() == tokenizer.eos_token_id:
+                # Guard against tokenizers that expose eos_token_id as None.
+                eos_id = tokenizer.eos_token_id
+                if eos_id is not None and token_int == eos_id:
                     break
 
                 if "attention_mask" in inputs:

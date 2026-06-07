@@ -262,7 +262,7 @@ impl HfHubClient {
             .or_else(|| body.pointer("/config/max_seq_len"))
             .or_else(|| body.pointer("/config/n_positions"))
             .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+            .and_then(|v| u32::try_from(v).ok());
 
         let model_type = body
             .pointer("/config/model_type")
