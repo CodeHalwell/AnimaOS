@@ -3009,3 +3009,92 @@ A stage closes only when every constituent epic is ✅ and the stage-level
 exit criteria documented in `05-roadmap.md` are demonstrably met by a
 green CI run plus a referenced audit-log trace. Rolling incomplete epics
 across stage boundaries is explicitly disallowed.
+
+---
+
+## Stage 8 — Trust, Multi-User Identity & Privacy
+
+### Epic E17 — Trust, Human-Identity & Privacy ✅
+
+**Scope.** Per-user identity and consent model for multi-user channel
+interactions.  E10 (Presence) treats every inbound message as a single
+anonymous operator; E17 adds the infrastructure for the agent to
+recognise and remember individual users, enforce trust tiers, and honour
+per-user data-retention preferences.  The new `crates/users` crate is
+a zero-dependency library (only `serde` / `serde_json`) so it can be
+reused from comms adapters, cortex bridge, and future authentication
+middleware without pulling in vita's heavy std-only surface.
+
+**Dependencies.** E10 (Presence — `ChannelMessage::from` as the primary
+user-id source), E5.5 (Identity Memory — analogous schema and atomic-write
+pattern), E5.6 (Defence Layer — trust-tier check is a natural pre-condition
+for motor-gate decisions).
+
+**Stories.**
+- S17.1 `UserProfile` and `TrustTier`. ✅ (`crates/users/src/profile.rs` —
+  `UserProfile { user_id, display_name, channel, trust_tier, created_at_ns,
+  last_seen_ns, facts, schema_version }`; `TrustTier` (Unknown → Verified →
+  Trusted → Operator) with `Ord` ordering; `at_least(minimum)` predicate;
+  `FromStr` + `Display`; `to_context_json()` for cortex injection; atomic
+  `UserProfile::new`, `make_id`, `set_fact`, `get_fact`, `touch` methods)
+- S17.2 `UserRegistry` with atomic JSON persistence. ✅ (`crates/users/src/registry.rs`
+  — `UserRegistry` backed by `HashMap<String, UserRecord>`; `open(path)` loads
+  or creates; `in_memory()` transient mode; `register`, `upsert`, `get`,
+  `get_mut`, `set_trust`, `set_fact`, `iter`, `len`, `is_empty`; `flush`
+  writes to `.tmp` then renames — crash-safe; default path
+  `~/.anima/<agent_id>/users.json`; `RegistryError::{AlreadyExists, NotFound, Io}`)
+- S17.3 `ConsentRecord` and `DataCategory`. ✅ (`crates/users/src/consent.rs` —
+  `DataCategory` enum (EpisodicMemory, IdentityFacts, UsageStats,
+  KnowledgeCorpus); `Grant { granted, expires_at_ns, updated_at_ns }`;
+  `ConsentRecord` stores per-category `Grant`s; `is_consented(category, now_ns)`
+  enforces expiry; default is **no retention** for every category; `FromStr`
+  + `Display` on `DataCategory`)
+- S17.4 Audit trail. ✅ (`crates/vita/src/audit.rs` — three new
+  `AuditEntry` variants: `UserProfileCreated { agent_id, user_id,
+  display_name, channel }`, `UserTrustUpdated { agent_id, user_id, old_tier,
+  new_tier }`, `UserConsentUpdated { agent_id, user_id, category, granted }`;
+  `kernels/hosted/src/main.rs` — `print_audit` arms for all three new variants
+  with 👤 / 🔐 / ✅❌ prefixes)
+- S17.5 `anima users` CLI. ✅ (`kernels/hosted/src/main.rs` —
+  `cmd_users()` implements `users list`, `users show <id>`, `users trust
+  <id> <tier>`, `users consent <id> <category> grant|revoke`, `users register
+  <id> <name> <channel>`; dispatched via `anima-hosted users …`;
+  `print_user_audit()` helper mirrors the `anima identity` audit-trail pattern)
+
+**New crate: `crates/users`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `TrustTier` ordering and `FromStr` round-trip covered by unit tests;
+   `Unknown < Verified < Trusted < Operator` invariant holds. ✅
+   (`trust_tier_ordering_is_correct`, `trust_tier_from_str_round_trips`,
+   `trust_tier_from_str_rejects_unknown_label`, `trust_tier_at_least`)
+2. `UserProfile` CRUD operations and JSON round-trip exercised. ✅
+   (`user_profile_new_has_unknown_trust_and_no_facts`, `make_id_produces_channel_prefixed_key`,
+   `set_and_get_fact_round_trip`, `set_fact_returns_previous_value`,
+   `touch_updates_last_seen`, `to_context_json_contains_expected_fields`,
+   `profile_round_trips_through_json`)
+3. `ConsentRecord` default is no-consent; expiry enforcement is correct;
+   `DataCategory::FromStr` round-trips. ✅
+   (`default_consent_record_has_no_categories`, `set_grants_and_revokes_consent`,
+   `consented_count_reflects_active_grants`, `expired_grant_is_not_consented`,
+   `non_expired_grant_with_future_expiry_is_active`, `consent_record_round_trips_through_json`,
+   `data_category_from_str_round_trips`, `data_category_from_str_rejects_unknown`,
+   `grant_perpetual_never_expires`, `grant_revoked_is_not_active`)
+4. `UserRegistry` CRUD, persistence, and error paths tested. ✅
+   (`empty_registry_has_zero_users`, `register_adds_user`,
+   `register_rejects_duplicate_user_id`, `upsert_creates_new_user`,
+   `upsert_updates_existing_user`, `get_returns_none_for_missing_user`,
+   `set_trust_updates_tier`, `set_trust_returns_error_for_missing_user`,
+   `set_fact_stores_and_retrieves_value`, `consent_defaults_to_no_categories`,
+   `consent_is_mutable_via_get_mut`, `flush_and_reload_round_trip`,
+   `open_creates_empty_registry_when_file_absent`, `in_memory_registry_flush_is_no_op`,
+   `iter_returns_all_users`)
+5. All three new `AuditEntry` variants emitted and displayed. ✅
+   (audit trail verified manually; `print_audit` arms print with
+   `👤` / `🔐` / `✅❌` emoji prefixes matching the E17 section in `print_audit`)
+6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅
