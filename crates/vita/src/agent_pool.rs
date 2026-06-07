@@ -336,7 +336,8 @@ impl<D: ToolDispatcher> ToolDispatcher for A2aDispatcher<D> {
         let duration_ms = t0.elapsed().as_millis() as u64;
 
         match invoke_result {
-            Ok(resp) => {
+            Ok(mut resp) => {
+                resp.duration_ms = duration_ms;
                 self.push_entry(AuditEntry::AgentDelegationCompleted {
                     parent_agent_id: self.parent_agent_id.clone(),
                     target_agent_id: target_id,
