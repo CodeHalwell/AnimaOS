@@ -1279,7 +1279,7 @@ fn cmd_data(args: &[String]) {
     const AGENT_ID: &str = "anima";
 
     let path = UserRegistry::default_path(AGENT_ID);
-    let registry = UserRegistry::open(&path).unwrap_or_else(|e| {
+    let mut registry = UserRegistry::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
         UserRegistry::in_memory()
     });
@@ -1326,10 +1326,22 @@ fn cmd_data(args: &[String]) {
                             .map(|d| d.as_nanos() as u64)
                             .unwrap_or(0);
 
-                        // Build an export with consent status per category as a
-                        // minimal summary (full store data requires wiring to
-                        // sessions/memory crates which the operator can extend).
+                        // Build export: always include the identity profile first,
+                        // then add a section for each consented data category.
                         let mut builder = DataExportBuilder::new();
+                        builder.add_raw_section(
+                            "user_profile",
+                            1,
+                            serde_json::json!({
+                                "user_id": rec.profile.user_id,
+                                "display_name": rec.profile.display_name,
+                                "channel": rec.profile.channel,
+                                "trust_tier": rec.profile.trust_tier.as_str(),
+                                "created_at_ns": rec.profile.created_at_ns,
+                                "last_seen_ns": rec.profile.last_seen_ns,
+                                "facts": rec.profile.facts,
+                            }),
+                        );
                         for cat in DataCategory::all() {
                             if rec.consent.is_consented(*cat, now_ns) {
                                 builder.add_section(
@@ -1373,43 +1385,47 @@ fn cmd_data(args: &[String]) {
         // ── `anima data delete <user_id>` ─────────────────────────────────────
         Some("delete") => match args.get(1) {
             Some(user_id) => {
-                match registry.get(user_id) {
-                    Some(_) => {
-                        let now_ns = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos() as u64)
-                            .unwrap_or(0);
+                let user_exists = registry.get(user_id).is_some();
+                if user_exists {
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
 
-                        // Build directive for all categories.
-                        let all: Vec<DataCategory> = DataCategory::all().to_vec();
-                        let directive = build_revocation_directive(user_id, &all, now_ns);
+                    // Build directive for all categories.
+                    let all: Vec<DataCategory> = DataCategory::all().to_vec();
+                    let directive = build_revocation_directive(user_id, &all, now_ns);
 
-                        // In a full implementation the operator would call each
-                        // affected store here.  We record the audit entry so the
-                        // intent is durable even before stores are wired.
-                        let categories_str = directive.revoked_categories.join(", ");
-                        log.push(AuditEntry::DataDeletedForUser {
-                            agent_id: AGENT_ID.to_owned(),
-                            user_id: user_id.clone(),
-                            categories: categories_str.clone(),
-                            records_deleted: 0, // stores not wired yet
-                        });
-                        println!(
-                            "data: deletion directive generated for {user_id:?} \
-                             categories=[{categories_str}]"
-                        );
-                        println!(
-                            "data: purge_sessions={} purge_episodic={} \
-                             purge_identity={} purge_knowledge={} purge_stats={}",
-                            directive.purge_sessions,
-                            directive.purge_episodic_memory,
-                            directive.purge_identity_facts,
-                            directive.purge_knowledge_corpus,
-                            directive.purge_usage_stats,
-                        );
-                        print_data_audit(&log);
-                    }
-                    None => eprintln!("data: no user with id={user_id:?}"),
+                    let categories_str = directive.revoked_categories.join(", ");
+                    log.push(AuditEntry::DataDeletedForUser {
+                        agent_id: AGENT_ID.to_owned(),
+                        user_id: user_id.clone(),
+                        categories: categories_str.clone(),
+                        records_deleted: 0, // stores not wired yet
+                    });
+
+                    // Remove the user record from the registry and persist.
+                    registry.remove(user_id).ok();
+                    registry
+                        .flush()
+                        .unwrap_or_else(|e| eprintln!("data: registry flush failed: {e}"));
+
+                    println!(
+                        "data: deletion directive generated for {user_id:?} \
+                         categories=[{categories_str}]"
+                    );
+                    println!(
+                        "data: purge_sessions={} purge_episodic={} \
+                         purge_identity={} purge_knowledge={} purge_stats={}",
+                        directive.purge_sessions,
+                        directive.purge_episodic_memory,
+                        directive.purge_identity_facts,
+                        directive.purge_knowledge_corpus,
+                        directive.purge_usage_stats,
+                    );
+                    print_data_audit(&log);
+                } else {
+                    eprintln!("data: no user with id={user_id:?}");
                 }
             }
             None => eprintln!("usage: anima-hosted data delete <user_id>"),
@@ -1448,6 +1464,19 @@ fn cmd_data(args: &[String]) {
                         eg.user_id, eg.category, eg.expired_at_ns
                     );
                 }
+
+                // Revoke the expired grants in the registry so subsequent runs
+                // don't re-report the same entries.
+                for eg in &report.expired_grants {
+                    if let Some(rec) = registry.get_mut(&eg.user_id) {
+                        if let Ok(cat) = eg.category.parse::<DataCategory>() {
+                            rec.consent.set(cat, false, now_ns);
+                        }
+                    }
+                }
+                registry
+                    .flush()
+                    .unwrap_or_else(|e| eprintln!("expiry-check: registry flush failed: {e}"));
             }
             log.push(AuditEntry::ExpiredConsentCleaned {
                 agent_id: AGENT_ID.to_owned(),

@@ -230,6 +230,24 @@ impl DataExportBuilder {
         self
     }
 
+    /// Appends a data section using a free-form category label.
+    ///
+    /// Use this for sections that don't map to a [`DataCategory`] variant, such
+    /// as the user's identity profile.
+    pub fn add_raw_section(
+        &mut self,
+        category: impl Into<String>,
+        record_count: usize,
+        data: serde_json::Value,
+    ) -> &mut Self {
+        self.sections.push(DataExportSection {
+            category: category.into(),
+            record_count,
+            data,
+        });
+        self
+    }
+
     /// Builds the final export bundle.
     pub fn build(self, user_id: &str, agent_id: &str, exported_at_ns: u64) -> DataExportBundle {
         let total_records = self.sections.iter().map(|s| s.record_count).sum();
@@ -308,8 +326,8 @@ pub fn scan_expired_grants<'a>(
             // A grant is "expired" when it *was* active (granted=true) but has
             // now passed its expiry, making is_consented return false while the
             // raw grant is still present.
-            let now_expired = consent.iter().any(|(key, grant)| {
-                key == cat.as_str()
+            let expired_grant = consent.iter().find(|(key, grant)| {
+                *key == cat.as_str()
                     && grant.granted
                     && grant
                         .expires_at_ns
@@ -317,13 +335,8 @@ pub fn scan_expired_grants<'a>(
                         .unwrap_or(false)
             });
 
-            if now_expired {
-                // Find the expiry timestamp for the record.
-                let expired_at_ns = consent
-                    .iter()
-                    .find(|(key, _)| *key == cat.as_str())
-                    .and_then(|(_, g)| g.expires_at_ns)
-                    .unwrap_or(now_ns);
+            if let Some((_, grant)) = expired_grant {
+                let expired_at_ns = grant.expires_at_ns.unwrap_or(now_ns);
 
                 report.expired_grants.push(ExpiredGrant {
                     user_id: user_id.to_owned(),
