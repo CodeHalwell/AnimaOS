@@ -2794,6 +2794,25 @@ See `docs/13-local-llm-providers.md`.
 JSONL loader, fixture/live mode, HRA/LoRA/QLoRA method selector, per-run manifests,
 optional `AdapterLibrary` registration, 9 unit tests).
 
+**Delivered (later).** S8.4.3 Sleep-cycle consolidation hook ✅ — wires the
+`PolicyCompilation` sleep phase into the `FineTuner` pipeline so the agent can
+optionally fine-tune a local model on its compiled episodic experience during
+sleep cycles. Delivered across four files:
+- `crates/vita/src/audit.rs`: four new `AuditEntry` variants —
+  `ConsolidationSkipped`, `ConsolidationStarted`, `ConsolidationCompleted`,
+  `ConsolidationFailed`.
+- `crates/vita/src/sleep.rs`: `compiled_pairs: Vec<memory::compilation::TrainingPair>`
+  field added to `SleepRoutineOutcome`; `run_compilation_phase` now captures pairs
+  instead of discarding them.
+- `crates/vita/src/consolidation.rs` (new): `ConsolidationConfig` (opt-in, gated),
+  `ConsolidationOutcome`, and `run_consolidation` function; 11 hermetic unit tests.
+- `crates/vita/src/lib.rs`: `LifecycleManager::consolidation_config` field;
+  `enable_consolidation` / `with_consolidation` builder; `run_consolidation_hook`
+  wired into both `run_sleep_cycle` and `transition_to_sleep_state`; 4 integration
+  tests (default disabled, installed, audit entries emitted, skipped without pairs).
+- `kernels/hosted/src/main.rs`: four new `print_audit` arms for the consolidation
+  entries.
+
 **Deferred.** S8.3 (native FFI runtimes — external/live-gated) and S8.4.5/.6
 (real Unsloth/HRA GPU training + merge/quant — external/live-gated;
 `UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`).
