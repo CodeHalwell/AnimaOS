@@ -31,6 +31,7 @@ pub mod capabilities;
 pub mod chat;
 pub mod compat;
 pub mod factory;
+pub mod native;
 pub mod ollama;
 pub mod openai;
 
@@ -41,6 +42,9 @@ pub use chat::{
 };
 pub use compat::OpenAiCompatibleBackend;
 pub use factory::{BackendFactory, BackendKind, TierBackendChoices};
+pub use native::{
+    LiteRtLmBackend, LlamaCppNativeBackend, NativeRuntime, NativeRuntimeConfig, NativeRuntimeError,
+};
 pub use ollama::OllamaBackend;
 pub use openai::OpenAiBackend;
 

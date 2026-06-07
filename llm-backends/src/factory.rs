@@ -28,6 +28,7 @@ use scheduler::backend::LlmBackend;
 use crate::anthropic::AnthropicBackend;
 use crate::capabilities::ProviderConfig;
 use crate::compat::OpenAiCompatibleBackend;
+use crate::native::{LiteRtLmBackend, LlamaCppNativeBackend};
 use crate::ollama::OllamaBackend;
 use crate::openai::OpenAiBackend;
 
@@ -53,6 +54,11 @@ pub enum BackendKind {
     HfTgi,
     /// llama.cpp HTTP server (`llama-server --api`).
     LlamaCppServer,
+    // ── E8 S8.3 — Native in-process runtimes ─────────────────────────────────
+    /// llama.cpp in-process FFI runtime (GGUF models, fixture mode by default).
+    LlamaCppNative,
+    /// LiteRT-LM on-device runtime (MediaPipe Task bundles, fixture mode by default).
+    LiteRtLm,
     /// A fully operator-supplied config (E8 S8.0).
     Custom(ProviderConfig),
 }
@@ -78,6 +84,11 @@ impl BackendKind {
             "llamacpp" | "llamacpp-server" | "llama-cpp" | "llama_cpp" => {
                 Some(Self::LlamaCppServer)
             }
+            // E8 S8.3 — native in-process runtimes.
+            "llamacpp-native" | "llama-cpp-native" | "llama_cpp_native" => {
+                Some(Self::LlamaCppNative)
+            }
+            "litert-lm" | "litert_lm" | "liteRT" | "litert" => Some(Self::LiteRtLm),
             _ => None,
         }
     }
@@ -105,6 +116,9 @@ impl BackendFactory {
             BackendKind::NvidiaNim => Arc::new(OpenAiCompatibleBackend::nvidia_nim()),
             BackendKind::HfTgi => Arc::new(OpenAiCompatibleBackend::hf_tgi()),
             BackendKind::LlamaCppServer => Arc::new(OpenAiCompatibleBackend::llamacpp_server()),
+            // E8 S8.3 — native in-process runtimes (fixture-mode by default).
+            BackendKind::LlamaCppNative => Arc::new(LlamaCppNativeBackend::new()),
+            BackendKind::LiteRtLm => Arc::new(LiteRtLmBackend::new()),
             // E8 S8.0 — operator-supplied config.
             BackendKind::Custom(config) => Arc::new(OpenAiCompatibleBackend::from_config(config)),
         }
@@ -472,6 +486,60 @@ mod tests {
             BackendKind::LmStudio,
         );
         assert_eq!(kind, BackendKind::LmStudio);
+    }
+
+    // ── E8 S8.3 — native in-process runtime tests ─────────────────────────────
+
+    #[test]
+    fn factory_returns_llamacpp_native_backend() {
+        let b = BackendFactory::fixture(BackendKind::LlamaCppNative);
+        assert_eq!(b.id(), "llama-cpp-native");
+    }
+
+    #[test]
+    fn factory_returns_litert_lm_backend() {
+        let b = BackendFactory::fixture(BackendKind::LiteRtLm);
+        assert_eq!(b.id(), "litert-lm");
+    }
+
+    #[test]
+    fn backend_kind_parse_recognises_llamacpp_native_variants() {
+        assert_eq!(
+            BackendKind::parse("llamacpp-native"),
+            Some(BackendKind::LlamaCppNative)
+        );
+        assert_eq!(
+            BackendKind::parse("llama-cpp-native"),
+            Some(BackendKind::LlamaCppNative)
+        );
+        assert_eq!(
+            BackendKind::parse("llama_cpp_native"),
+            Some(BackendKind::LlamaCppNative)
+        );
+        assert_eq!(
+            BackendKind::parse("LLAMACPP-NATIVE"),
+            Some(BackendKind::LlamaCppNative)
+        );
+    }
+
+    #[test]
+    fn backend_kind_parse_recognises_litert_lm_variants() {
+        assert_eq!(BackendKind::parse("litert-lm"), Some(BackendKind::LiteRtLm));
+        assert_eq!(BackendKind::parse("litert_lm"), Some(BackendKind::LiteRtLm));
+        assert_eq!(BackendKind::parse("litert"), Some(BackendKind::LiteRtLm));
+        assert_eq!(BackendKind::parse("LITERT-LM"), Some(BackendKind::LiteRtLm));
+    }
+
+    #[test]
+    fn from_env_or_mock_recognises_llamacpp_native() {
+        let b = BackendFactory::from_env_or_mock("llamacpp-native");
+        assert_eq!(b.id(), "llama-cpp-native");
+    }
+
+    #[test]
+    fn from_env_or_mock_recognises_litert_lm() {
+        let b = BackendFactory::from_env_or_mock("litert-lm");
+        assert_eq!(b.id(), "litert-lm");
     }
 
     #[test]
