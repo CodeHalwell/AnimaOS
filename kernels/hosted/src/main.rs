@@ -901,6 +901,182 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E20 — Structured Runtime Configuration ────────────────────────
+            AuditEntry::ConfigLoaded {
+                agent_id,
+                path,
+                schema_version,
+                from_file,
+            } => {
+                let src = if *from_file { "file" } else { "defaults" };
+                println!(
+                    "  ⚙  config_loaded agent={agent_id} path={path} \
+                     schema_version={schema_version} source={src}"
+                );
+            }
+            AuditEntry::ConfigReloaded {
+                agent_id,
+                path,
+                changed_keys,
+            } => {
+                let keys = if changed_keys.is_empty() {
+                    "(no changes)".to_string()
+                } else {
+                    changed_keys.join(", ")
+                };
+                println!(
+                    "  ⚙  config_reloaded agent={agent_id} path={path} changed=[{keys}]"
+                );
+            }
+        }
+    }
+}
+
+// ── `anima config` subcommand (E20) ──────────────────────────────────────────
+
+/// Implements the `anima config show | validate [<path>] | init [--path <p>]`
+/// subcommands.
+///
+/// Satisfies E20 exit criteria:
+/// 1. `config init` writes a valid default config; `config validate` accepts it.
+/// 2. Config round-trips through TOML without data loss.
+/// 3. Config load is audited with `AuditEntry::ConfigLoaded`.
+fn cmd_config(args: &[String]) {
+    use config::{load_or_defaults, AnimaConfig, ConfigSource};
+
+    const AGENT_ID: &str = "anima";
+    let sub = args.first().map(String::as_str).unwrap_or("show");
+
+    match sub {
+        "show" => {
+            let default_path = AnimaConfig::default_path(AGENT_ID);
+            let (cfg, src) = load_or_defaults(&default_path);
+            let from_file = matches!(src, ConfigSource::File(_));
+            let path_str = match &src {
+                ConfigSource::File(p) => p.to_string_lossy().to_string(),
+                ConfigSource::Defaults => default_path.to_string_lossy().to_string(),
+            };
+
+            println!("AnimaOS Runtime Configuration");
+            println!(
+                "Source: {}",
+                if from_file {
+                    &path_str
+                } else {
+                    "(built-in defaults)"
+                }
+            );
+            println!();
+            print!("{}", cfg.to_display_string());
+
+            let mut log = AuditLog::new();
+            log.push(AuditEntry::ConfigLoaded {
+                agent_id: AGENT_ID.to_string(),
+                path: path_str,
+                schema_version: cfg.schema.version,
+                from_file,
+            });
+            println!("\nAudit trail:");
+            for entry in log.entries() {
+                if let AuditEntry::ConfigLoaded {
+                    path,
+                    schema_version,
+                    from_file,
+                    ..
+                } = entry
+                {
+                    let src_label = if *from_file { "file" } else { "defaults" };
+                    println!(
+                        "  ⚙  config_loaded schema_version={schema_version} source={src_label} path={path}"
+                    );
+                }
+            }
+        }
+
+        "validate" => {
+            let path = args
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| AnimaConfig::default_path(AGENT_ID));
+            println!("Validating: {}", path.display());
+            match AnimaConfig::from_file(&path) {
+                Ok(cfg) => {
+                    println!("✓ Valid  (schema version {})", cfg.schema.version);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("✗ Invalid: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "init" => {
+            let path = {
+                let flag_pos = args.iter().position(|a| a == "--path");
+                if let Some(pos) = flag_pos {
+                    args.get(pos + 1)
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| AnimaConfig::default_path(AGENT_ID))
+                } else {
+                    AnimaConfig::default_path(AGENT_ID)
+                }
+            };
+
+            if path.exists() {
+                println!("Config already exists at {}", path.display());
+                println!("Use `config validate` to check it, or delete and re-run `config init`.");
+                return;
+            }
+
+            let cfg = AnimaConfig::from_defaults();
+            let toml_str = match cfg.to_toml_string() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to serialize default config: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "Failed to create config directory {}: {e}",
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            let tmp = path.with_extension("toml.tmp");
+            if let Err(e) = std::fs::write(&tmp, &toml_str) {
+                eprintln!("Failed to write temp config {}: {e}", tmp.display());
+                std::process::exit(1);
+            }
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                eprintln!("Failed to rename config into place: {e}");
+                std::process::exit(1);
+            }
+
+            println!("✓ Default config written to {}", path.display());
+            println!("  Edit it, then run `anima-hosted config validate` to check your changes.");
+
+            let mut log = AuditLog::new();
+            log.push(AuditEntry::ConfigLoaded {
+                agent_id: AGENT_ID.to_string(),
+                path: path.to_string_lossy().to_string(),
+                schema_version: cfg.schema.version,
+                from_file: false,
+            });
+            println!(
+                "\nAudit entry emitted: ConfigLoaded(schema_version={}, source=defaults)",
+                cfg.schema.version
+            );
+        }
+
+        _ => {
+            eprintln!("Usage: anima-hosted config <show | validate [<path>] | init [--path <p>]>");
+            std::process::exit(1);
         }
     }
 }
@@ -2560,6 +2736,10 @@ fn main() {
         let non_interactive = args.iter().any(|a| a == "--non-interactive");
         let reset = args.iter().any(|a| a == "--reset");
         init::run_init("anima", non_interactive, reset);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("config") {
+        cmd_config(&args[1..]);
         return;
     }
 

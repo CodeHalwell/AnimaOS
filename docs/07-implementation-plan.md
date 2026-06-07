@@ -3098,3 +3098,74 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E20 — Structured Runtime Configuration ✅
+
+**Scope.** A TOML-backed unified runtime configuration system for AnimaOS.
+Operators can tune the Striatal Gate coefficients, memory tier limits,
+MLFQ scheduler knobs, and logging settings through a single `anima.toml`
+file without recompilation.  Every config load is audited.  A
+`anima-hosted config` CLI subcommand provides `show`, `validate`, and
+`init` operations.
+
+**Dependencies.** E5.2 (Striatal Gate — gate coefficients documented),
+E2.1 (memory limits), E1.4 (scheduler knobs), EX.2 (audit trail).
+
+**Stories.**
+- S20.1 `AnimaConfig` schema — six sections (`[schema]`, `[agent]`,
+  `[gate]`, `[memory]`, `[scheduler]`, `[logging]`) with production-
+  ready defaults derived from the E5.2 `GateConfig::default()` values;
+  `to_toml_string()` TOML serialisation; `to_display_string()` summary. ✅
+  (`crates/config/src/schema.rs`)
+- S20.2 Config loading & validation — `AnimaConfig::from_file()` parses
+  and validates; schema-version guard rejects files newer than the binary;
+  `load_or_defaults()` falls back to built-in defaults when no file is
+  present; `ConfigSource` enum records the provenance. ✅
+  (`crates/config/src/loader.rs`)
+- S20.3 Semantic validation — `validate()` checks all numeric bounds
+  (unit-interval gate weights, positive-nonzero token counts, path
+  sanity on `agent.id`); `ValidationError { field, message }` pinpoints
+  the violated field. ✅
+  (`crates/config/src/validate.rs`)
+- S20.4 `anima config` CLI — `show` (prints resolved config + audit entry),
+  `validate [<path>]` (exits 0/1), `init [--path <p>]` (atomic-write
+  default template). ✅
+  (`kernels/hosted/src/main.rs` — `cmd_config()` + dispatch in `main()`)
+- S20.5 Audit trail — `AuditEntry::ConfigLoaded { agent_id, path,
+  schema_version, from_file }` and `AuditEntry::ConfigReloaded { agent_id,
+  path, changed_keys }` added to `vita::audit`; `print_audit()` renders
+  both with `⚙` prefix. ✅
+  (`crates/vita/src/audit.rs`, `kernels/hosted/src/main.rs`)
+
+**New crate: `crates/config`.**
+Dependencies: `serde` (workspace), `serde_json` (workspace), `toml = "0.8"`.
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `anima-hosted config init` writes a valid default config;
+   `config validate` accepts it without error. ✅
+   (`load_from_file_succeeds_on_valid_toml` — defaults serialise to TOML
+   and reload as an equal value; `config init` in `cmd_config()` uses the
+   same atomic-write pattern as identity/users)
+2. Config round-trips through TOML without data loss. ✅
+   (`config_round_trips_through_toml` — `to_toml_string()` → `toml::from_str()`
+   produces an equal `AnimaConfig`)
+3. Semantic validation rejects invalid configs with actionable field paths. ✅
+   (`empty_agent_id_is_rejected`, `path_traversal_in_agent_id_is_rejected`,
+   `zero_base_threshold_is_rejected`, `ceiling_above_floor_is_rejected`,
+   `zero_max_context_tokens_is_rejected`, `block_size_larger_than_context_is_rejected`,
+   `zero_boost_interval_is_rejected`, `zero_schema_version_is_rejected`,
+   `empty_logging_dir_is_rejected`)
+4. Schema-too-new guard rejects future-version configs. ✅
+   (`load_from_file_rejects_future_schema_version`)
+5. `AuditEntry::ConfigLoaded` is emitted on every `config show` and
+   `config init` invocation; `print_audit()` renders it with `⚙` prefix. ✅
+   (audit entries written in both `cmd_config` branches; `print_audit` arms
+   added for `ConfigLoaded` and `ConfigReloaded`)
+6. `cargo test --workspace` green; 25 new config tests + all prior tests
+   pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

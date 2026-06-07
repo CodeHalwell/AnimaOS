@@ -1192,6 +1192,37 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E20 — Structured Runtime Configuration ────────────────────────────────
+    /// A runtime configuration file was loaded at startup or on reload (E20).
+    ///
+    /// Emitted immediately after a valid `AnimaConfig` is parsed from disk so
+    /// operators can correlate behavioural changes with config file changes.
+    ConfigLoaded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Absolute path of the TOML file that was loaded.
+        path: String,
+        /// Schema version of the loaded config.
+        schema_version: u32,
+        /// Whether the config came from a file (`true`) or built-in defaults (`false`).
+        from_file: bool,
+    },
+
+    /// The runtime configuration was reloaded without restarting the process (E20).
+    ///
+    /// Emitted after a successful hot-reload so the operator can inspect which
+    /// section keys changed.  An empty `changed_keys` list means the file was
+    /// re-read but no values differed.
+    ConfigReloaded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Absolute path of the TOML file that was re-read.
+        path: String,
+        /// `section.key` labels of every config value that differed between the
+        /// old and new configs.
+        changed_keys: Vec<String>,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────
