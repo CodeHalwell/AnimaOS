@@ -431,9 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn webhook_endpoint_with_secret_sets_secret() {
-        let ep = WebhookEndpoint::new("w1", "https://example.com/hook").with_secret("my-secret");
-        assert_eq!(ep.secret, "my-secret");
+    fn webhook_endpoint_with_signing_key_sets_signing_key() {
+        let ep = WebhookEndpoint::new("w1", "https://example.com/hook")
+            .with_secret("hmac-test-key-abc"); // pragma: allowlist secret
+        assert_eq!(ep.secret, "hmac-test-key-abc"); // pragma: allowlist secret
     }
 
     #[test]
