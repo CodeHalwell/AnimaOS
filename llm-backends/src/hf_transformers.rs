@@ -33,6 +33,7 @@
 //! ```
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use scheduler::backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
@@ -156,8 +157,12 @@ impl HfTransformersBackend {
             )
         })?;
 
+        // Unique per-call socket path avoids collisions when the backend is
+        // shared across concurrent scheduler tasks (Arc<dyn LlmBackend>).
+        static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let call_id = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
         let socket_path =
-            std::env::temp_dir().join(format!("anima-hf-{}.sock", std::process::id()));
+            std::env::temp_dir().join(format!("anima-hf-{}-{}.sock", std::process::id(), call_id));
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).ok();
         }
@@ -165,6 +170,9 @@ impl HfTransformersBackend {
         let listener = std::os::unix::net::UnixListener::bind(&socket_path)
             .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
 
+        // stdout → /dev/null avoids filling the OS pipe buffer (64 KB) and
+        // deadlocking when output is never read.  stderr is inherited so that
+        // worker startup errors remain visible on the host terminal.
         let mut child = std::process::Command::new("python3")
             .arg(&worker_path)
             .arg("--socket")
@@ -172,18 +180,48 @@ impl HfTransformersBackend {
             .arg("--model")
             .arg(model_id)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
             .spawn()
             .map_err(|e| {
                 LlmBackendError::Provider(format!("failed to spawn transformers worker: {e}"))
             })?;
 
-        let accept_result = listener.accept();
-        let (mut stream, _addr) = accept_result.map_err(|e| {
-            child.kill().ok();
-            LlmBackendError::Provider(e.to_string())
-        })?;
+        // Non-blocking accept with child-exit detection: if the Python worker
+        // crashes before connecting (bad environment, missing deps, etc.) the
+        // loop returns an error instead of hanging forever.
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
+        let (mut stream, _addr) = loop {
+            match listener.accept() {
+                Ok(res) => break res,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            std::fs::remove_file(&socket_path).ok();
+                            return Err(LlmBackendError::Provider(format!(
+                                "transformers worker exited before connecting (status: {status})"
+                            )));
+                        }
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Err(e) => {
+                            child.kill().ok();
+                            std::fs::remove_file(&socket_path).ok();
+                            return Err(LlmBackendError::Provider(e.to_string()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    child.kill().ok();
+                    std::fs::remove_file(&socket_path).ok();
+                    return Err(LlmBackendError::Provider(e.to_string()));
+                }
+            }
+        };
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
 
         let request = serde_json::json!({
             "type": "infer",

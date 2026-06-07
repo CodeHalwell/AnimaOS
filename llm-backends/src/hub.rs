@@ -234,12 +234,13 @@ impl HfHubClient {
             req = req.header("Authorization", &format!("Bearer {token}"));
         }
 
-        let response = req.call().map_err(|e| HubError::Network(e.to_string()))?;
-
-        // Check for HTTP 404.
-        if response.status() == 404 {
-            return Err(HubError::NotFound(model_id.to_string()));
-        }
+        let response = match req.call() {
+            Ok(res) => res,
+            Err(ureq::Error::StatusCode(404)) => {
+                return Err(HubError::NotFound(model_id.to_string()));
+            }
+            Err(e) => return Err(HubError::Network(e.to_string())),
+        };
 
         let body_text = response
             .into_body()

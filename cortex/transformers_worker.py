@@ -111,13 +111,25 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
         return
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    input_length = inputs["input_ids"].shape[1]
 
     total = 0
     try:
         with torch.no_grad():
+            past_key_values = None
             for _ in range(max_new_tokens):
-                outputs = model(**inputs)
+                if past_key_values is None:
+                    # First step: full forward pass over the prompt.
+                    outputs = model(**inputs, use_cache=True)
+                else:
+                    # Subsequent steps: only the new token; KV cache covers the rest.
+                    outputs = model(
+                        input_ids=next_token_id.unsqueeze(0),
+                        attention_mask=inputs.get("attention_mask"),
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                    )
+
+                past_key_values = outputs.past_key_values
                 next_token_id = outputs.logits[:, -1, :].argmax(dim=-1)
                 token_text = tokenizer.decode(next_token_id[0], skip_special_tokens=False)
 
@@ -128,9 +140,6 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
                 if next_token_id.item() == tokenizer.eos_token_id:
                     break
 
-                inputs["input_ids"] = torch.cat(
-                    [inputs["input_ids"], next_token_id.unsqueeze(0)], dim=1
-                )
                 if "attention_mask" in inputs:
                     ones = torch.ones(
                         (1, 1), dtype=inputs["attention_mask"].dtype,
