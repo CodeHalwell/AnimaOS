@@ -55,7 +55,7 @@ jobs:
       # Enable BuildKit advanced features (cache mounts, multi-platform).
       # Pinned SHA will be maintained by Dependabot on next weekly update.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aee5fc21bc4cd7e4e6b # v3.10.0
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
       # Log in to GHCR only on non-PR events so fork PRs never attempt to push.
       - name: Log in to GHCR
@@ -72,7 +72,7 @@ jobs:
       #   pull_request           → :pr-<number> (not pushed)
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbea8a987c2b64359f6c76e86a04 # v5.7.0
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ghcr.io/codehalwell/animaos/hosted
           tags: |

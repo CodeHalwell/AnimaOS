@@ -1305,6 +1305,7 @@ fn cmd_quota(args: &[String]) {
 
     match args.first().map(String::as_str) {
         Some("show") => {
+            println!("note: quota state is in-process only; this shows the demo tracker, not a running daemon");
             match args.get(1) {
                 Some(user_id) => {
                     // Single-user snapshot.
@@ -1411,6 +1412,7 @@ fn cmd_quota(args: &[String]) {
         }
         Some("reset") => match args.get(1) {
             Some(user_id) => {
+                println!("note: quota state is in-process only; this resets the demo tracker, not a running daemon");
                 tracker.reset(user_id);
                 println!("quota: reset usage windows for {user_id:?}");
                 // Emit an audit entry so the reset is traceable.

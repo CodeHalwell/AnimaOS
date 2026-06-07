@@ -419,39 +419,70 @@ impl UserQuotaTracker {
         // Check hourly request limit first (cheapest check — no addition needed).
         if hourly_reqs >= limits.requests_per_hour {
             usage.consecutive_violations += 1;
+            let retry_after_ns = usage
+                .hourly_requests
+                .front()
+                .map(|&ts| ts.saturating_add(HOUR_NS))
+                .unwrap_or_else(|| now_ns.saturating_add(HOUR_NS));
             return QuotaResult::Exceeded {
                 user_id: user_id.to_owned(),
                 reason: ExceededReason::HourlyRequestLimit {
                     used: hourly_reqs,
                     limit: limits.requests_per_hour,
                 },
-                retry_after_ns: now_ns + HOUR_NS,
+                retry_after_ns,
             };
         }
 
         // Check hourly token limit.
         if hourly_tokens.saturating_add(tokens) > limits.tokens_per_hour {
             usage.consecutive_violations += 1;
+            let mut accumulated = 0u64;
+            let mut retry_after_ns = now_ns.saturating_add(HOUR_NS);
+            for &(ts, t) in &usage.hourly_tokens {
+                accumulated = accumulated.saturating_add(t);
+                if hourly_tokens
+                    .saturating_sub(accumulated)
+                    .saturating_add(tokens)
+                    <= limits.tokens_per_hour
+                {
+                    retry_after_ns = ts.saturating_add(HOUR_NS);
+                    break;
+                }
+            }
             return QuotaResult::Exceeded {
                 user_id: user_id.to_owned(),
                 reason: ExceededReason::HourlyTokenLimit {
                     used: hourly_tokens,
                     limit: limits.tokens_per_hour,
                 },
-                retry_after_ns: now_ns + HOUR_NS,
+                retry_after_ns,
             };
         }
 
         // Check daily token limit.
         if daily_tokens.saturating_add(tokens) > limits.tokens_per_day {
             usage.consecutive_violations += 1;
+            let mut accumulated = 0u64;
+            let mut retry_after_ns = now_ns.saturating_add(DAY_NS);
+            for &(ts, t) in &usage.daily_tokens {
+                accumulated = accumulated.saturating_add(t);
+                if daily_tokens
+                    .saturating_sub(accumulated)
+                    .saturating_add(tokens)
+                    <= limits.tokens_per_day
+                {
+                    retry_after_ns = ts.saturating_add(DAY_NS);
+                    break;
+                }
+            }
             return QuotaResult::Exceeded {
                 user_id: user_id.to_owned(),
                 reason: ExceededReason::DailyTokenLimit {
                     used: daily_tokens,
                     limit: limits.tokens_per_day,
                 },
-                retry_after_ns: now_ns + DAY_NS,
+                retry_after_ns,
             };
         }
 
@@ -464,9 +495,13 @@ impl UserQuotaTracker {
         QuotaResult::Allowed {
             remaining_hourly_tokens: limits
                 .tokens_per_hour
-                .saturating_sub(hourly_tokens + tokens),
-            remaining_daily_tokens: limits.tokens_per_day.saturating_sub(daily_tokens + tokens),
-            remaining_hourly_requests: limits.requests_per_hour.saturating_sub(hourly_reqs + 1),
+                .saturating_sub(hourly_tokens.saturating_add(tokens)),
+            remaining_daily_tokens: limits
+                .tokens_per_day
+                .saturating_sub(daily_tokens.saturating_add(tokens)),
+            remaining_hourly_requests: limits
+                .requests_per_hour
+                .saturating_sub(hourly_reqs.saturating_add(1)),
         }
     }
 
@@ -749,7 +784,40 @@ mod tests {
                 ..
             } => {
                 assert_eq!(user_id, "telegram:42");
-                assert!(retry_after_ns > now);
+                // The oldest entry was consumed at `now`, so the precise retry
+                // time is exactly when that entry leaves the window.
+                assert_eq!(retry_after_ns, now + HOUR_NS);
+            }
+            _ => panic!("expected Exceeded"),
+        }
+    }
+
+    #[test]
+    fn precise_retry_after_calculation() {
+        let policy = QuotaPolicy {
+            unknown: TierLimits {
+                tokens_per_hour: 10,
+                tokens_per_day: 100,
+                requests_per_hour: 100,
+            },
+            ..QuotaPolicy::default()
+        };
+        let mut t = UserQuotaTracker::new(policy);
+        let t0 = now();
+        let t1 = t0 + 1_000;
+
+        // Consume 6 tokens at t0, then 4 tokens at t1 — window is now full.
+        t.check_and_consume("u:1", TrustTier::Unknown, 6, t0);
+        t.check_and_consume("u:1", TrustTier::Unknown, 4, t1);
+
+        // Requesting 5 tokens at t1+2000 exceeds the limit of 10.
+        // To fit 5 tokens we need to shed at least 5. The first entry (6 @ t0)
+        // frees 6, which is enough: 10 - 6 + 5 = 9 ≤ 10.
+        // So capacity becomes available exactly when that entry expires: t0 + HOUR_NS.
+        let r = t.check_and_consume("u:1", TrustTier::Unknown, 5, t1 + 2_000);
+        match r {
+            QuotaResult::Exceeded { retry_after_ns, .. } => {
+                assert_eq!(retry_after_ns, t0 + HOUR_NS);
             }
             _ => panic!("expected Exceeded"),
         }
