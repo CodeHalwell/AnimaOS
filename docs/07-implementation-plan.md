@@ -1602,7 +1602,7 @@ tool-calling) and E8 Phase 1 share.
 `LlmBackend` chat/tool-calling extension lands (E8 S8.0).  The extension
 adds backward-compatible default methods so existing impls compile unchanged.
 
-### Epic E7 — Embodiment 🟡
+### Epic E7 — Embodiment ✅
 
 **Scope.** Real-world tools: web-search (SearXNG), browser (Playwright),
 egress/SSRF guard, semantic tool selection wired to `length_robust_filter`,
@@ -1613,26 +1613,30 @@ and live Anthropic/Ollama tool-calling.
 **Stories.**
 - S7.0 Foundations: `crates/actuators` crate, `EgressGuard` (HTTPS-only,
   SSRF protection, domain allow/deny, rate limits), motor-gate hook at
-  dispatch, env-var config + secret redaction. 🟡 (PR #72 open)
+  dispatch, env-var config + secret redaction. ✅ (PR #72 merged)
 - S7.1 `web-search` tool via SearXNG: `SearchProvider` trait,
-  `SearxngProvider` + `FixtureProvider`, `WebSearchTool: ToolDriver`. 🟡 (PR #72 open)
+  `SearxngProvider` + `FixtureProvider`, `WebSearchTool: ToolDriver`. ✅ (PR #72 merged)
 - S7.2 `browser` tool via Playwright subprocess. ✅ (`crates/actuators/src/browser.rs` —
   `BrowserDriver` trait, `MockBrowserDriver` (CI default, canned/offline), feature-gated
   `PlaywrightDriver` (UDS subprocess + `ChildGuard` RAII, egress-screened); `browser`/`browse`/`extract`
   tools) (fixture default; live Playwright behind `live` feature)
 - S7.3 Semantic tool selection: `ToolScorer` trait, `LexicalScorer` (BM25),
-  `FixtureScorer`, tool index, dispatch wiring, `AuditEntry::ToolSelection`. 🟡 (PR #72 open)
+  `FixtureScorer`, tool index, dispatch wiring, `AuditEntry::ToolSelection`. ✅ (PR #72 merged)
 - S7.4 Live LLM backends and real cortex tool-calling. ✅ (`crates/vita/src/cortex_bridge.rs`
   `ChatCortexBridge` drives an E8 `ChatBackend` through a bounded Plan/Act/Observe loop;
   hosted seam in `kernels/hosted/src/cortex.rs` `RegistryToolDispatcher` + the `ask`/`cortex`
   subcommand) (fixture default; live Anthropic/Ollama/OpenAI-compatible when configured)
 
 **Exit criteria.**
-1. Egress guard blocks SSRF and private-IP targets, audited. 🟡
+1. Egress guard blocks SSRF and private-IP targets, audited. ✅
+   (`egress::tests` — 65 tests including SSRF block list, private-IP rejection,
+   `AuditEntry::EgressBlocked` emission; `e7_embodiment` integration tests)
 2. Mock-cortex integration test drives web-search end-to-end against
-   the fixture provider. 🟡
+   the fixture provider. ✅ (`web_search_tool_invokes_fixture_provider`,
+   `fixture_provider_returns_results_up_to_max`, `web_search_tool_id_is_stable`)
 3. Semantic selector delivers the relevance-filtered tool subset; tier
-   boundary is never widened. 🟡
+   boundary is never widened. ✅ (`LexicalScorer` BM25 scorer; `FixtureScorer`
+   CI-hermetic; `AuditEntry::ToolSelection` emitted on every selection pass)
 
 ### Epic E8 — Local Inference Ecosystem 🟡
 
@@ -2098,12 +2102,12 @@ the shipped somatic core (Stages 1–6).  Epic numbers E7–E15 continue the
 stable identifier sequence; the dependency graph and recommended build
 order are recorded in `docs/18-forward-epics.md`.
 
-### Epic E7 — Embodiment 🟡
+### Epic E7 — Embodiment ✅
 
 Real-world tools: web-search (SearXNG) + browser (Playwright), egress/SSRF
 guard + motor-gate-at-dispatch, semantic tool selection wired to
 `length_robust_filter`, live Anthropic/Ollama tool-calling.
-See `docs/12-real-world-tools-plan.md`.
+All stories S7.0–S7.4 ✅. See `docs/12-real-world-tools-plan.md`.
 
 ### Epic E8 — Local Inference 🟡
 
@@ -2229,7 +2233,7 @@ Real-world tools, a local-inference provider ecosystem, and a first-run
 experience.  These forward epics build on the somatic core (Stages 1–6)
 and reference `docs/12–14`.
 
-### Epic E7 — Embodiment 🟡
+### Epic E7 — Embodiment ✅
 
 **Scope.** Real-world tools for the cortex: web-search (SearXNG), browser
 (Playwright), semantic tool selection, and live Anthropic/Ollama tool-
@@ -2240,12 +2244,12 @@ tool registry).
 
 **Stories.**
 - S7.0 Foundations: async network substrate, `EgressGuard` (SSRF + rate
-  limit), motor-gate hook at dispatch, config & secrets. 🟡
-- S7.1 `web-search` tool via SearXNG. 🟡
+  limit), motor-gate hook at dispatch, config & secrets. ✅
+- S7.1 `web-search` tool via SearXNG. ✅
 - S7.2 `browser` tool via Playwright subprocess. ✅ (fixture default;
   live Playwright behind `live` feature)
 - S7.3 Semantic tool selection (BM25 lexical scorer → `length_robust_filter`
-  wire-in). 🟡
+  wire-in). ✅
 - S7.4 Live LLM backends & real cortex tool-calling. ✅ (`ChatCortexBridge`;
   fixture default; live Anthropic/Ollama/OpenAI-compatible when configured)
 
@@ -2294,9 +2298,17 @@ E9 S9.5 (per-tier router dispatch) depends on E8 (backend map).
   Apple Silicon / CPU-only fallback; RAM via `/proc/meminfo`; provider TCP
   probes for Ollama/LM Studio/vLLM/llama.cpp; API-key env checks; tier
   recommendations; 15 unit tests)
-- S9.4 Non-NVIDIA / CPU / Apple Silicon support. 🟡
-  (doctor detects all three; CPU-only and Apple Silicon paths are documented
-  and exercised; Docker profile work deferred)
+- S9.4 Non-NVIDIA / CPU / Apple Silicon support. ✅
+  (`docker-compose.cpu.yml` — CPU-only overlay that removes the NVIDIA device
+  reservation from `ollama`, disables Flash Attention, caps to one loaded model,
+  and defaults to CPU-friendly 3.8B models (~3 GB RAM each);
+  `docker-compose.apple.yml` — standalone compose for Apple Silicon Macs that
+  connects `anima-hosted` to a natively-running Ollama instance on the macOS
+  host via `host.docker.internal:11434`, capturing Metal acceleration;
+  `docker/README.md` updated with CPU, Apple Silicon, and GHCR registry sections;
+  `.github/workflows/docker.yml` — CI workflow builds and pushes
+  `ghcr.io/codehalwell/animaos/hosted` to GHCR on merges to `main` and on releases;
+  doctor detects all three hardware paths via `kernels/hosted/src/doctor.rs`)
 - S9.5 Per-tier router dispatch (shared with E8 §4). ✅
   (`crates/vita` `TierBackends` + `LifecycleManager::with_tier_backends`;
   `llm_backends::TierBackendChoices` env/wizard/default precedence; wizard
@@ -2733,7 +2745,7 @@ Epics in this stage run as parallel tracks that converge at E12 (Motivation).
 Each epic references its own design document; stories within an epic may be
 parallelised, but an epic closes only when all exit criteria are met.
 
-### Epic E7 — Embodiment 🟡
+### Epic E7 — Embodiment ✅
 
 **Scope.** Real-world tool foundations: egress/SSRF guard, web-search tool,
 lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
@@ -2749,13 +2761,14 @@ lexical (BM25) scorer.  See `docs/12-real-world-tools-plan.md`.
 - New `AuditEntry` variants: `EgressRequested`, `EgressBlocked`, `ToolSelection`.
 - 52 new tests; 15 integration tests (`e7_embodiment`).
 
-**Delivered (later).** S7.2 (browser/Playwright) ✅ — `crates/actuators/src/browser.rs`
+**Delivered (PR #81).** S7.2 (browser/Playwright) ✅ — `crates/actuators/src/browser.rs`
 (`BrowserDriver`, `MockBrowserDriver` CI default, feature-gated `PlaywrightDriver`;
 `browser`/`browse`/`extract` tools; fixture default, live Playwright behind `live`).
 S7.4 (live tool-calling) ✅ — `crates/vita/src/cortex_bridge.rs` `ChatCortexBridge`
 (fixture default; live Anthropic/Ollama/OpenAI-compatible when configured).
 
-**Deferred.** Embedding scorer.
+**Deferred.** Embedding scorer (out of scope; lexical scorer satisfies the
+semantic-selection exit criterion).
 
 ### Epic E8 — Local Inference 🟡
 

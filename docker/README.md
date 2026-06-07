@@ -1,8 +1,18 @@
 # AnimaOS — Docker deployment
 
 Containerised stack for running AnimaOS against local GPU inference (and,
-optionally, Unsloth-based sleep-phase fine-tuning). Designed for a single
-workstation with an NVIDIA GPU; developed against an RTX 3090.
+optionally, Unsloth-based sleep-phase fine-tuning). Three compose files cover
+the main deployment targets:
+
+| Compose file | Target | GPU |
+|---|---|---|
+| `docker-compose.yml` | NVIDIA GPU (Linux + WSL 2) | CUDA via nvidia-container-toolkit |
+| `docker-compose.cpu.yml` *(overlay)* | CPU-only Linux | none |
+| `docker-compose.apple.yml` *(standalone)* | Apple Silicon Mac | Metal (via native Ollama) |
+
+The default stack is designed for a single workstation with an NVIDIA GPU
+(developed against an RTX 3090). For CPU-only or Apple Silicon setups, see
+the sections below.
 
 ## Topology
 
@@ -141,17 +151,90 @@ Persistent state:
 The bare-metal install path (no containers) is documented in
 [`../docs/10-deployment-pathways.md`](../docs/10-deployment-pathways.md).
 
+## CPU-only Linux
+
+Use the `docker-compose.cpu.yml` overlay to run without an NVIDIA GPU:
+
+```sh
+# First time — brings up ollama (CPU mode) + hosted agent.
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up --build
+
+# One-shot subcommand:
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml run --rm hosted why
+```
+
+The overlay:
+- Removes the NVIDIA device reservation from the `ollama` service.
+- Disables Flash Attention (requires CUDA) and caps Ollama to one loaded model.
+- Defaults to CPU-friendly 3.8B models (~3 GB VRAM-equivalent RAM each).
+
+Set `ANIMA_INSTINCT_MODEL` / `ANIMA_WORKHORSE_MODEL` / `ANIMA_OLLAMA_MODEL` in
+`.env` to swap models or quants.  On hosts with < 8 GB RAM, set
+`ANIMA_BACKEND=mock` or supply an API key (`ANTHROPIC_API_KEY`) and set
+`ANIMA_BACKEND=anthropic` to bypass local inference entirely.
+
+## Apple Silicon (macOS)
+
+Docker Desktop on macOS does not expose Metal to containers.  Run Ollama
+natively on the host (full Metal acceleration) and use the standalone
+`docker-compose.apple.yml` to run only the agent in Docker:
+
+```sh
+# 1. Install and start Ollama natively.
+brew install ollama
+ollama serve                                           # stays running in background
+
+# 2. Pull the model you want (any GGUF from Hugging Face via the hf.co resolver).
+ollama pull hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M
+
+# 3. Build and start the agent container.
+docker compose -f docker-compose.apple.yml up --build
+
+# 4. Open the console.
+open http://127.0.0.1:8088/
+```
+
+To use a different model, set `ANIMA_OLLAMA_MODEL` before running compose:
+
+```sh
+ANIMA_OLLAMA_MODEL=llama3:8b docker compose -f docker-compose.apple.yml up --build
+```
+
+## Pre-built images (GHCR)
+
+The hosted agent image is built and pushed to GHCR by the `docker.yml` CI
+workflow on every merge to `main` and on each GitHub Release:
+
+```sh
+# Latest main-branch build:
+docker pull ghcr.io/codehalwell/animaos/hosted:main
+
+# Specific release:
+docker pull ghcr.io/codehalwell/animaos/hosted:v1.0.0
+```
+
+Replace the `build:` block in any compose file with `image: ghcr.io/codehalwell/animaos/hosted:<tag>`
+to skip the local build step.
+
+The trainer image is **not** built in CI (10–12 GB; GPU-dependent).  Build it
+locally when you need sleep-phase fine-tuning:
+
+```sh
+docker build -f docker/Dockerfile.trainer -t animaos/trainer:dev .
+```
+
 ## Known limitations / follow-ups
 
 1. **Router wiring** — the three-tier router doesn't yet dispatch to
-   tier-specific backends. The current spike uses one backend per
-   `anima-hosted` invocation.
+   tier-specific backends per invocation; the `TierBackends` map exists
+   (`crates/vita`) but the compose stack still binds one Ollama model.
+   Setting different `ANIMA_OLLAMA_MODEL` values per service is the
+   current workaround until the router wiring lands.
 2. **Sleep-phase training loop** — `trainer/check.py` proves Unsloth +
-   GPU + bitsandbytes import cleanly, but the actual replay-buffer →
-   QLoRA-step → GGUF-export → Ollama-reload cycle is not yet written.
+   GPU + bitsandbytes import cleanly, but the replay-buffer →
+   QLoRA-step → GGUF-export → Ollama-reload cycle is not yet written
+   (tracked in E8 S8.4).
 3. **Streaming cancellation** — the Ollama backend checks the
    cancellation token between received lines, not mid-line. A truly
    instantaneous cancel needs an HTTP client that supports request abort
    (currently using `ureq`).
-4. **CI build** — no GitHub Actions step yet builds and pushes the
-   `animaos/hosted` and `animaos/trainer` images to GHCR.
