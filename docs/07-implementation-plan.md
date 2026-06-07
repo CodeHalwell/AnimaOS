@@ -3177,3 +3177,84 @@ to operator attention, mirroring the defence layer's escalation pattern (E5.6).
 8. `cargo test --workspace` green; 23 new quota tests + all prior tests pass. ✅
 9. `cargo clippy --workspace -- -D warnings` clean. ✅
 10. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 10 — Webhook Notification System
+
+### Epic E19 — Webhook Notification System ✅
+
+**Scope.** Operators register HTTP endpoints that receive signed JSON payloads
+whenever critical audit events fire (quota violations, defence vetoes, cortex
+faults, user events, etc.).  All delivery runs in **fixture mode by default**
+— no real HTTP calls in CI; live delivery is opt-in.  The new `crates/webhooks`
+crate is a zero-dependency library (only `serde` / `serde_json`) that can be
+reused from any future channel or adapter without pulling in vita's heavy surface.
+
+**Dependencies.** E17 (`TrustTier` — trust tier informs which events matter
+per-user), E18 (`QuotaExceeded` / `QuotaEscalated` — first-class webhook
+trigger events), EX.2 (audit log for delivery recording).
+
+**Stories.**
+- S19.1 `EventCategory` and `EventFilter`: six event buckets (`QuotaEvents`,
+  `DefenceEvents`, `CortexEvents`, `UserEvents`, `SleepEvents`, `TaskEvents`)
+  plus `All`; `EventFilter::matches` drives endpoint selection. ✅
+  (`crates/webhooks/src/lib.rs` — `EventCategory`, `EventFilter`, `matches`)
+- S19.2 `WebhookEndpoint` with builder API: `id`, `url`, `filter`, `secret`
+  (signing key), `created_at_ns`, `enabled`; `filter_summary()` for audit
+  display; `with_secret` / `with_filter` / `with_created_at` builders. ✅
+  (`crates/webhooks/src/lib.rs` — `WebhookEndpoint`)
+- S19.3 `WebhookRegistry` with atomic JSON persistence: `in_memory()` for tests,
+  `open(path)` for file-backed storage; `register` / `remove` / `get` / `list`
+  (sorted by `created_at_ns`) / `endpoints_for_category` (enabled + filter match);
+  `flush()` writes via `.tmp`-then-rename. ✅
+  (`crates/webhooks/src/lib.rs` — `WebhookRegistry`, `RegistryError`)
+- S19.4 `WebhookPayload` and delivery pipeline: `WebhookPayload` carries
+  `webhook_id`, `event_kind`, `agent_id`, `timestamp_ns`, `data`; `WebhookDispatcher`
+  dispatches in fixture mode (always `Delivered { 200 }`) or live mode (stub);
+  `sign_payload` computes a deterministic hex signature over the JSON body using
+  the endpoint's secret. ✅
+  (`crates/webhooks/src/lib.rs` — `WebhookPayload`, `DeliveryRecord`, `DeliveryStatus`,
+  `WebhookDispatcher`)
+- S19.5 Audit entries: `WebhookRegistered`, `WebhookRemoved`, `WebhookDelivered`,
+  `WebhookFailed` — all rendered by `print_audit` in the hosted kernel with a
+  🔔 prefix. ✅
+  (`crates/vita/src/audit.rs` — four new variants;
+  `kernels/hosted/src/main.rs` — `print_audit` arms)
+- S19.6 CLI — `anima webhook add <url> [--filter <cat,...>] [--secret <s>]`,
+  `anima webhook list`, `anima webhook remove <id>`, `anima webhook test <id>`.
+  `test` dispatches a fixture ping payload and prints the `DeliveryRecord`. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_webhook()`, wired via `anima-hosted webhook …`)
+
+**New crate: `crates/webhooks`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `EventFilter::all()` matches every `EventCategory`; a specific filter matches
+   only its own categories. ✅
+   (`event_filter_all_matches_any_category`, `event_filter_specific_matches_own_category`,
+   `event_filter_specific_does_not_match_other_category`, `event_filter_default_is_all`)
+2. `WebhookEndpoint` builder methods set fields correctly; `filter_summary`
+   returns the expected comma-joined string. ✅
+   (`webhook_endpoint_new_has_defaults`, `webhook_endpoint_with_secret_sets_secret`,
+   `webhook_endpoint_with_filter_sets_filter`, `webhook_endpoint_filter_summary_all`,
+   `webhook_endpoint_filter_summary_specific`)
+3. `WebhookRegistry` CRUD operations and persistence round-trip correctly;
+   disabled endpoints are excluded from `endpoints_for_category`. ✅
+   (`registry_in_memory_starts_empty`, `registry_register_adds_endpoint`,
+   `registry_register_rejects_duplicate_id`, `registry_remove_returns_endpoint`,
+   `registry_remove_returns_not_found_for_missing`, `registry_list_returns_sorted_by_created_at`,
+   `registry_endpoints_for_category_filters_by_enabled_and_filter`,
+   `registry_endpoints_for_category_excludes_disabled`,
+   `registry_flush_and_reload_round_trip`, `registry_open_creates_empty_when_file_absent`)
+4. Fixture-mode dispatcher always returns `Delivered { 200 }`; live-mode stub
+   returns `Failed`. ✅
+   (`dispatcher_fixture_mode_delivers_200`, `dispatcher_fixture_mode_records_correct_attempt_number`,
+   `dispatcher_delivery_record_has_correct_webhook_id`)
+5. `WebhookPayload` round-trips through JSON. ✅
+   (`webhook_payload_round_trips_through_json`)
+6. `cargo test --workspace` green; 24 new webhook tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

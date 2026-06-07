@@ -21,6 +21,7 @@ members = [
   "crates/finetune",
   "crates/users",
   "crates/quota",
+  "crates/webhooks",
   "kernels/hosted",
   "llm-backends",
 ]

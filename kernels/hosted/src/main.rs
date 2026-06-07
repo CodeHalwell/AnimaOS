@@ -928,6 +928,50 @@ fn print_audit(manager: &LifecycleManager) {
                      violations={violations_in_window} threshold={threshold}"
                 );
             }
+            // ── E19 — Webhook Notification System ─────────────────────────────
+            AuditEntry::WebhookRegistered {
+                agent_id,
+                webhook_id,
+                url,
+                filter_summary,
+            } => {
+                println!(
+                    "  🔔 webhook_registered agent={agent_id} id={webhook_id} \
+                     url={url:?} filter={filter_summary:?}"
+                );
+            }
+            AuditEntry::WebhookRemoved {
+                agent_id,
+                webhook_id,
+            } => {
+                println!(
+                    "  🔔 webhook_removed agent={agent_id} id={webhook_id}"
+                );
+            }
+            AuditEntry::WebhookDelivered {
+                agent_id,
+                webhook_id,
+                event_kind,
+                attempt,
+                status_code,
+            } => {
+                println!(
+                    "  🔔 webhook_delivered agent={agent_id} id={webhook_id} \
+                     event={event_kind} attempt={attempt} status={status_code}"
+                );
+            }
+            AuditEntry::WebhookFailed {
+                agent_id,
+                webhook_id,
+                event_kind,
+                attempt,
+                error,
+            } => {
+                println!(
+                    "  🔔 webhook_failed agent={agent_id} id={webhook_id} \
+                     event={event_kind} attempt={attempt} error={error:?}"
+                );
+            }
         }
     }
 }
@@ -2839,6 +2883,267 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+// ── `anima webhook` subcommand (E19) ─────────────────────────────────────────
+
+/// Implements the `anima webhook` subcommands for managing webhook endpoints.
+///
+/// ```text
+/// anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]
+/// anima-hosted webhook list
+/// anima-hosted webhook remove <id>
+/// anima-hosted webhook test <id>
+/// ```
+fn cmd_webhook(args: &[String]) {
+    use webhooks::{
+        EventCategory, EventFilter, WebhookDispatcher, WebhookEndpoint, WebhookPayload,
+        WebhookRegistry,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned()))
+        .join(".anima")
+        .join(AGENT_ID);
+    let _ = std::fs::create_dir_all(&dir);
+    let registry_path = dir.join("webhooks.json");
+
+    let mut registry = WebhookRegistry::open(&registry_path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open webhook registry ({e}); using in-memory fallback");
+        WebhookRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("add") => {
+            let url = match args.get(1) {
+                Some(u) => u.clone(),
+                None => {
+                    eprintln!(
+                        "usage: anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]"
+                    );
+                    return;
+                }
+            };
+
+            let mut secret = String::new();
+            let mut filter = EventFilter::all();
+
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--secret" => {
+                        if let Some(s) = args.get(i + 1) {
+                            secret = s.clone();
+                            i += 2;
+                        } else {
+                            eprintln!("webhook add: --secret requires a value");
+                            return;
+                        }
+                    }
+                    "--filter" => {
+                        if let Some(cats_str) = args.get(i + 1) {
+                            let mut cats = Vec::new();
+                            for cat in cats_str.split(',') {
+                                let cat = match cat.trim() {
+                                    "QuotaEvents" => EventCategory::QuotaEvents,
+                                    "DefenceEvents" => EventCategory::DefenceEvents,
+                                    "CortexEvents" => EventCategory::CortexEvents,
+                                    "UserEvents" => EventCategory::UserEvents,
+                                    "SleepEvents" => EventCategory::SleepEvents,
+                                    "TaskEvents" => EventCategory::TaskEvents,
+                                    "All" => EventCategory::All,
+                                    other => {
+                                        eprintln!("webhook add: unknown category {other:?}");
+                                        return;
+                                    }
+                                };
+                                cats.push(cat);
+                            }
+                            filter = EventFilter { categories: cats };
+                            i += 2;
+                        } else {
+                            eprintln!("webhook add: --filter requires a value");
+                            return;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+
+            let id = format!("wh-{}", &format!("{:016x}", now_ns)[..12]);
+            let mut ep = WebhookEndpoint::new(id.clone(), url.clone())
+                .with_filter(filter)
+                .with_secret(secret);
+            ep.created_at_ns = now_ns;
+
+            let filter_summary = ep.filter_summary();
+            match registry.register(ep) {
+                Ok(()) => {
+                    log.push(AuditEntry::WebhookRegistered {
+                        agent_id: AGENT_ID.to_owned(),
+                        webhook_id: id.clone(),
+                        url: url.clone(),
+                        filter_summary: filter_summary.clone(),
+                    });
+                    println!("webhook: registered id={id} url={url:?} filter={filter_summary:?}");
+                    if let Err(e) = registry.flush() {
+                        eprintln!("webhook: flush failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("list") => {
+            let list = registry.list();
+            if list.is_empty() {
+                println!("(no webhook endpoints registered)");
+            } else {
+                println!("{:>16}  {:>7}  {:>40}  filter", "id", "enabled", "url");
+                println!("{}", "-".repeat(80));
+                for ep in list {
+                    println!(
+                        "{:>16}  {:>7}  {:>40}  {}",
+                        ep.id,
+                        ep.enabled,
+                        ep.url,
+                        ep.filter_summary()
+                    );
+                }
+            }
+        }
+        Some("remove") => match args.get(1) {
+            Some(id) => match registry.remove(id) {
+                Ok(ep) => {
+                    log.push(AuditEntry::WebhookRemoved {
+                        agent_id: AGENT_ID.to_owned(),
+                        webhook_id: ep.id.clone(),
+                    });
+                    println!("webhook: removed id={}", ep.id);
+                    if let Err(e) = registry.flush() {
+                        eprintln!("webhook: flush failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            },
+            None => eprintln!("usage: anima-hosted webhook remove <id>"),
+        },
+        Some("test") => match args.get(1) {
+            Some(id) => match registry.get(id) {
+                Some(ep) => {
+                    let dispatcher = WebhookDispatcher::new();
+                    let payload = WebhookPayload {
+                        webhook_id: ep.id.clone(),
+                        event_kind: "TestPing".to_owned(),
+                        agent_id: AGENT_ID.to_owned(),
+                        timestamp_ns: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0),
+                        data: serde_json::json!({ "message": "test ping from anima-hosted" }),
+                    };
+                    let record = dispatcher.dispatch(ep, &payload, 1);
+                    match &record.status {
+                        webhooks::DeliveryStatus::Delivered { status_code } => {
+                            log.push(AuditEntry::WebhookDelivered {
+                                agent_id: AGENT_ID.to_owned(),
+                                webhook_id: record.webhook_id.clone(),
+                                event_kind: record.event_kind.clone(),
+                                attempt: record.attempt,
+                                status_code: *status_code,
+                            });
+                            println!(
+                                "webhook test: delivered id={} status={status_code}",
+                                record.webhook_id
+                            );
+                        }
+                        webhooks::DeliveryStatus::Failed { error } => {
+                            log.push(AuditEntry::WebhookFailed {
+                                agent_id: AGENT_ID.to_owned(),
+                                webhook_id: record.webhook_id.clone(),
+                                event_kind: record.event_kind.clone(),
+                                attempt: record.attempt,
+                                error: error.clone(),
+                            });
+                            println!(
+                                "webhook test: failed id={} error={error:?}",
+                                record.webhook_id
+                            );
+                        }
+                        other => {
+                            println!("webhook test: status={other:?}");
+                        }
+                    }
+                }
+                None => eprintln!("webhook: no endpoint with id={id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted webhook test <id>"),
+        },
+        _ => {
+            eprintln!("usage: anima-hosted webhook add <url> [--filter <cat,...>] [--secret <s>]");
+            eprintln!("       anima-hosted webhook list");
+            eprintln!("       anima-hosted webhook remove <id>");
+            eprintln!("       anima-hosted webhook test <id>");
+        }
+    }
+
+    if !log.is_empty() {
+        println!("--- audit trail ---");
+        for entry in log.entries() {
+            match entry {
+                AuditEntry::WebhookRegistered {
+                    agent_id,
+                    webhook_id,
+                    url,
+                    filter_summary,
+                } => {
+                    println!(
+                        "  🔔 webhook_registered agent={agent_id} id={webhook_id} \
+                         url={url:?} filter={filter_summary:?}"
+                    );
+                }
+                AuditEntry::WebhookRemoved {
+                    agent_id,
+                    webhook_id,
+                } => {
+                    println!("  🔔 webhook_removed agent={agent_id} id={webhook_id}");
+                }
+                AuditEntry::WebhookDelivered {
+                    agent_id,
+                    webhook_id,
+                    event_kind,
+                    attempt,
+                    status_code,
+                } => {
+                    println!(
+                        "  🔔 webhook_delivered agent={agent_id} id={webhook_id} \
+                         event={event_kind} attempt={attempt} status={status_code}"
+                    );
+                }
+                AuditEntry::WebhookFailed {
+                    agent_id,
+                    webhook_id,
+                    event_kind,
+                    attempt,
+                    error,
+                } => {
+                    println!(
+                        "  🔔 webhook_failed agent={agent_id} id={webhook_id} \
+                         event={event_kind} attempt={attempt} error={error:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2886,6 +3191,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("quota") {
         cmd_quota(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("webhook") {
+        cmd_webhook(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

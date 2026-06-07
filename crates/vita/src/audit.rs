@@ -1139,6 +1139,36 @@ pub enum AuditEntry {
         threshold: u32,
     },
 
+    // ── E19 — Webhook Notification System ────────────────────────────────────
+    /// A new webhook endpoint was registered.
+    WebhookRegistered {
+        agent_id: String,
+        webhook_id: String,
+        url: String,
+        filter_summary: String,
+    },
+    /// A webhook endpoint was removed.
+    WebhookRemoved {
+        agent_id: String,
+        webhook_id: String,
+    },
+    /// A webhook delivery succeeded.
+    WebhookDelivered {
+        agent_id: String,
+        webhook_id: String,
+        event_kind: String,
+        attempt: u32,
+        status_code: u16,
+    },
+    /// A webhook delivery attempt failed.
+    WebhookFailed {
+        agent_id: String,
+        webhook_id: String,
+        event_kind: String,
+        attempt: u32,
+        error: String,
+    },
+
     // ── E16 — Multi-Agent Coordination (A2A Substrate) ────────────────────────
     /// A task was delegated to a named sub-agent via the A2A bus (E16, S16.3).
     ///
