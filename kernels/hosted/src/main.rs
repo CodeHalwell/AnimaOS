@@ -794,6 +794,41 @@ fn print_audit(manager: &LifecycleManager) {
                      decision={decision} reason={reason:?}"
                 );
             }
+            // E17 — Trust, Human-Identity & Privacy
+            AuditEntry::UserProfileCreated {
+                agent_id,
+                user_id,
+                display_name,
+                channel,
+            } => {
+                println!(
+                    "  👤 user_profile_created agent={agent_id} user={user_id} \
+                     name={display_name:?} channel={channel}"
+                );
+            }
+            AuditEntry::UserTrustUpdated {
+                agent_id,
+                user_id,
+                old_tier,
+                new_tier,
+            } => {
+                println!(
+                    "  🔐 user_trust_updated agent={agent_id} user={user_id} \
+                     {old_tier} → {new_tier}"
+                );
+            }
+            AuditEntry::UserConsentUpdated {
+                agent_id,
+                user_id,
+                category,
+                granted,
+            } => {
+                let mark = if *granted { "✅" } else { "❌" };
+                println!(
+                    "  {mark} user_consent_updated agent={agent_id} user={user_id} \
+                     category={category} granted={granted}"
+                );
+            }
         }
     }
 }
@@ -868,6 +903,241 @@ fn cmd_identity(args: &[String]) {
         _ => {
             eprintln!("usage: anima-hosted identity show [<key>]");
             eprintln!("       anima-hosted identity set <key> <value>");
+        }
+    }
+}
+
+// ── `anima users` subcommand (E17) ───────────────────────────────────────────
+
+/// Prints the E17-relevant entries from an in-process audit log.
+fn print_user_audit(log: &AuditLog) {
+    println!("--- audit trail ---");
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::UserProfileCreated {
+                agent_id,
+                user_id,
+                display_name,
+                channel,
+            } => {
+                println!(
+                    "  👤 user_profile_created agent={agent_id} user={user_id} \
+                     name={display_name:?} channel={channel}"
+                );
+            }
+            AuditEntry::UserTrustUpdated {
+                agent_id,
+                user_id,
+                old_tier,
+                new_tier,
+            } => {
+                println!(
+                    "  🔐 user_trust_updated agent={agent_id} user={user_id} \
+                     {old_tier} → {new_tier}"
+                );
+            }
+            AuditEntry::UserConsentUpdated {
+                agent_id,
+                user_id,
+                category,
+                granted,
+            } => {
+                let mark = if *granted { "✅" } else { "❌" };
+                println!(
+                    "  {mark} user_consent_updated agent={agent_id} user={user_id} \
+                     category={category}"
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("---");
+}
+
+/// Implements the `anima users` subcommands for managing per-user profiles.
+///
+/// ```text
+/// anima-hosted users list
+/// anima-hosted users show <user_id>
+/// anima-hosted users trust <user_id> <tier>
+/// anima-hosted users consent <user_id> <category> grant|revoke
+/// ```
+fn cmd_users(args: &[String]) {
+    use std::str::FromStr;
+    use users::{DataCategory, TrustTier, UserProfile, UserRegistry};
+
+    const AGENT_ID: &str = "anima";
+
+    let path = UserRegistry::default_path(AGENT_ID);
+    let mut registry = UserRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        UserRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            if registry.is_empty() {
+                println!("(no users registered)");
+            } else {
+                println!("{:>20}  {:>10}  display_name", "user_id", "trust");
+                println!("{}", "-".repeat(50));
+                let mut entries: Vec<_> = registry.iter().collect();
+                entries.sort_by_key(|(id, _)| *id);
+                for (id, rec) in entries {
+                    println!(
+                        "{:>20}  {:>10}  {}",
+                        id,
+                        rec.profile.trust_tier.as_str(),
+                        rec.profile.display_name
+                    );
+                }
+            }
+        }
+        Some("show") => match args.get(1) {
+            Some(user_id) => match registry.get(user_id) {
+                Some(rec) => {
+                    println!("user_id      : {}", rec.profile.user_id);
+                    println!("display_name : {}", rec.profile.display_name);
+                    println!("channel      : {}", rec.profile.channel);
+                    println!("trust_tier   : {}", rec.profile.trust_tier);
+                    println!("created_at   : {}ns", rec.profile.created_at_ns);
+                    println!("last_seen    : {}ns", rec.profile.last_seen_ns);
+                    if rec.profile.facts.is_empty() {
+                        println!("facts        : (none)");
+                    } else {
+                        println!("facts:");
+                        let mut facts: Vec<_> = rec.profile.facts.iter().collect();
+                        facts.sort_by_key(|(k, _)| *k);
+                        for (k, v) in facts {
+                            println!("  {k} = {v:?}");
+                        }
+                    }
+                    let consented: Vec<_> = DataCategory::all()
+                        .iter()
+                        .filter(|c| rec.consent.is_consented(**c, 0))
+                        .map(|c| c.as_str())
+                        .collect();
+                    if consented.is_empty() {
+                        println!("consent      : (none)");
+                    } else {
+                        println!("consent      : {}", consented.join(", "));
+                    }
+                }
+                None => eprintln!("users: no user with id={user_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted users show <user_id>"),
+        },
+        Some("trust") => match (args.get(1), args.get(2)) {
+            (Some(user_id), Some(tier_str)) => match TrustTier::from_str(tier_str) {
+                Ok(tier) => match registry.set_trust(user_id, tier, 0) {
+                    Ok((old, new)) => {
+                        log.push(AuditEntry::UserTrustUpdated {
+                            agent_id: AGENT_ID.to_owned(),
+                            user_id: user_id.clone(),
+                            old_tier: old.as_str().to_owned(),
+                            new_tier: new.as_str().to_owned(),
+                        });
+                        println!(
+                            "users: updated trust for {user_id:?}: \
+                                         {old} → {new}"
+                        );
+                        if let Err(e) = registry.flush() {
+                            eprintln!("users: flush failed: {e}");
+                        }
+                        print_user_audit(&log);
+                    }
+                    Err(e) => eprintln!("users: {e}"),
+                },
+                Err(e) => eprintln!("users: invalid trust tier: {e}"),
+            },
+            _ => eprintln!(
+                "usage: anima-hosted users trust <user_id> \
+                     unknown|verified|trusted|operator"
+            ),
+        },
+        Some("consent") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(user_id), Some(cat_str), Some(action)) => match DataCategory::from_str(cat_str) {
+                Ok(category) => {
+                    let granted = match action.as_str() {
+                        "grant" => true,
+                        "revoke" => false,
+                        other => {
+                            eprintln!("users: expected 'grant' or 'revoke', got {other:?}");
+                            return;
+                        }
+                    };
+                    match registry.get_mut(user_id) {
+                        Some(rec) => {
+                            rec.consent.set(category, granted, 0);
+                            log.push(AuditEntry::UserConsentUpdated {
+                                agent_id: AGENT_ID.to_owned(),
+                                user_id: user_id.clone(),
+                                category: category.as_str().to_owned(),
+                                granted,
+                            });
+                            let verb = if granted { "granted" } else { "revoked" };
+                            println!(
+                                "users: consent {verb} for {user_id:?} \
+                                         category={cat_str}"
+                            );
+                            if let Err(e) = registry.flush() {
+                                eprintln!("users: flush failed: {e}");
+                            }
+                            print_user_audit(&log);
+                        }
+                        None => eprintln!("users: no user with id={user_id:?}"),
+                    }
+                }
+                Err(e) => eprintln!("users: invalid category: {e}"),
+            },
+            _ => eprintln!(
+                "usage: anima-hosted users consent <user_id> \
+                     episodic_memory|identity_facts|usage_stats|knowledge_corpus \
+                     grant|revoke"
+            ),
+        },
+        Some("register") => {
+            // Convenience helper: manually register a user (useful for testing).
+            match (args.get(1), args.get(2), args.get(3)) {
+                (Some(user_id), Some(display_name), Some(channel)) => {
+                    let profile =
+                        UserProfile::new(user_id.clone(), display_name.clone(), channel.clone(), 0);
+                    match registry.register(profile) {
+                        Ok(()) => {
+                            log.push(AuditEntry::UserProfileCreated {
+                                agent_id: AGENT_ID.to_owned(),
+                                user_id: user_id.clone(),
+                                display_name: display_name.clone(),
+                                channel: channel.clone(),
+                            });
+                            println!("users: registered {user_id:?}");
+                            if let Err(e) = registry.flush() {
+                                eprintln!("users: flush failed: {e}");
+                            }
+                            print_user_audit(&log);
+                        }
+                        Err(e) => eprintln!("users: {e}"),
+                    }
+                }
+                _ => eprintln!(
+                    "usage: anima-hosted users register <user_id> <display_name> <channel>"
+                ),
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted users list");
+            eprintln!("       anima-hosted users show <user_id>");
+            eprintln!(
+                "       anima-hosted users trust <user_id> \
+                 unknown|verified|trusted|operator"
+            );
+            eprintln!(
+                "       anima-hosted users consent <user_id> \
+                 episodic_memory|identity_facts|usage_stats|knowledge_corpus \
+                 grant|revoke"
+            );
+            eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
         }
     }
 }
@@ -2203,6 +2473,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("replay") {
         cmd_replay(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("users") {
+        cmd_users(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

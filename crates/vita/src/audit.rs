@@ -1057,6 +1057,45 @@ pub enum AuditEntry {
         /// The `tau_rel` threshold applied to the filter.
         tau_rel: f32,
     },
+
+    // ── E17 Trust, Human-Identity & Privacy ───────────────────────────────────
+    /// A new user profile was created in the [`UserRegistry`] (S17.2).
+    ///
+    /// Emitted on the first contact from a previously-unseen channel sender.
+    UserProfileCreated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier (`"<channel>:<platform_id>"`).
+        user_id: String,
+        /// Human-readable display name from the channel.
+        display_name: String,
+        /// Source channel (`"telegram"`, `"slack"`, …).
+        channel: String,
+    },
+
+    /// The operator updated the trust tier for a user (S17.1 / S17.2).
+    UserTrustUpdated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier.
+        user_id: String,
+        /// Previous trust tier label.
+        old_tier: String,
+        /// New trust tier label.
+        new_tier: String,
+    },
+
+    /// A user's data-retention consent was updated (S17.3).
+    UserConsentUpdated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier.
+        user_id: String,
+        /// Data category whose consent changed.
+        category: String,
+        /// `true` when consent was granted; `false` when revoked.
+        granted: bool,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

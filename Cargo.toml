@@ -19,6 +19,7 @@ members = [
   "crates/comms",
   "crates/actuators",
   "crates/finetune",
+  "crates/users",
   "kernels/hosted",
   "llm-backends",
 ]

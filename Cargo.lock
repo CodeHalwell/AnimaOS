@@ -875,6 +875,7 @@ dependencies = [
  "senses",
  "serde_json",
  "skills",
+ "users",
  "vita",
 ]
 
@@ -2234,6 +2235,15 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "users"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
