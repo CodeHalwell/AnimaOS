@@ -832,6 +832,40 @@ fn print_audit(manager: &LifecycleManager) {
                      decision={decision} reason={reason:?}"
                 );
             }
+            // ── E8 S8.4.3 — Sleep-cycle consolidation hook ───────────────────
+            AuditEntry::ConsolidationSkipped {
+                agent_id,
+                pairs_available,
+                min_required,
+            } => {
+                println!(
+                    "  ⏭  consolidation_skipped agent={agent_id} \
+                     pairs_available={pairs_available} min_required={min_required}"
+                );
+            }
+            AuditEntry::ConsolidationStarted {
+                agent_id,
+                pairs_trained,
+            } => {
+                println!(
+                    "  🧠 consolidation_started agent={agent_id} pairs={pairs_trained}"
+                );
+            }
+            AuditEntry::ConsolidationCompleted {
+                agent_id,
+                adapter_id,
+                pairs_trained,
+                registered,
+            } => {
+                let reg_tag = if *registered { " [registered]" } else { "" };
+                println!(
+                    "  ✓  consolidation_completed agent={agent_id} \
+                     adapter={adapter_id} pairs={pairs_trained}{reg_tag}"
+                );
+            }
+            AuditEntry::ConsolidationFailed { agent_id, error } => {
+                println!("  ✗  consolidation_failed agent={agent_id} error={error}");
+            }
         }
     }
 }

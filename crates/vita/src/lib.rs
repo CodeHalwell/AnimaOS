@@ -7,6 +7,8 @@
 pub mod agent_pool;
 pub mod audit;
 #[cfg(feature = "std")]
+pub mod consolidation;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
@@ -301,6 +303,17 @@ pub struct LifecycleManager {
     /// recorded.
     #[cfg(feature = "std")]
     pub recent_episode_summaries: Vec<EpisodeSummary>,
+    /// Optional E8 S8.4.3 sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
+    ///
+    /// `None` by default — when absent, PolicyCompilation produces training pairs
+    /// but does not pass them to a local model fine-tuner.  Install via
+    /// [`LifecycleManager::enable_consolidation`] /
+    /// [`LifecycleManager::with_consolidation`].  When `Some`, each sleep
+    /// cycle's PolicyCompilation output feeds [`consolidation::run_consolidation`],
+    /// emitting `ConsolidationStarted`, `ConsolidationCompleted`, or
+    /// `ConsolidationSkipped` audit entries.
+    #[cfg(feature = "std")]
+    pub consolidation_config: Option<consolidation::ConsolidationConfig>,
 }
 
 impl std::fmt::Debug for LifecycleManager {
@@ -389,6 +402,8 @@ impl LifecycleManager {
             },
             #[cfg(feature = "std")]
             recent_episode_summaries: Vec::new(),
+            #[cfg(feature = "std")]
+            consolidation_config: None,
         }
     }
 
@@ -530,6 +545,51 @@ impl LifecycleManager {
         )
     }
 
+    // ── E8 S8.4.3 — Sleep-cycle consolidation hook ───────────────────────────────
+
+    /// Installs the E8 S8.4.3 sleep-cycle consolidation hook on this manager.
+    ///
+    /// After this call, each sleep cycle's PolicyCompilation phase passes the
+    /// compiled training pairs through [`consolidation::run_consolidation`].
+    /// Leaves the constructor signature untouched — call this after
+    /// [`LifecycleManager::new`].
+    ///
+    /// # Safety
+    ///
+    /// This is a gated research feature.  See [`consolidation::ConsolidationConfig`]
+    /// for safety requirements before enabling in production.
+    #[cfg(feature = "std")]
+    pub fn enable_consolidation(&mut self, config: consolidation::ConsolidationConfig) {
+        self.consolidation_config = Some(config);
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_consolidation`] returning
+    /// `self` for chaining off [`LifecycleManager::new`].
+    #[cfg(feature = "std")]
+    pub fn with_consolidation(mut self, config: consolidation::ConsolidationConfig) -> Self {
+        self.enable_consolidation(config);
+        self
+    }
+
+    /// `true` when a consolidation config is installed and the PolicyCompilation
+    /// phase will run the fine-tune hook.
+    #[cfg(feature = "std")]
+    pub fn consolidation_enabled(&self) -> bool {
+        self.consolidation_config.is_some()
+    }
+
+    /// Run the E8 S8.4.3 consolidation hook on the compiled pairs from the most
+    /// recent PolicyCompilation sleep phase.  No-op when no config is installed.
+    #[cfg(feature = "std")]
+    fn run_consolidation_hook(&mut self, pairs: &[memory::compilation::TrainingPair]) {
+        let Some(ref config) = self.consolidation_config else {
+            return;
+        };
+        let config = config.clone();
+        let agent_id = self.agent_id.clone();
+        let _ = consolidation::run_consolidation(pairs, &agent_id, &config, &mut self.audit);
+    }
+
     /// Returns a clone of the cancellation handle for the dispatch currently
     /// in flight (or the most recently installed one between dispatches).
     /// Clones share state with the live token, so tripping the clone cancels
@@ -653,6 +713,17 @@ impl LifecycleManager {
             // unless a skill registry is installed and episodes are buffered.
             #[cfg(feature = "std")]
             let _ = self.run_dreaming_reflection();
+
+            // E8 S8.4.3: Sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
+            #[cfg(feature = "std")]
+            if self.consolidation_config.is_some() {
+                let pairs = report
+                    .outcomes
+                    .get(3)
+                    .map(|o| o.compiled_pairs.clone())
+                    .unwrap_or_default();
+                self.run_consolidation_hook(&pairs);
+            }
         }
         Ok(())
     }
@@ -751,6 +822,18 @@ impl LifecycleManager {
         // skill registry is installed and episodes are buffered.
         #[cfg(feature = "std")]
         let _ = self.run_dreaming_reflection();
+
+        // E8 S8.4.3: Sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
+        // Runs after compilation so compiled_pairs are available on the report.
+        #[cfg(feature = "std")]
+        if self.consolidation_config.is_some() {
+            let pairs = report
+                .outcomes
+                .get(3)
+                .map(|o| o.compiled_pairs.clone())
+                .unwrap_or_default();
+            self.run_consolidation_hook(&pairs);
+        }
 
         report
     }
@@ -2622,5 +2705,150 @@ mod tests {
         assert!(!entries
             .iter()
             .any(|e| matches!(e, AuditEntry::SkillRegistered { .. })));
+    }
+
+    // ── E8 S8.4.3 — Consolidation hook wired into LifecycleManager ───────────
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn consolidation_disabled_by_default() {
+        let m = manager("agent-no-consolidation", Some(1));
+        assert!(!m.consolidation_enabled());
+        assert!(m.consolidation_config.is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn enable_consolidation_installs_config() {
+        use crate::consolidation::ConsolidationConfig;
+        use anima_finetune::FineTuneConfig;
+
+        let mut m = manager("agent-consolidation-enable", Some(1));
+        m.enable_consolidation(ConsolidationConfig::fixture(FineTuneConfig::new(
+            "base", "ds", "adapter",
+        )));
+        assert!(m.consolidation_enabled());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn with_consolidation_builder_installs_config() {
+        use crate::consolidation::ConsolidationConfig;
+        use anima_finetune::FineTuneConfig;
+
+        let m = manager("agent-consolidation-builder", Some(1)).with_consolidation(
+            ConsolidationConfig::fixture(FineTuneConfig::new("base", "ds", "adapter")),
+        );
+        assert!(m.consolidation_enabled());
+    }
+
+    /// E8 S8.4.3: when a compilation_config produces training pairs *and* a
+    /// ConsolidationConfig is installed, the fine-tune hook runs and emits the
+    /// ConsolidationStarted + ConsolidationCompleted audit entries.
+    #[cfg(feature = "std")]
+    #[test]
+    fn sleep_cycle_with_consolidation_emits_audit_entries() {
+        use crate::consolidation::ConsolidationConfig;
+        use anima_finetune::FineTuneConfig;
+
+        let dir = std::env::temp_dir().join("animaos_test_e843_consolidation_audit");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut m = manager("consolidation-audit-agent", None);
+
+        // Inject a completed task so PolicyCompilation produces one training pair.
+        m.audit.push(AuditEntry::TaskStarted {
+            agent_id: "consolidation-audit-agent".into(),
+            task_id: 1,
+            tier: 0,
+            prompt: "What is 2+2?".into(),
+        });
+        m.audit.push(AuditEntry::TaskCompleted {
+            agent_id: "consolidation-audit-agent".into(),
+            task_id: 1,
+            tokens_emitted: 1,
+            response: "4".into(),
+        });
+
+        m.compilation_config = Some(memory::CompilationConfig {
+            output_dir: dir.clone(),
+            formats: vec![memory::TrainingFormat::Alpaca],
+            append: false,
+        });
+
+        m.enable_consolidation(ConsolidationConfig::fixture(FineTuneConfig::new(
+            "base-q4",
+            "episodic://test",
+            "test-adapter",
+        )));
+
+        m.run_sleep_cycle();
+
+        let entries = m.audit.entries();
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::ConsolidationStarted { .. })),
+            "ConsolidationStarted must be emitted after PolicyCompilation"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::ConsolidationCompleted { .. })),
+            "ConsolidationCompleted must be emitted after successful fine-tune"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E8 S8.4.3: without a compilation_config the compiled_pairs list is empty
+    /// and the hook emits ConsolidationSkipped (below min_pairs threshold).
+    #[cfg(feature = "std")]
+    #[test]
+    fn sleep_cycle_consolidation_skipped_when_no_pairs_compiled() {
+        use crate::consolidation::ConsolidationConfig;
+        use anima_finetune::FineTuneConfig;
+
+        let mut m = manager("consolidation-skip-agent", None);
+        // No compilation_config → compiled_pairs stays empty → hook skips.
+        m.enable_consolidation(ConsolidationConfig::fixture(FineTuneConfig::new(
+            "base-q4",
+            "episodic://test",
+            "test-adapter",
+        )));
+
+        m.run_sleep_cycle();
+
+        let entries = m.audit.entries();
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, AuditEntry::ConsolidationSkipped { .. })),
+            "ConsolidationSkipped must be emitted when no pairs are compiled"
+        );
+    }
+
+    /// E8 S8.4.3: without consolidation_config the hook is never called and no
+    /// consolidation audit entries appear in the log (backward-compat).
+    #[cfg(feature = "std")]
+    #[test]
+    fn sleep_cycle_without_consolidation_config_emits_no_consolidation_entries() {
+        let mut m = manager("no-consolidation-agent", None);
+        m.run_sleep_cycle();
+
+        let entries = m.audit.entries();
+        let has_consolidation = entries.iter().any(|e| {
+            matches!(
+                e,
+                AuditEntry::ConsolidationStarted { .. }
+                    | AuditEntry::ConsolidationCompleted { .. }
+                    | AuditEntry::ConsolidationSkipped { .. }
+                    | AuditEntry::ConsolidationFailed { .. }
+            )
+        });
+        assert!(
+            !has_consolidation,
+            "no consolidation entries must appear when config is absent"
+        );
     }
 }

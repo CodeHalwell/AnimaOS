@@ -74,6 +74,17 @@
 //!
 //! Runs an adversarial probe corpus through the constitution check and asserts
 //! every probe is blocked.  Any escape is a hard failure.
+//!
+//! ## `finetune` — E8 S8.4.1 Fine-Tune Entrypoint
+//!
+//! ```
+//! cargo xtask finetune
+//! cargo xtask finetune --model unsloth/Phi-3.5-mini-instruct --adapter-id phi-v1
+//! cargo xtask finetune --dataset training_corpus/alpaca.jsonl --method qlora
+//! ```
+//!
+//! Runs the dataset→train→export pipeline (fixture mode by default, no GPU,
+//! CI-hermetic).  Artefacts written to `artifacts/finetune/<date>-<id>/`.
 
 use anyhow::Result;
 use chrono::Local;
@@ -83,6 +94,7 @@ use std::path::PathBuf;
 mod align_eval;
 mod bench_baseline;
 mod demo;
+mod finetune;
 mod redteam;
 mod soak;
 
@@ -105,6 +117,8 @@ enum Commands {
     AlignEval(align_eval::AlignEvalArgs),
     /// E13 S13.4: Run the red-team adversarial probe harness (all-must-block gate).
     RedTeam(redteam::RedTeamArgs),
+    /// E8 S8.4.1: Run the fine-tune pipeline (fixture default; live with ANIMA_FINETUNE_LIVE=1).
+    Finetune(finetune::FinetuneArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -137,6 +151,7 @@ fn main() -> Result<()> {
         Commands::Soak(args) => soak::run_soak(args),
         Commands::AlignEval(args) => align_eval::run_align_eval(args),
         Commands::RedTeam(args) => redteam::run_red_team(args),
+        Commands::Finetune(args) => finetune::run_finetune(args),
     }
 }
 

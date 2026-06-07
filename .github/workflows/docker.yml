@@ -1,0 +1,97 @@
+name: Docker
+
+# Build and push the anima-hosted container image to GHCR.
+#
+# The trainer image (docker/Dockerfile.trainer) is not built here because it
+# is 10–12 GB (PyTorch + CUDA + Unsloth) and cannot complete within a
+# GitHub-hosted runner's time budget.  Build it locally when needed:
+#   docker build -f docker/Dockerfile.trainer -t animaos/trainer:dev .
+#
+# This job covers the hosted agent image (~120 MB) only.
+#
+# Registry: ghcr.io/codehalwell/animaos/hosted
+#   :main          — current tip of the main branch
+#   :sha-<sha>     — immutable per-commit tag
+#   :v<semver>     — published release tags (e.g. :v1.2.3, :v1.2)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "kernels/hosted/**"
+      - "llm-backends/**"
+      - "console/**"
+  release:
+    types: [created]
+  pull_request:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+# Read-only checkout; packages: write for GHCR push.
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  build-hosted:
+    name: Build (and push) hosted image
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned to actions/checkout v6.0.3 (same as ci.yml).
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Enable BuildKit advanced features (cache mounts, multi-platform).
+      # Pinned SHA will be maintained by Dependabot on next weekly update.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aee5fc21bc4cd7e4e6b # v3.10.0
+
+      # Log in to GHCR only on non-PR events so fork PRs never attempt to push.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive image tags from the triggering event:
+      #   push/workflow_dispatch → :main + :sha-<short-sha>
+      #   release                → :v<semver> + :v<major>.<minor> + :latest
+      #   pull_request           → :pr-<number> (not pushed)
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbea8a987c2b64359f6c76e86a04 # v5.7.0
+        with:
+          images: ghcr.io/codehalwell/animaos/hosted
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # Build with GHA layer cache so the Rust compilation layer is warm on
+      # subsequent runs.  The Dockerfile's BuildKit cache mounts (--mount=type=cache)
+      # are separate from layer caching and are managed by BuildKit itself.
+      - name: Build and push hosted image
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.15.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
