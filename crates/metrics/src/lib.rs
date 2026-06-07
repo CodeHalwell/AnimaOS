@@ -285,9 +285,6 @@ impl MetricRegistry {
         {
             write_sample(buf, "anima_tasks_total", &s.labels, s.value);
         }
-        if self.tasks_by_tier.0.is_empty() {
-            write_sample(buf, "anima_tasks_total", &[], 0.0);
-        }
 
         write_counter_scalar(
             buf,
@@ -355,9 +352,6 @@ impl MetricRegistry {
         {
             write_sample(buf, "anima_gate_invocations_total", &s.labels, s.value);
         }
-        if self.gate_invocations.0.is_empty() {
-            write_sample(buf, "anima_gate_invocations_total", &[], 0.0);
-        }
 
         // defence_vetoes_total
         write_family_header(
@@ -372,9 +366,6 @@ impl MetricRegistry {
         {
             write_sample(buf, "anima_defence_vetoes_total", &s.labels, s.value);
         }
-        if self.defence_vetoes.0.is_empty() {
-            write_sample(buf, "anima_defence_vetoes_total", &[], 0.0);
-        }
 
         // constitution_vetoes_total
         write_family_header(
@@ -388,9 +379,6 @@ impl MetricRegistry {
             .samples(|k| vec![("prohibition_id".to_string(), k.to_string())])
         {
             write_sample(buf, "anima_constitution_vetoes_total", &s.labels, s.value);
-        }
-        if self.constitution_vetoes.0.is_empty() {
-            write_sample(buf, "anima_constitution_vetoes_total", &[], 0.0);
         }
 
         write_counter_scalar(
@@ -457,9 +445,10 @@ impl MetricRegistry {
             ),
         ];
         for (name, help, val) in gauges {
-            write_family_header(buf, name, "gauge", help);
-            let v = val.unwrap_or(0.0);
-            write_sample(buf, name, &[], v);
+            if let Some(v) = val {
+                write_family_header(buf, name, "gauge", help);
+                write_sample(buf, name, &[], *v);
+            }
         }
     }
 

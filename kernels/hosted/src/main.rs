@@ -2553,25 +2553,33 @@ fn cmd_metrics(args: &[String]) {
         }
     }
 
+    // Resolve the agent id: honour ANIMA_AGENT_ID so multi-agent deployments
+    // automatically pick up the right log without needing --file.
+    let agent_id_for_log = std::env::var("ANIMA_AGENT_ID").unwrap_or_else(|_| AGENT_ID.to_owned());
+
     // Resolve audit file path.
     let resolved_path: Option<std::path::PathBuf> =
         audit_file.map(std::path::PathBuf::from).or_else(|| {
             std::env::var("ANIMA_AUDIT_DIR")
                 .ok()
-                .map(|d| std::path::PathBuf::from(d).join(format!("{AGENT_ID}.jsonl")))
+                .map(|d| std::path::PathBuf::from(d).join(format!("{agent_id_for_log}.jsonl")))
         });
 
     let mut registry = MetricRegistry::new();
 
-    // Load entries from the JSONL file if available.
+    // Stream entries from the JSONL file line-by-line (O(1) memory).
     let loaded_from_file = if let Some(path) = &resolved_path {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(trimmed) {
-                            registry.update(&entry);
+            if let Ok(file) = std::fs::File::open(path) {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(file);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        let trimmed = line.trim().to_owned();
+                        if !trimmed.is_empty() {
+                            if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(&trimmed) {
+                                registry.update(&entry);
+                            }
                         }
                     }
                 }
