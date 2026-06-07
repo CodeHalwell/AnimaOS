@@ -229,7 +229,7 @@ pub fn verify_audit_chain(
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
 /// therefore the enum derives `PartialEq` only (not `Eq`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {

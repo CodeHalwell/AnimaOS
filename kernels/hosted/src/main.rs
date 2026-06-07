@@ -2506,6 +2506,156 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+// ── `anima metrics` subcommand (E21) ─────────────────────────────────────────
+
+/// Display Prometheus metrics derived from the agent audit log.
+///
+/// ```text
+/// cargo run --bin anima-hosted -- metrics [--format prometheus|text]
+/// ```
+///
+/// Flags:
+/// - `--format prometheus` — emit Prometheus exposition format (default when
+///   piped to a file or another process).
+/// - `--format text` — emit a concise human-readable summary (default when
+///   the terminal is interactive).
+/// - `--file <path>` — read a specific JSONL audit file instead of scanning
+///   `$ANIMA_AUDIT_DIR`.
+///
+/// In demo mode (no live audit file) a representative set of seed entries is
+/// used so the output is always non-empty for demonstration purposes.
+fn cmd_metrics(args: &[String]) {
+    use metrics::MetricRegistry;
+
+    const AGENT_ID: &str = "anima";
+
+    // Parse flags.
+    let mut format = "text";
+    let mut audit_file: Option<String> = None;
+    let mut it = args.iter().peekable();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--format" => {
+                if let Some(f) = it.next() {
+                    format = if f == "prometheus" {
+                        "prometheus"
+                    } else {
+                        "text"
+                    };
+                }
+            }
+            "--file" => {
+                if let Some(p) = it.next() {
+                    audit_file = Some(p.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Resolve audit file path.
+    let resolved_path: Option<std::path::PathBuf> =
+        audit_file.map(std::path::PathBuf::from).or_else(|| {
+            std::env::var("ANIMA_AUDIT_DIR")
+                .ok()
+                .map(|d| std::path::PathBuf::from(d).join(format!("{AGENT_ID}.jsonl")))
+        });
+
+    let mut registry = MetricRegistry::new();
+
+    // Load entries from the JSONL file if available.
+    let loaded_from_file = if let Some(path) = &resolved_path {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(trimmed) {
+                            registry.update(&entry);
+                        }
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Seed with representative demo entries when no live log is available.
+    if !loaded_from_file {
+        let demo_entries: Vec<vita::AuditEntry> = vec![
+            vita::AuditEntry::TaskStarted {
+                agent_id: AGENT_ID.into(),
+                task_id: 1,
+                tier: 0,
+                prompt: "draft a status report".into(),
+            },
+            vita::AuditEntry::TaskCompleted {
+                agent_id: AGENT_ID.into(),
+                task_id: 1,
+                tokens_emitted: 412,
+                response: "status report drafted".into(),
+            },
+            vita::AuditEntry::GateDecision {
+                agent_id: AGENT_ID.into(),
+                event_id: "e1".into(),
+                invoke: true,
+                cost_class: Some("MidTier".into()),
+                urgency: 0.8,
+                novelty: 0.6,
+                user_facing: true,
+                semantic_class: "UserQuery".into(),
+                value_score: 0.76,
+                threshold_applied: 0.40,
+                thermal_load: 0.15,
+                compute_pressure: 0.20,
+                memory_pressure: 0.30,
+                power_budget: 0.95,
+                financial_budget: 0.80,
+                attention_demand: 0.70,
+                reasoning: "value 0.76 >= threshold 0.40 (demo)".into(),
+                override_active: false,
+            },
+            vita::AuditEntry::CortexInvoked {
+                task_id: "demo-inv-1".into(),
+                latency_to_first_action_ms: 84,
+            },
+            vita::AuditEntry::SleepEntered {
+                agent_id: AGENT_ID.into(),
+            },
+            vita::AuditEntry::InteroceptiveSnapshot {
+                agent_id: AGENT_ID.into(),
+                tick_ns: 1_000_000_000,
+                thermal_load: 0.15,
+                compute_pressure: 0.20,
+                memory_pressure: 0.30,
+                power_budget: 0.95,
+                financial_budget: 0.80,
+                attention_demand: 0.70,
+                aggregate_stress: 0.27,
+            },
+        ];
+        for entry in &demo_entries {
+            registry.update(entry);
+        }
+        eprintln!(
+            "anima-metrics: no audit log found — showing demo data (set ANIMA_AUDIT_DIR to use live data)"
+        );
+    }
+
+    if format == "prometheus" {
+        print!("{}", registry.render());
+    } else {
+        println!("=== AnimaOS Metrics ===");
+        print!("{}", registry.summary());
+    }
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2549,6 +2699,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("metrics") {
+        cmd_metrics(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

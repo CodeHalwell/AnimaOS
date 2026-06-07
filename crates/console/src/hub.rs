@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use console_proto::OperatorEvent;
 use interoception::{InteroceptiveSignals, SignalPublisher};
+use metrics::MetricRegistry;
 
 /// How many recent events a freshly-connected client is replayed.
 const REPLAY_CAPACITY: usize = 256;
@@ -52,6 +53,11 @@ pub struct Subscription {
 pub struct ConsoleHub {
     inner: Mutex<HubInner>,
     start: Instant,
+    /// Prometheus-compatible metric registry fed by the audit tailer (E21).
+    ///
+    /// Kept in a separate `Mutex` so metrics reads do not contend with the
+    /// high-frequency subscriber fan-out path.
+    pub(crate) metrics: Mutex<MetricRegistry>,
 }
 
 impl Default for ConsoleHub {
@@ -66,7 +72,33 @@ impl ConsoleHub {
         Self {
             inner: Mutex::new(HubInner::default()),
             start: Instant::now(),
+            metrics: Mutex::new(MetricRegistry::new()),
         }
+    }
+
+    /// Update the metric registry from a raw JSONL audit-log line (E21).
+    ///
+    /// The line is parsed as a [`vita::AuditEntry`]; unrecognised or malformed
+    /// lines are silently ignored.  Called by the [`crate::AuditTailer`] for
+    /// every complete line it reads.
+    pub fn update_metrics_from_json(&self, line: &str) {
+        if let Ok(entry) = serde_json::from_str::<vita::AuditEntry>(line) {
+            if let Ok(mut reg) = self.metrics.lock() {
+                reg.update(&entry);
+            }
+        }
+    }
+
+    /// Render the current metric registry in Prometheus exposition format.
+    ///
+    /// Returns an empty string if the mutex is poisoned (should never happen).
+    pub fn render_metrics(&self) -> String {
+        self.metrics.lock().map(|r| r.render()).unwrap_or_default()
+    }
+
+    /// Return a concise human-readable metrics summary for the CLI.
+    pub fn metrics_summary(&self) -> String {
+        self.metrics.lock().map(|r| r.summary()).unwrap_or_default()
     }
 
     /// Seconds since the hub (≈ the agent) started.
@@ -234,5 +266,50 @@ mod tests {
             } => assert!((aggregate_stress - 1.0).abs() < 1e-5),
             other => panic!("expected vitals, got {other:?}"),
         }
+    }
+
+    // ── E21 metric registry tests ─────────────────────────────────────────────
+
+    #[test]
+    fn update_metrics_from_valid_json_increments_counters() {
+        let hub = ConsoleHub::new();
+        let line = r#"{"SleepEntered":{"agent_id":"a"}}"#;
+        hub.update_metrics_from_json(line);
+        hub.update_metrics_from_json(line);
+        let out = hub.render_metrics();
+        assert!(
+            out.contains("anima_sleep_cycles_total 2"),
+            "sleep counter: {out}"
+        );
+    }
+
+    #[test]
+    fn update_metrics_from_malformed_json_is_silently_ignored() {
+        let hub = ConsoleHub::new();
+        hub.update_metrics_from_json("this is not json at all");
+        hub.update_metrics_from_json("{\"UnknownVariant\":{}}");
+        let out = hub.render_metrics();
+        assert!(out.contains("anima_sleep_cycles_total 0"), "counters: {out}");
+    }
+
+    #[test]
+    fn render_metrics_returns_non_empty_prometheus_text() {
+        let hub = ConsoleHub::new();
+        let out = hub.render_metrics();
+        assert!(
+            out.contains("# HELP anima_tasks_total"),
+            "prometheus: {out}"
+        );
+    }
+
+    #[test]
+    fn metrics_summary_contains_key_fields() {
+        let hub = ConsoleHub::new();
+        hub.update_metrics_from_json(
+            r#"{"TaskCompleted":{"agent_id":"a","task_id":1,"tokens_emitted":50,"response":"ok"}}"#,
+        );
+        let s = hub.metrics_summary();
+        assert!(s.contains("Completed"), "summary: {s}");
+        assert!(s.contains("Tokens emitted"), "summary: {s}");
     }
 }

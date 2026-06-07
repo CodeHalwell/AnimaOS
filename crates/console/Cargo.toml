@@ -13,4 +13,6 @@ path = "src/bin/anima-console.rs"
 console-proto = { path = "../console-proto", features = ["json"] }
 senses = { path = "../senses" }
 interoception = { path = "../interoception" }
+vita = { path = "../vita" }
+metrics = { path = "../metrics" }
 serde_json = { workspace = true }

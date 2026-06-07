@@ -1,0 +1,13 @@
+[package]
+name = "metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prometheus metrics export and observability for AnimaOS — Epic E21."
+
+[dependencies]
+vita = { path = "../vita" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+vita = { path = "../vita", features = ["std"] }

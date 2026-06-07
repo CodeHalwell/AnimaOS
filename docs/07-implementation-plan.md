@@ -3098,3 +3098,81 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+### Epic E21 — Prometheus Metrics Export & Observability ✅
+
+**Scope.** Expose a Prometheus-compatible `/metrics` HTTP endpoint on the
+operator console and a `anima-hosted metrics` CLI command.  The
+`MetricRegistry` accumulates counters, gauges, and histograms derived from
+the agent's `AuditEntry` stream, giving operators a standard scrape target
+for Prometheus/Grafana dashboards with no additional instrumentation.
+
+**Dependencies.** E6 (operator console HTTP/SSE server), EX.2 (audit log
+as the canonical event bus), E17 (users crate builds on the same audit
+infrastructure).
+
+**Stories.**
+
+- S21.1 `crates/metrics` — new standalone crate. ✅ (`MetricRegistry` with
+  15 families: 12 counters (tasks/completions/failures/tokens/sleep-cycles,
+  gate-decisions/invocations, defence-vetoes, constitution-vetoes,
+  cortex-invocations/faults, router-modulations), 8 gauges (6 interoceptive
+  signals + gate-value-score + gate-threshold), and 1 histogram
+  (`anima_gate_latency_ms` — first-action latency in 10 fixed-percentile
+  buckets).  Primary ingestion via `update(&AuditEntry)`; convenience wrapper
+  `registry_from_audit(&[AuditEntry])`.  Prometheus exposition format emitted
+  by `render()` with correct `# HELP`, `# TYPE`, label escaping, and `+Inf`
+  bucket.  Human-readable summary via `summary()`.  16 unit tests.)
+- S21.2 `AuditEntry` deserialisation support. ✅ (`vita::AuditEntry` derives
+  `serde::Deserialize` alongside the existing `Serialize`, enabling round-
+  trip parsing of JSONL audit files by the metrics tailer, the CLI command,
+  and any future replay tooling.)
+- S21.3 `GET /metrics` on the operator console server. ✅ (`ConsoleHub`
+  carries a `Mutex<MetricRegistry>` updated from every JSONL line the
+  `AuditTailer` processes.  `ConsoleServer::handle` routes
+  `GET /metrics → render_metrics()` with `Content-Type: text/plain;
+  version=0.0.4`.  Bearer token enforced on the route (same auth as
+  `/events` / `/guidance`).  Routing table comment updated.
+  3 new integration tests: `metrics_endpoint_returns_prometheus_text`,
+  `metrics_endpoint_reflects_audit_updates_via_hub`,
+  `metrics_endpoint_requires_auth_when_token_is_configured`.
+  4 new hub unit tests: `update_metrics_from_valid_json_increments_counters`,
+  `update_metrics_from_malformed_json_is_silently_ignored`,
+  `render_metrics_returns_non_empty_prometheus_text`,
+  `metrics_summary_contains_key_fields`.)
+- S21.4 `anima-hosted metrics` CLI subcommand. ✅
+  (`cmd_metrics(args)` in `kernels/hosted/src/main.rs`:
+  `--format prometheus` emits full Prometheus text; `--format text` (default)
+  prints a concise summary; `--file <path>` reads a specific JSONL audit file.
+  Falls back to a representative demo dataset when no audit file is available,
+  with a diagnostic `eprintln!` indicating demo mode.  Dispatched from
+  `main()` alongside the existing `why`, `identity`, `skills`, …, `users`
+  commands.)
+
+**New crate: `crates/metrics`.**
+Dependencies: `vita` (for `AuditEntry` + `Deserialize`), `serde_json`
+(workspace).  `#![forbid(unsafe_code)]`.  Workspace root `Cargo.toml`
+and `kernels/hosted/Cargo.toml` updated.  `crates/console/Cargo.toml`
+updated with `metrics` and `vita` direct dependencies.
+
+**Exit criteria.**
+1. `cargo run --bin anima-hosted -- metrics --format prometheus` emits
+   valid Prometheus text with `# HELP` / `# TYPE` lines for every family. ✅
+   (`anima_tasks_total`, `anima_gate_decisions_total{outcome}`,
+   `anima_gate_invocations_total{cost_class}`, `anima_gate_latency_ms_bucket{le}`,
+   `anima_aggregate_stress`, and the remaining 10 families all rendered.)
+2. `GET /metrics` on the console server returns HTTP 200 with
+   `Content-Type: text/plain; version=0.0.4` and correct Prometheus text. ✅
+   (`metrics_endpoint_returns_prometheus_text`)
+3. The metrics registry reflects audit events fed through the hub in the
+   same HTTP session. ✅
+   (`metrics_endpoint_reflects_audit_updates_via_hub`)
+4. Bearer token is enforced on `GET /metrics` identically to other guarded
+   routes. ✅ (`metrics_endpoint_requires_auth_when_token_is_configured`)
+5. Malformed or unrecognised JSONL lines are silently ignored without
+   poisoning the registry. ✅
+   (`update_metrics_from_malformed_json_is_silently_ignored`)
+6. `cargo test --workspace` green; 16 new metrics tests + 14 new console
+   tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

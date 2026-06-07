@@ -253,8 +253,10 @@ version = "0.1.0"
 dependencies = [
  "console-proto",
  "interoception",
+ "metrics",
  "senses",
  "serde_json",
+ "vita",
 ]
 
 [[package]]
@@ -870,6 +872,7 @@ dependencies = [
  "lifecycle",
  "llm-backends",
  "memory",
+ "metrics",
  "praxis",
  "scheduler",
  "senses",
@@ -1275,6 +1278,14 @@ dependencies = [
  "scheduler",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "metrics"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "vita",
 ]
 
 [[package]]
