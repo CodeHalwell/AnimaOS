@@ -2506,6 +2506,246 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+// ── `anima stats` subcommand (E25) ───────────────────────────────────────────
+
+/// Performance analytics and spend reporting over the in-memory audit log.
+///
+/// Satisfies E25 exit criterion: a `stats` subcommand that prints token,
+/// latency, gate, and health reports derived from `AuditEntry` data.
+///
+/// ```text
+/// cargo run --bin anima-hosted -- stats [tokens|latency|gate|health|summary]
+/// ```
+fn cmd_stats(args: &[String]) {
+    use analytics::AnalyticsEngine;
+
+    const AGENT_ID: &str = "anima";
+
+    // Build a representative demo audit log so the command always shows
+    // something meaningful without a live `ANIMA_AUDIT_DIR`.
+    let mut log = vita::AuditLog::new();
+
+    // Populate with a variety of entry types that exercise every sub-report.
+    for i in 0u64..8 {
+        log.push(vita::audit::AuditEntry::TaskStarted {
+            agent_id: AGENT_ID.into(),
+            task_id: i,
+            tier: (i % 3) as u8,
+            prompt: "demo task".into(),
+        });
+        log.push(vita::audit::AuditEntry::TaskCompleted {
+            agent_id: AGENT_ID.into(),
+            task_id: i,
+            tokens_emitted: 150 + (i * 30) as u32,
+            response: "demo response".into(),
+        });
+    }
+    // One task failure.
+    log.push(vita::audit::AuditEntry::TaskFailed {
+        agent_id: AGENT_ID.into(),
+        task_id: 99,
+        error: "simulated backend timeout".into(),
+    });
+    // Two cortex invocations, one fault.
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "inv-1".into(),
+        latency_to_first_action_ms: 84,
+    });
+    log.push(vita::audit::AuditEntry::CortexCompleted {
+        task_id: "inv-1".into(),
+        tool_calls: 3,
+        summary_len: 210,
+    });
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "inv-2".into(),
+        latency_to_first_action_ms: 120,
+    });
+    log.push(vita::audit::AuditEntry::CortexFault {
+        task_id: "inv-2".into(),
+        error: "python process exited".into(),
+    });
+    // Gate decisions.
+    let gate_entry = |invoke: bool, class: Option<&str>, vs: f32, th: f32| {
+        vita::audit::AuditEntry::GateDecision {
+            agent_id: AGENT_ID.into(),
+            event_id: "e".into(),
+            invoke,
+            cost_class: class.map(str::to_string),
+            urgency: 0.6,
+            novelty: 0.4,
+            user_facing: false,
+            semantic_class: "background".into(),
+            value_score: vs,
+            threshold_applied: th,
+            thermal_load: 0.1,
+            compute_pressure: 0.2,
+            memory_pressure: 0.1,
+            power_budget: 0.9,
+            financial_budget: 0.8,
+            attention_demand: 0.5,
+            reasoning: "demo".into(),
+            override_active: false,
+        }
+    };
+    log.push(gate_entry(true, Some("MidTier"), 0.65, 0.40));
+    log.push(gate_entry(true, Some("CheapLocal"), 0.55, 0.40));
+    log.push(gate_entry(false, None, 0.30, 0.40));
+    log.push(gate_entry(true, Some("Frontier"), 0.90, 0.40));
+    log.push(gate_entry(false, None, 0.25, 0.40));
+
+    let entries = log.entries();
+    let sub = args.first().map(String::as_str).unwrap_or("summary");
+
+    match sub {
+        "tokens" | "token" => {
+            let r = AnalyticsEngine::token_report(entries);
+            println!("=== Token Report: {} ===", AGENT_ID);
+            println!("Tasks completed   : {}", r.tasks_completed);
+            println!("Tasks failed      : {}", r.tasks_failed);
+            println!("Total tokens      : {}", r.total_tokens);
+            if let Some(s) = &r.per_task {
+                println!("Per-task stats:");
+                println!("  mean            : {:.1}", s.mean);
+                println!("  min             : {}", s.min);
+                println!("  p50             : {}", s.p50);
+                println!("  p95             : {}", s.p95);
+                println!("  p99             : {}", s.p99);
+                println!("  max             : {}", s.max);
+            }
+            if !r.by_tier.is_empty() {
+                println!("By tier:");
+                for t in &r.by_tier {
+                    println!(
+                        "  tier {}  tasks={}  total={}  mean={:.1}",
+                        t.tier, t.tasks, t.total_tokens, t.mean_tokens
+                    );
+                }
+            }
+        }
+        "latency" => {
+            let r = AnalyticsEngine::latency_report(entries);
+            println!("=== Latency Report: {} ===", AGENT_ID);
+            println!("Cortex invocations: {}", r.cortex_invocations);
+            println!("Cortex faults     : {}", r.cortex_faults);
+            println!("Fault rate        : {:.1}%", r.fault_rate_pct);
+            println!("Total tool calls  : {}", r.total_tool_calls);
+            println!(
+                "Mean tool calls   : {:.2}",
+                r.mean_tool_calls_per_completion
+            );
+            if let Some(p) = &r.first_action {
+                println!("Time-to-first-action (ms):");
+                println!("  samples         : {}", p.count);
+                println!("  mean            : {:.1}", p.mean_ms);
+                println!("  p50             : {}", p.p50_ms);
+                println!("  p95             : {}", p.p95_ms);
+                println!("  p99             : {}", p.p99_ms);
+                println!("  max             : {}", p.max_ms);
+            }
+        }
+        "gate" => {
+            let r = AnalyticsEngine::gate_report(entries);
+            println!("=== Gate Report: {} ===", AGENT_ID);
+            println!("Total evaluations : {}", r.total_evaluations);
+            println!("Invocations       : {}", r.invocations);
+            println!("Blocks            : {}", r.blocks);
+            println!("Invocation rate   : {:.1}%", r.invocation_rate_pct);
+            println!("Overrides         : {}", r.overrides);
+            println!("Route modulations : {}", r.route_modulations);
+            println!("Mean value score  : {:.3}", r.mean_value_score);
+            println!("Mean threshold    : {:.3}", r.mean_threshold);
+            println!("Gate efficiency   : {:.1}%", r.efficiency_pct);
+            if !r.by_cost_class.is_empty() {
+                println!("Cost-class distribution:");
+                for cc in &r.by_cost_class {
+                    println!("  {:<15} : {}", cc.cost_class, cc.count);
+                }
+            }
+        }
+        "health" => {
+            let r = AnalyticsEngine::health_report(entries);
+            println!("=== Health Report: {} ===", AGENT_ID);
+            println!("Health score      : {:.3}", r.score);
+            println!("Grade             : {}", r.grade);
+            println!("Total tasks       : {}", r.total_tasks);
+            println!("Defence vetoes    : {}", r.defence_vetoes);
+            println!("Factors:");
+            println!(
+                "  task success    : {:.1}%",
+                r.factors.task_success_rate * 100.0
+            );
+            println!(
+                "  cortex reliab.  : {:.1}%",
+                r.factors.cortex_reliability * 100.0
+            );
+            println!(
+                "  defence health  : {:.1}%",
+                r.factors.defence_health * 100.0
+            );
+            println!(
+                "  gate efficiency : {:.1}%",
+                r.factors.gate_efficiency * 100.0
+            );
+            if r.recommendations.is_empty() {
+                println!("Recommendations   : (none)");
+            } else {
+                println!("Recommendations:");
+                for rec in &r.recommendations {
+                    println!("  - {}", rec);
+                }
+            }
+        }
+        _ => {
+            // Default: full summary.
+            let s = AnalyticsEngine::summary_report(entries, AGENT_ID);
+            println!("=== Analytics Summary: {} ===", s.agent_id);
+            println!("Entries analyzed  : {}", s.entries_analyzed);
+            println!();
+            println!("── Tokens ──────────────────────────────────────────────");
+            println!("  total           : {}", s.token.total_tokens);
+            println!("  completed tasks : {}", s.token.tasks_completed);
+            println!("  failed tasks    : {}", s.token.tasks_failed);
+            if let Some(p) = &s.token.per_task {
+                println!("  p50/p95/p99     : {}/{}/{}", p.p50, p.p95, p.p99);
+            }
+            println!();
+            println!("── Latency ─────────────────────────────────────────────");
+            println!(
+                "  cortex calls    : {} ({} faults, {:.1}% rate)",
+                s.latency.cortex_invocations, s.latency.cortex_faults, s.latency.fault_rate_pct
+            );
+            if let Some(p) = &s.latency.first_action {
+                println!("  TTFA p50/p95    : {}ms / {}ms", p.p50_ms, p.p95_ms);
+            }
+            println!(
+                "  mean tool calls : {:.2}",
+                s.latency.mean_tool_calls_per_completion
+            );
+            println!();
+            println!("── Gate ────────────────────────────────────────────────");
+            println!(
+                "  eval/invoke/blk : {}/{}/{}",
+                s.gate.total_evaluations, s.gate.invocations, s.gate.blocks
+            );
+            println!("  invoc. rate     : {:.1}%", s.gate.invocation_rate_pct);
+            println!("  efficiency      : {:.1}%", s.gate.efficiency_pct);
+            println!();
+            println!("── Health ──────────────────────────────────────────────");
+            println!(
+                "  score / grade   : {:.3} / {}",
+                s.health.score, s.health.grade
+            );
+            if s.health.recommendations.is_empty() {
+                println!("  recommendations : (none)");
+            } else {
+                for rec in &s.health.recommendations {
+                    println!("  ! {}", rec);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2560,6 +2800,10 @@ fn main() {
         let non_interactive = args.iter().any(|a| a == "--non-interactive");
         let reset = args.iter().any(|a| a == "--reset");
         init::run_init("anima", non_interactive, reset);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("stats") {
+        cmd_stats(&args[1..]);
         return;
     }
 

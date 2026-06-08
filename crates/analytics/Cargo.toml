@@ -1,0 +1,13 @@
+[package]
+name = "analytics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "E25 — Performance analytics and spend reporting derived from the audit log."
+
+[dependencies]
+vita = { path = "../vita" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]

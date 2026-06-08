@@ -3098,3 +3098,77 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E25 — Performance Analytics and Spend Reporting ✅
+
+**Scope.** Historical analytics derived from the existing durable audit log:
+token spend per task (with per-tier breakdown and p50/p95/p99 distribution),
+cortex latency percentiles (time-to-first-action), Striatal Gate analytics
+(invocation rate, cost-class distribution, gate efficiency), and an
+overall agent health score (letter grade A–F) with actionable
+recommendations.  No new `AuditEntry` variants are required — all data
+comes from entries already written by Stages 1–8.
+
+**Scope boundary.** E25 is complementary to E21 (Prometheus real-time
+metrics): E21 is for online monitoring and alerting; E25 is for
+retrospective analysis and reporting over a log window.
+
+**Dependencies.** `vita::audit::AuditEntry` (all entry variants used by
+Stages 1–8), `kernels/hosted` binary (CLI).
+
+**Stories.**
+- S25.1 Token usage analytics — `TokenReport` with total, per-task
+  statistics (p50/p95/p99), and breakdown by MLFQ dispatch tier. ✅
+  (`crates/analytics/src/token.rs` — `compute_token_report`; 7 unit tests)
+- S25.2 Cortex latency and reliability analytics — `LatencyReport` with
+  time-to-first-action percentiles from `CortexInvoked` entries, fault
+  rate, and mean tool calls per completion. ✅
+  (`crates/analytics/src/latency.rs` — `compute_latency_report`; 7 unit tests)
+- S25.3 Gate and routing analytics — `GateReport` with invocation rate,
+  cost-class distribution, route modulation count, override count, and
+  gate efficiency (fraction of invocations that organically cleared the
+  threshold vs. required override). ✅
+  (`crates/analytics/src/gate.rs` — `compute_gate_report`; 7 unit tests)
+- S25.4 Agent health scoring — `HealthReport` with a composite score
+  (task success 35%, cortex reliability 30%, defence health 20%, gate
+  efficiency 15%), letter grade A–F, per-factor breakdown, and
+  recommendations generated when a factor falls below its healthy range. ✅
+  (`crates/analytics/src/health.rs` — `compute_health_report`; 6 unit tests)
+- S25.5 `AnalyticsEngine` namespace + `SummaryReport` — single entry point
+  grouping all four reports behind one import. ✅
+  (`crates/analytics/src/engine.rs` — `AnalyticsEngine`; 5 unit tests)
+- S25.6 `anima stats` CLI subcommand — `stats tokens`, `stats latency`,
+  `stats gate`, `stats health`, and `stats [summary]` (default). ✅
+  (`kernels/hosted/src/main.rs` — `cmd_stats()` with demo audit log
+  seeded with representative entries so the command is always useful
+  without a live `ANIMA_AUDIT_DIR`)
+
+**New crate: `crates/analytics`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde` (workspace),
+`serde_json` (workspace). No dev-dependencies. `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. All four sub-reports are deterministic pure folds over `&[AuditEntry]`
+   — identical inputs produce identical outputs. ✅
+   (`empty_entries_produce_zero_report` / `empty_entries_produce_grade_a`
+   in every module; `summary_report_token_gate_latency_health_consistent`
+   verifies sub-report fields in the summary match individual report
+   values)
+2. `HealthReport` grade A on a clean audit log (all factors default to
+   their healthy baseline when no problematic entries are present). ✅
+   (`health_report_grade_a_on_clean_log`; `empty_entries_produce_grade_a`)
+3. Health recommendations fire when factors cross their thresholds. ✅
+   (`all_tasks_failed_degrades_health_significantly`
+   — score < 0.70 with 5/5 failures;
+   `high_cortex_fault_rate_triggers_recommendation`
+   — 60% fault rate recommendation emitted)
+4. `cargo run --bin anima-hosted -- stats summary` prints a structured
+   report covering all four sub-sections (Tokens, Latency, Gate, Health)
+   with no live API calls. ✅
+5. `cargo test --workspace` green; 34 new analytics tests + all prior
+   tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
