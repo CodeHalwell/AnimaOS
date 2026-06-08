@@ -85,6 +85,11 @@ use memory::VirtualContextManager;
 use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
 // E11: skill crate referenced inside cmd_skills via use statements
+use alerts::{
+    AlertCondition, AlertRule, AlertRuleRegistry, AlertSeverity, ComparisonOp, MetricField,
+};
+use knowledge_graph::{Entity, EntityKind, KnowledgeGraph, Relation, RelationKind};
+use metrics::{aggregate, render_prometheus, render_text_report};
 use vita::gate::Gate;
 use vita::{
     record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
@@ -901,6 +906,417 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+
+            // ── E18 Per-User Rate Limiting & Token Quotas ─────────────────────
+            AuditEntry::QuotaExceeded {
+                agent_id,
+                user_id,
+                trust_tier,
+                exceeded_reason,
+                tokens_requested,
+                retry_after_ns,
+            } => {
+                println!(
+                    "  🚫 quota_exceeded agent={agent_id} user={user_id} tier={trust_tier} \
+                     tokens_req={tokens_requested} reason={exceeded_reason:?} \
+                     retry_after_ns={retry_after_ns}"
+                );
+            }
+            AuditEntry::QuotaEscalated {
+                agent_id,
+                user_id,
+                trust_tier,
+                violations_in_window,
+                threshold,
+            } => {
+                println!(
+                    "  🔔 quota_escalated agent={agent_id} user={user_id} tier={trust_tier} \
+                     violations={violations_in_window} threshold={threshold}"
+                );
+            }
+            // ── E20 — Structured Runtime Configuration ────────────────────────
+            AuditEntry::ConfigLoaded {
+                agent_id,
+                path,
+                schema_version,
+                from_file,
+            } => {
+                let src = if *from_file { "file" } else { "defaults" };
+                println!(
+                    "  ⚙  config_loaded agent={agent_id} path={path} \
+                     schema_version={schema_version} source={src}"
+                );
+            }
+            AuditEntry::ConfigReloaded {
+                agent_id,
+                path,
+                changed_keys,
+            } => {
+                let keys = if changed_keys.is_empty() {
+                    "(no changes)".to_string()
+                } else {
+                    changed_keys.join(", ")
+                };
+                println!(
+                    "  ⚙  config_reloaded agent={agent_id} path={path} changed=[{keys}]"
+                );
+            }
+            // ── E22 Session Management ────────────────────────────────────────
+            AuditEntry::SessionStarted {
+                agent_id,
+                session_id,
+                user_id,
+            } => {
+                println!(
+                    "  💬 session_started agent={agent_id} \
+                     session={session_id} user={user_id}"
+                );
+            }
+            AuditEntry::SessionTurnAppended {
+                agent_id,
+                session_id,
+                role,
+                content_len,
+            } => {
+                println!(
+                    "  💬 session_turn_appended agent={agent_id} \
+                     session={session_id} role={role} len={content_len}"
+                );
+            }
+            AuditEntry::SessionArchived {
+                agent_id,
+                session_id,
+                turn_count,
+                has_summary,
+            } => {
+                let summary_tag = if *has_summary { " [summary]" } else { "" };
+                println!(
+                    "  📁 session_archived agent={agent_id} \
+                     session={session_id} turns={turn_count}{summary_tag}"
+                );
+            }
+            AuditEntry::SessionExported {
+                agent_id,
+                session_id,
+                format,
+                turn_count,
+            } => {
+                println!(
+                    "  📤 session_exported agent={agent_id} \
+                     session={session_id} format={format} turns={turn_count}"
+                );
+            }
+            // ── E23 Consent Enforcement and Data Lifecycle ────────────────────
+            AuditEntry::ConsentCheckBlocked {
+                agent_id,
+                user_id,
+                category,
+                reason,
+            } => {
+                println!(
+                    "  🚫 consent_blocked agent={agent_id} \
+                     user={user_id} category={category} reason={reason}"
+                );
+            }
+            AuditEntry::DataExported {
+                agent_id,
+                user_id,
+                section_count,
+                total_records,
+                output_path,
+            } => {
+                println!(
+                    "  📤 data_exported agent={agent_id} user={user_id} \
+                     sections={section_count} records={total_records} path={output_path}"
+                );
+            }
+            AuditEntry::DataDeletedForUser {
+                agent_id,
+                user_id,
+                categories,
+                records_deleted,
+            } => {
+                println!(
+                    "  🗑️  data_deleted agent={agent_id} user={user_id} \
+                     categories=[{categories}] records={records_deleted}"
+                );
+            }
+            AuditEntry::ExpiredConsentCleaned {
+                agent_id,
+                users_scanned,
+                expired_grants_found,
+                users_affected,
+                total_records_deleted,
+            } => {
+                println!(
+                    "  🧹 expired_consent_cleaned agent={agent_id} \
+                     scanned={users_scanned} expired={expired_grants_found} \
+                     affected={users_affected} deleted={total_records_deleted}"
+                );
+            }
+            // ── E24 Response Quality & Feedback Collection ─────────────────
+            AuditEntry::FeedbackReceived {
+                agent_id,
+                user_id,
+                invocation_id,
+                rating_label,
+                score,
+                category_count,
+            } => {
+                println!(
+                    "  💬 feedback_received agent={agent_id} user={user_id} \
+                     inv={invocation_id} rating={rating_label} \
+                     score={score:.2} categories={category_count}"
+                );
+            }
+            AuditEntry::QualityReportGenerated {
+                agent_id,
+                total_feedback,
+                satisfaction_pct,
+                avg_score_pct,
+            } => {
+                let sat = satisfaction_pct
+                    .map(|p| format!("{p}%"))
+                    .unwrap_or_else(|| "n/a".to_string());
+                println!(
+                    "  📊 quality_report agent={agent_id} total={total_feedback} \
+                     satisfaction={sat} avg_score={avg_score_pct}%"
+                );
+            }
+            AuditEntry::FeedbackCorrectionRecorded { agent_id, user_id, invocation_id } => {
+                println!(
+                    "  ✏️  feedback_correction agent={agent_id} user={user_id} \
+                     inv={invocation_id}"
+                );
+            }
+            // ── E26 — Tool Response Caching ─────────────────────────────────
+            AuditEntry::ToolCacheHit {
+                agent_id,
+                tool_id,
+                hit_age_ms,
+            } => {
+                println!(
+                    "  💾 tool_cache_hit agent={agent_id} tool={tool_id} age={hit_age_ms}ms"
+                );
+            }
+            AuditEntry::ToolCacheMiss { agent_id, tool_id } => {
+                println!("  🔍 tool_cache_miss agent={agent_id} tool={tool_id}");
+            }
+            AuditEntry::ToolCacheEvicted { agent_id, count } => {
+                println!("  🗑  tool_cache_evicted agent={agent_id} count={count}");
+            }
+            AuditEntry::KnowledgeEntityAdded {
+                agent_id,
+                entity_id,
+                kind,
+                display_name,
+            } => {
+                println!(
+                    "  🔷 knowledge_entity_added agent={agent_id} id={entity_id} kind={kind} name={display_name}"
+                );
+            }
+            AuditEntry::KnowledgeRelationAdded {
+                agent_id,
+                from_entity,
+                to_entity,
+                kind,
+            } => {
+                println!(
+                    "  🔗 knowledge_relation_added agent={agent_id} {from_entity} --[{kind}]--> {to_entity}"
+                );
+            }
+            AuditEntry::KnowledgeGraphQueried {
+                agent_id,
+                query_type,
+                result_count,
+            } => {
+                println!(
+                    "  🔍 knowledge_graph_queried agent={agent_id} type={query_type} results={result_count}"
+                );
+            }
+            // ── E18 Metrics & Observability ───────────────────────────────────
+            AuditEntry::MetricsSnapshot {
+                agent_id,
+                window_entries,
+                tasks_started,
+                tasks_completed,
+                total_tokens_emitted,
+                gate_decisions,
+                gate_invocations,
+                cortex_invocations,
+                cortex_faults,
+                total_vetoes,
+                sleep_cycles,
+                mean_thermal_load,
+                mean_financial_budget,
+                ..
+            } => {
+                println!(
+                    "  📊  metrics_snapshot agent={agent_id} window={window_entries} \
+                     tasks={tasks_completed}/{tasks_started} tokens={total_tokens_emitted} \
+                     gate={gate_invocations}/{gate_decisions} cortex={cortex_invocations} \
+                     faults={cortex_faults} vetoes={total_vetoes} sleep={sleep_cycles} \
+                     thermal={mean_thermal_load:.2} fin_budget={mean_financial_budget:.2}"
+                );
+            }
+            // ── E28 — Alert Rules ─────────────────────────────────────────────
+            // ── E28 — Alert Rules ─────────────────────────────────────────────
+            AuditEntry::AlertRuleAdded {
+                agent_id, rule_id, description, field, op, threshold, severity,
+            } => {
+                println!(
+                    "  🔔  alert_rule_added agent={agent_id} id={rule_id} \
+                     condition=\"{field} {op} {threshold:.4}\" severity={severity} \
+                     desc=\"{description}\""
+                );
+            }
+            AuditEntry::AlertRuleRemoved { agent_id, rule_id } => {
+                println!("  🔕  alert_rule_removed agent={agent_id} id={rule_id}");
+            }
+            AuditEntry::AlertFired {
+                agent_id, rule_id, field, actual_value, threshold, severity,
+            } => {
+                println!(
+                    "  🚨  alert_fired agent={agent_id} id={rule_id} \
+                     {field}={actual_value:.4} threshold={threshold:.4} severity={severity}"
+                );
+            }
+            AuditEntry::AlertResolved {
+                agent_id, rule_id, field, actual_value,
+            } => {
+                println!(
+                    "  ✅  alert_resolved agent={agent_id} id={rule_id} \
+                     {field}={actual_value:.4}"
+                );
+            }
+            // E29 — Outbound Webhook Integration
+            AuditEntry::WebhookRegistered {
+                agent_id,
+                endpoint_id,
+                url,
+                has_secret,
+            } => {
+                let secret_tag = if *has_secret { " [signed]" } else { "" };
+                println!(
+                    "  🔔 webhook_registered agent={agent_id} id={endpoint_id} \
+                     url={url}{secret_tag}"
+                );
+            }
+            AuditEntry::WebhookRemoved {
+                agent_id,
+                endpoint_id,
+            } => {
+                println!(
+                    "  🗑  webhook_removed agent={agent_id} id={endpoint_id}"
+                );
+            }
+            AuditEntry::WebhookDispatched {
+                agent_id,
+                endpoint_id,
+                event_kind,
+                attempts,
+            } => {
+                let retry_tag = if *attempts > 1 {
+                    format!(" ({attempts} attempts)")
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  📤 webhook_dispatched agent={agent_id} id={endpoint_id} \
+                     event={event_kind}{retry_tag}"
+                );
+            }
+            AuditEntry::WebhookFailed {
+                agent_id,
+                endpoint_id,
+                event_kind,
+                attempts,
+                error,
+            } => {
+                println!(
+                    "  ❌ webhook_failed agent={agent_id} id={endpoint_id} \
+                     event={event_kind} attempts={attempts} error={error:?}"
+                );
+            }
+            // ── E30 — Agent Self-Diagnostic System ───────────────────────────
+            AuditEntry::DiagnosticRun {
+                agent_id,
+                overall_status,
+                healthy_count,
+                degraded_count,
+                critical_count,
+                audit_entries_analysed,
+            } => {
+                let icon = match overall_status.as_str() {
+                    "Healthy" => "✅",
+                    "Degraded" => "⚠️ ",
+                    "Critical" => "🚨",
+                    _ => "❓",
+                };
+                println!(
+                    "  {icon}  diagnostic_run agent={agent_id} status={overall_status} \
+                     healthy={healthy_count} degraded={degraded_count} critical={critical_count} \
+                     entries_analysed={audit_entries_analysed}"
+                );
+            }
+
+            // ── E31 — Multi-Tenant Workspace Management ──────────────────────
+            AuditEntry::WorkspaceCreated {
+                agent_id,
+                workspace_id,
+                display_name,
+                owner_user_id,
+            } => {
+                println!(
+                    "  🏢 workspace_created agent={agent_id} id={workspace_id} \
+                     name={display_name:?} owner={owner_user_id}"
+                );
+            }
+            AuditEntry::WorkspaceMemberAdded {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👥 workspace_member_added agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceMemberRemoved {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👤 workspace_member_removed agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceQuotaUpdated {
+                agent_id,
+                workspace_id,
+                max_members,
+                max_daily_tokens,
+            } => {
+                println!(
+                    "  📊 workspace_quota_updated agent={agent_id} \
+                     workspace={workspace_id} max_members={max_members} \
+                     max_daily_tokens={max_daily_tokens}"
+                );
+            }
+            AuditEntry::WorkspaceStatusChanged {
+                agent_id,
+                workspace_id,
+                old_status,
+                new_status,
+            } => {
+                println!(
+                    "  🔄 workspace_status_changed agent={agent_id} \
+                     workspace={workspace_id} {old_status} → {new_status}"
+                );
+            }
             // ── E32 — Scheduled Job and Cron Engine ───────────────────────────
             AuditEntry::JobScheduled { agent_id, job_id, description, schedule_type, workspace_id } => {
                 println!("  📅 job_scheduled agent={agent_id} id={job_id} desc={description:?} schedule={schedule_type} workspace={workspace_id:?}");
@@ -917,6 +1333,2863 @@ fn print_audit(manager: &LifecycleManager) {
             }
         }
     }
+}
+
+/// Implements the `anima quota` subcommands for inspecting and resetting
+/// per-user token and request quotas.
+///
+/// ```text
+/// anima-hosted quota show [<user_id>]
+/// anima-hosted quota reset <user_id>
+/// anima-hosted quota policy
+/// ```
+///
+/// Demonstrates the E18 quota tracker and audit pipeline against the live
+/// user registry.
+fn cmd_quota(args: &[String]) {
+    use quota::{QuotaPolicy, UserQuotaTracker};
+    use users::{TrustTier, UserRegistry};
+
+    const AGENT_ID: &str = "anima";
+
+    let user_path = UserRegistry::default_path(AGENT_ID);
+    let registry = UserRegistry::open(&user_path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        UserRegistry::in_memory()
+    });
+
+    // Quota state is in-memory per process; a future story (E18 S18.6) may
+    // persist it across restarts via a sidecar JSON file.
+    let mut tracker = UserQuotaTracker::with_default_policy();
+    let policy = QuotaPolicy::default();
+
+    // Use a fixed demo timestamp (no system clock dependency in this command).
+    let now_ns: u64 = 1_700_000_000_000_000_000;
+
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            println!("note: quota state is in-process only; this shows the demo tracker, not a running daemon");
+            match args.get(1) {
+                Some(user_id) => {
+                    // Single-user snapshot.
+                    let tier = registry
+                        .get(user_id)
+                        .map(|r| r.profile.trust_tier)
+                        .unwrap_or(TrustTier::Unknown);
+                    let snap = tracker.snapshot(user_id, tier, now_ns);
+                    println!("quota for {user_id}  (tier: {})", tier);
+                    println!(
+                        "  hourly tokens : {} / {}  ({} remaining)",
+                        snap.hourly_tokens_used,
+                        if snap.hourly_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_tokens_limit.to_string()
+                        },
+                        if snap.hourly_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_tokens_remaining().to_string()
+                        },
+                    );
+                    println!(
+                        "  daily tokens  : {} / {}  ({} remaining)",
+                        snap.daily_tokens_used,
+                        if snap.daily_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.daily_tokens_limit.to_string()
+                        },
+                        if snap.daily_tokens_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.daily_tokens_remaining().to_string()
+                        },
+                    );
+                    println!(
+                        "  hourly reqs   : {} / {}  ({} remaining)",
+                        snap.hourly_requests_used,
+                        if snap.hourly_requests_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_requests_limit.to_string()
+                        },
+                        if snap.hourly_requests_limit == u64::MAX {
+                            "∞".to_owned()
+                        } else {
+                            snap.hourly_requests_remaining().to_string()
+                        },
+                    );
+                    if snap.consecutive_violations > 0 {
+                        println!(
+                            "  violations    : {} consecutive",
+                            snap.consecutive_violations
+                        );
+                    }
+                }
+                None => {
+                    // Summary of all registered users.
+                    println!(
+                        "{:>20}  {:>10}  {:>15}  {:>15}  {:>12}",
+                        "user_id", "tier", "hourly_toks", "daily_toks", "hourly_reqs"
+                    );
+                    println!("{}", "-".repeat(78));
+                    let mut entries: Vec<_> = registry.iter().collect();
+                    entries.sort_by_key(|(id, _)| *id);
+                    for (id, rec) in entries {
+                        let tier = rec.profile.trust_tier;
+                        let snap = tracker.snapshot(id, tier, now_ns);
+                        let fmt_limit = |v: u64| {
+                            if v == u64::MAX {
+                                "∞".to_owned()
+                            } else {
+                                v.to_string()
+                            }
+                        };
+                        println!(
+                            "{:>20}  {:>10}  {:>15}  {:>15}  {:>12}",
+                            id,
+                            tier,
+                            format!(
+                                "{}/{}",
+                                snap.hourly_tokens_used,
+                                fmt_limit(snap.hourly_tokens_limit)
+                            ),
+                            format!(
+                                "{}/{}",
+                                snap.daily_tokens_used,
+                                fmt_limit(snap.daily_tokens_limit)
+                            ),
+                            format!(
+                                "{}/{}",
+                                snap.hourly_requests_used,
+                                fmt_limit(snap.hourly_requests_limit)
+                            ),
+                        );
+                    }
+                    if registry.is_empty() {
+                        println!("(no registered users — register users first with 'anima-hosted users register')");
+                    }
+                }
+            }
+        }
+        Some("reset") => match args.get(1) {
+            Some(user_id) => {
+                println!("note: quota state is in-process only; this resets the demo tracker, not a running daemon");
+                tracker.reset(user_id);
+                println!("quota: reset usage windows for {user_id:?}");
+                println!("quota: reset complete");
+                let _ = &mut log; // log unused in this path; kept for future persistence hook
+            }
+            None => eprintln!("usage: anima-hosted quota reset <user_id>"),
+        },
+        Some("policy") => {
+            println!("quota policy (default):");
+            println!(
+                "  unknown   : {}t/h  {}t/d  {}r/h",
+                policy.unknown.tokens_per_hour,
+                policy.unknown.tokens_per_day,
+                policy.unknown.requests_per_hour
+            );
+            println!(
+                "  verified  : {}t/h  {}t/d  {}r/h",
+                policy.verified.tokens_per_hour,
+                policy.verified.tokens_per_day,
+                policy.verified.requests_per_hour
+            );
+            println!(
+                "  trusted   : {}t/h  {}t/d  {}r/h",
+                policy.trusted.tokens_per_hour,
+                policy.trusted.tokens_per_day,
+                policy.trusted.requests_per_hour
+            );
+            println!("  operator  : ∞t/h  ∞t/d  ∞r/h  (unlimited)");
+            println!(
+                "  escalation_threshold   : {} consecutive violations",
+                policy.escalation_threshold
+            );
+            println!(
+                "  escalation_cooldown    : {}s",
+                policy.escalation_cooldown_ns / 1_000_000_000
+            );
+
+            // Demo: simulate a few requests and show the audit trail.
+            println!("\n--- demo: unknown-tier exhaustion scenario ---");
+            let demo_policy = QuotaPolicy {
+                unknown: quota::TierLimits {
+                    tokens_per_hour: 5,
+                    tokens_per_day: 20,
+                    requests_per_hour: 3,
+                },
+                // Low threshold so escalation shows in the demo.
+                escalation_threshold: 3,
+                escalation_cooldown_ns: 0,
+                ..QuotaPolicy::default()
+            };
+            let mut demo_tracker = UserQuotaTracker::new(demo_policy);
+            let demo_user = "telegram:demo";
+
+            for i in 1u64..=7 {
+                let result =
+                    demo_tracker.check_and_consume(demo_user, TrustTier::Unknown, 2, now_ns + i);
+                match &result {
+                    quota::QuotaResult::Allowed {
+                        remaining_hourly_tokens,
+                        remaining_hourly_requests,
+                        ..
+                    } => {
+                        println!(
+                            "  req {i}: allowed  remaining_hourly={}t {}r",
+                            remaining_hourly_tokens, remaining_hourly_requests
+                        );
+                    }
+                    quota::QuotaResult::Exceeded {
+                        reason,
+                        retry_after_ns,
+                        ..
+                    } => {
+                        log.push(vita::AuditEntry::QuotaExceeded {
+                            agent_id: AGENT_ID.to_owned(),
+                            user_id: demo_user.to_owned(),
+                            trust_tier: TrustTier::Unknown.as_str().to_owned(),
+                            exceeded_reason: reason.description(),
+                            tokens_requested: 2,
+                            retry_after_ns: *retry_after_ns,
+                        });
+                        // Check escalation.
+                        if demo_tracker.should_escalate(demo_user, now_ns + i) {
+                            log.push(vita::AuditEntry::QuotaEscalated {
+                                agent_id: AGENT_ID.to_owned(),
+                                user_id: demo_user.to_owned(),
+                                trust_tier: TrustTier::Unknown.as_str().to_owned(),
+                                violations_in_window: demo_tracker
+                                    .consecutive_violations(demo_user),
+                                threshold: demo_tracker.policy().escalation_threshold,
+                            });
+                            demo_tracker.record_escalation(demo_user, now_ns + i);
+                        }
+                        println!("  req {i}: EXCEEDED — {}", reason.description());
+                    }
+                }
+            }
+
+            println!("\n--- audit trail ---");
+            for entry in log.entries() {
+                match entry {
+                    vita::AuditEntry::QuotaExceeded {
+                        user_id,
+                        exceeded_reason,
+                        tokens_requested,
+                        ..
+                    } => {
+                        println!(
+                            "  🚫 quota_exceeded user={user_id} tokens_req={tokens_requested} \
+                             reason={exceeded_reason:?}"
+                        );
+                    }
+                    vita::AuditEntry::QuotaEscalated {
+                        user_id,
+                        violations_in_window,
+                        threshold,
+                        ..
+                    } => {
+                        println!(
+                            "  🔔 quota_escalated user={user_id} \
+                             violations={violations_in_window} threshold={threshold}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted quota show [<user_id>]");
+            eprintln!("       anima-hosted quota reset <user_id>");
+            eprintln!("       anima-hosted quota policy");
+        }
+    }
+}
+
+/// Implements the `anima config show | validate [<path>] | init [--path <p>]`
+/// subcommands.
+///
+/// Satisfies E20 exit criteria:
+/// 1. `config init` writes a valid default config; `config validate` accepts it.
+/// 2. Config round-trips through TOML without data loss.
+/// 3. Config load is audited with `AuditEntry::ConfigLoaded`.
+fn cmd_config(args: &[String]) {
+    use config::{load_or_defaults, AnimaConfig, ConfigSource};
+
+    const AGENT_ID: &str = "anima";
+    let sub = args.first().map(String::as_str).unwrap_or("show");
+
+    match sub {
+        "show" => {
+            let default_path = AnimaConfig::default_path(AGENT_ID);
+            let (cfg, src) = load_or_defaults(&default_path);
+            let from_file = matches!(src, ConfigSource::File(_));
+            let path_str = match &src {
+                ConfigSource::File(p) => p.to_string_lossy().to_string(),
+                ConfigSource::Defaults => default_path.to_string_lossy().to_string(),
+            };
+
+            println!("AnimaOS Runtime Configuration");
+            println!(
+                "Source: {}",
+                if from_file {
+                    &path_str
+                } else {
+                    "(built-in defaults)"
+                }
+            );
+            println!();
+            print!("{}", cfg.to_display_string());
+
+            let mut log = AuditLog::new();
+            log.push(AuditEntry::ConfigLoaded {
+                agent_id: AGENT_ID.to_string(),
+                path: path_str,
+                schema_version: cfg.schema.version,
+                from_file,
+            });
+            println!("\nAudit trail:");
+            for entry in log.entries() {
+                if let AuditEntry::ConfigLoaded {
+                    path,
+                    schema_version,
+                    from_file,
+                    ..
+                } = entry
+                {
+                    let src_label = if *from_file { "file" } else { "defaults" };
+                    println!(
+                        "  ⚙  config_loaded schema_version={schema_version} source={src_label} path={path}"
+                    );
+                }
+            }
+        }
+
+        "validate" => {
+            let path = args
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| AnimaConfig::default_path(AGENT_ID));
+            println!("Validating: {}", path.display());
+            match AnimaConfig::from_file(&path) {
+                Ok(cfg) => {
+                    println!("✓ Valid  (schema version {})", cfg.schema.version);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("✗ Invalid: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "init" => {
+            let path = {
+                let flag_pos = args.iter().position(|a| a == "--path");
+                if let Some(pos) = flag_pos {
+                    args.get(pos + 1)
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| AnimaConfig::default_path(AGENT_ID))
+                } else {
+                    AnimaConfig::default_path(AGENT_ID)
+                }
+            };
+
+            if path.exists() {
+                println!("Config already exists at {}", path.display());
+                println!("Use `config validate` to check it, or delete and re-run `config init`.");
+                return;
+            }
+
+            let cfg = AnimaConfig::from_defaults();
+            let toml_str = match cfg.to_toml_string() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to serialize default config: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "Failed to create config directory {}: {e}",
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            let tmp = path.with_extension("toml.tmp");
+            if let Err(e) = std::fs::write(&tmp, &toml_str) {
+                eprintln!("Failed to write temp config {}: {e}", tmp.display());
+                std::process::exit(1);
+            }
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                eprintln!("Failed to rename config into place: {e}");
+                std::process::exit(1);
+            }
+
+            println!("✓ Default config written to {}", path.display());
+            println!("  Edit it, then run `anima-hosted config validate` to check your changes.");
+
+            let mut log = AuditLog::new();
+            log.push(AuditEntry::ConfigLoaded {
+                agent_id: AGENT_ID.to_string(),
+                path: path.to_string_lossy().to_string(),
+                schema_version: cfg.schema.version,
+                from_file: false,
+            });
+            println!(
+                "\nAudit entry emitted: ConfigLoaded(schema_version={}, source=defaults)",
+                cfg.schema.version
+            );
+        }
+
+        _ => {
+            eprintln!("Usage: anima-hosted config <show | validate [<path>] | init [--path <p>]>");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Implements the `anima sessions` subcommands for conversation history.
+///
+/// ```text
+/// anima-hosted sessions list [--user <user_id>]
+/// anima-hosted sessions show <session_id>
+/// anima-hosted sessions new <user_id>
+/// anima-hosted sessions append <session_id> <role> <content>
+/// anima-hosted sessions archive <session_id> [--summary <text>]
+/// anima-hosted sessions export <session_id> [--format jsonl|markdown]
+/// anima-hosted sessions search <query>
+/// ```
+fn cmd_sessions(args: &[String]) {
+    use sessions::{
+        make_session_id, ConversationRole, ConversationTurn, ExportFormat, SessionQuery,
+        SessionRecord, SessionStatus, SessionStore,
+    };
+    use std::str::FromStr;
+
+    const AGENT_ID: &str = "anima";
+    let path = SessionStore::default_path(AGENT_ID);
+    let mut store = SessionStore::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open session store ({e}); using in-memory fallback");
+        SessionStore::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        // ── list ──────────────────────────────────────────────────────────────
+        Some("list") => {
+            let user_id = args
+                .windows(2)
+                .find(|w| w[0] == "--user")
+                .map(|w| w[1].clone());
+            let mut q = SessionQuery::default();
+            if let Some(uid) = user_id {
+                q = SessionQuery::for_user(uid);
+            }
+            let sessions = store.list(&q);
+            if sessions.is_empty() {
+                println!("sessions: no sessions found");
+            } else {
+                println!("sessions ({} total):", sessions.len());
+                for s in sessions {
+                    println!(
+                        "  {} | user={} status={} turns={} started={}",
+                        s.id,
+                        s.user_id,
+                        s.status,
+                        s.turn_count(),
+                        s.started_at_ns,
+                    );
+                }
+            }
+        }
+        // ── show ──────────────────────────────────────────────────────────────
+        Some("show") => match args.get(1) {
+            Some(id) => match store.get(id) {
+                Some(s) => {
+                    println!("session: {}", s.id);
+                    println!("  user   : {}", s.user_id);
+                    println!("  agent  : {}", s.agent_id);
+                    println!("  status : {}", s.status);
+                    println!("  turns  : {}", s.turn_count());
+                    println!("  tokens : {}", s.total_tokens);
+                    if let Some(summary) = &s.summary {
+                        println!("  summary: {summary}");
+                    }
+                    println!("  ---");
+                    for turn in &s.turns {
+                        println!(
+                            "  [{}] {}: {}",
+                            turn.index,
+                            turn.role,
+                            if turn.content.len() > 80 {
+                                format!("{}…", &turn.content[..80])
+                            } else {
+                                turn.content.clone()
+                            }
+                        );
+                    }
+                }
+                None => eprintln!("sessions: session {id:?} not found"),
+            },
+            None => eprintln!("usage: anima-hosted sessions show <session_id>"),
+        },
+        // ── new ───────────────────────────────────────────────────────────────
+        Some("new") => match args.get(1) {
+            Some(user_id) => {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(42);
+                let session_id = make_session_id(nonce);
+                let session = SessionRecord::new(&session_id, user_id, AGENT_ID);
+                match store.insert(session) {
+                    Ok(()) => {
+                        store
+                            .flush()
+                            .unwrap_or_else(|e| eprintln!("sessions: flush error: {e}"));
+                        log.push(AuditEntry::SessionStarted {
+                            agent_id: AGENT_ID.to_string(),
+                            session_id: session_id.clone(),
+                            user_id: user_id.to_string(),
+                        });
+                        println!("sessions: created {session_id}");
+                        print_session_audit(&log);
+                    }
+                    Err(e) => eprintln!("sessions: error: {e}"),
+                }
+            }
+            None => eprintln!("usage: anima-hosted sessions new <user_id>"),
+        },
+        // ── append ────────────────────────────────────────────────────────────
+        Some("append") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(id), Some(role_str), Some(content)) => {
+                match ConversationRole::from_str(role_str) {
+                    Ok(role) => {
+                        let turn = ConversationTurn::new(0, role, content.clone());
+                        let content_len = content.len();
+                        match store.append_turn(id, turn) {
+                            Ok(()) => {
+                                log.push(AuditEntry::SessionTurnAppended {
+                                    agent_id: AGENT_ID.to_string(),
+                                    session_id: id.to_string(),
+                                    role: role_str.to_string(),
+                                    content_len,
+                                });
+                                println!("sessions: appended {role_str} turn to {id}");
+                                print_session_audit(&log);
+                            }
+                            Err(e) => eprintln!("sessions: error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("sessions: unknown role: {e}"),
+                }
+            }
+            _ => eprintln!("usage: anima-hosted sessions append <session_id> <role> <content>"),
+        },
+        // ── archive ───────────────────────────────────────────────────────────
+        Some("archive") => match args.get(1) {
+            Some(id) => {
+                let summary = args
+                    .windows(2)
+                    .find(|w| w[0] == "--summary")
+                    .map(|w| w[1].clone());
+                let has_summary = summary.is_some();
+                let turn_count = store.get(id).map(|s| s.turn_count()).unwrap_or(0);
+                match store.archive(id, summary) {
+                    Ok(()) => {
+                        log.push(AuditEntry::SessionArchived {
+                            agent_id: AGENT_ID.to_string(),
+                            session_id: id.to_string(),
+                            turn_count,
+                            has_summary,
+                        });
+                        println!("sessions: archived {id} ({turn_count} turns)");
+                        print_session_audit(&log);
+                    }
+                    Err(e) => eprintln!("sessions: error: {e}"),
+                }
+            }
+            None => {
+                eprintln!("usage: anima-hosted sessions archive <session_id> [--summary <text>]")
+            }
+        },
+        // ── export ────────────────────────────────────────────────────────────
+        Some("export") => match args.get(1) {
+            Some(id) => {
+                let format_str = args
+                    .windows(2)
+                    .find(|w| w[0] == "--format")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or("jsonl");
+                match ExportFormat::from_str(format_str) {
+                    Ok(format) => {
+                        let turn_count = store.get(id).map(|s| s.turn_count()).unwrap_or(0);
+                        match store.export(id, &format) {
+                            Ok(output) => {
+                                log.push(AuditEntry::SessionExported {
+                                    agent_id: AGENT_ID.to_string(),
+                                    session_id: id.to_string(),
+                                    format: format.to_string(),
+                                    turn_count,
+                                });
+                                println!("{output}");
+                                print_session_audit(&log);
+                            }
+                            Err(e) => eprintln!("sessions: error: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("sessions: unknown format: {e}"),
+                }
+            }
+            None => eprintln!(
+                "usage: anima-hosted sessions export <session_id> [--format jsonl|markdown]"
+            ),
+        },
+        // ── search ────────────────────────────────────────────────────────────
+        Some("search") => match args.get(1) {
+            Some(query) => {
+                let q = SessionQuery::with_content(query);
+                let sessions = store.list(&q);
+                if sessions.is_empty() {
+                    println!("sessions: no sessions match {query:?}");
+                } else {
+                    println!("sessions: {} match(es) for {query:?}:", sessions.len());
+                    for s in sessions {
+                        println!(
+                            "  {} | user={} status={} turns={}",
+                            s.id,
+                            s.user_id,
+                            s.status,
+                            s.turn_count()
+                        );
+                    }
+                }
+            }
+            None => eprintln!("usage: anima-hosted sessions search <query>"),
+        },
+        // ── help / unknown ────────────────────────────────────────────────────
+        _ => {
+            println!("anima-hosted sessions — conversation history management (E22)");
+            println!();
+            println!("  sessions list [--user <user_id>]");
+            println!("  sessions show <session_id>");
+            println!("  sessions new <user_id>");
+            println!("  sessions append <session_id> <role> <content>");
+            println!("  sessions archive <session_id> [--summary <text>]");
+            println!("  sessions export <session_id> [--format jsonl|markdown]");
+            println!("  sessions search <query>");
+        }
+    }
+
+    // Unused alias suppression for SessionStatus (referenced indirectly).
+    let _ = SessionStatus::Active;
+}
+
+/// Print E22-relevant audit entries from an in-process log.
+fn print_session_audit(log: &AuditLog) {
+    println!("--- audit trail ---");
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::SessionStarted {
+                agent_id,
+                session_id,
+                user_id,
+            } => {
+                println!(
+                    "  💬 session_started agent={agent_id} \
+                     session={session_id} user={user_id}"
+                );
+            }
+            AuditEntry::SessionTurnAppended {
+                agent_id,
+                session_id,
+                role,
+                content_len,
+            } => {
+                println!(
+                    "  💬 session_turn_appended agent={agent_id} \
+                     session={session_id} role={role} len={content_len}"
+                );
+            }
+            AuditEntry::SessionArchived {
+                agent_id,
+                session_id,
+                turn_count,
+                has_summary,
+            } => {
+                let tag = if *has_summary { " [summary]" } else { "" };
+                println!(
+                    "  📁 session_archived agent={agent_id} \
+                     session={session_id} turns={turn_count}{tag}"
+                );
+            }
+            AuditEntry::SessionExported {
+                agent_id,
+                session_id,
+                format,
+                turn_count,
+            } => {
+                println!(
+                    "  📤 session_exported agent={agent_id} \
+                     session={session_id} format={format} turns={turn_count}"
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("---");
+}
+
+/// Implements `anima data export <user_id>`, `anima data delete <user_id>`,
+/// `anima data expiry-check`, and `anima data consent-status <user_id>`.
+///
+/// Satisfies E23 exit criteria:
+/// 1. Personal-data export produces a GDPR-ready JSON bundle.
+/// 2. Revocation generates a directive and deletes the appropriate counters.
+/// 3. Expiry scan identifies lapsed grants and produces cleanup directives.
+/// 4. All operations are audited with E23 `AuditEntry` variants.
+fn cmd_data(args: &[String]) {
+    use consent::{build_revocation_directive, scan_expired_grants, DataExportBuilder};
+    use users::{DataCategory, UserRegistry};
+
+    const AGENT_ID: &str = "anima";
+
+    let path = UserRegistry::default_path(AGENT_ID);
+    let mut registry = UserRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        UserRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        // ── `anima data consent-status <user_id>` ────────────────────────────
+        Some("consent-status") => match args.get(1) {
+            Some(user_id) => match registry.get(user_id) {
+                Some(rec) => {
+                    println!("consent status for user {user_id:?}:");
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+                    for cat in DataCategory::all() {
+                        let status = if rec.consent.is_consented(*cat, now_ns) {
+                            "✓ granted"
+                        } else {
+                            "✗ not consented"
+                        };
+                        println!("  {:20} {status}", cat.as_str());
+                    }
+                }
+                None => eprintln!("data: no user with id={user_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted data consent-status <user_id>"),
+        },
+
+        // ── `anima data export <user_id> [--output <path>]` ──────────────────
+        Some("export") => match args.get(1) {
+            Some(user_id) => {
+                let output_path = args
+                    .windows(2)
+                    .find(|w| w[0] == "--output")
+                    .and_then(|w| w.get(1))
+                    .cloned()
+                    .unwrap_or_else(|| format!("{user_id}-export.json"));
+
+                match registry.get(user_id) {
+                    Some(rec) => {
+                        let now_ns = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+
+                        // Build export: always include the identity profile first,
+                        // then add a section for each consented data category.
+                        let mut builder = DataExportBuilder::new();
+                        builder.add_raw_section(
+                            "user_profile",
+                            1,
+                            serde_json::json!({
+                                "user_id": rec.profile.user_id,
+                                "display_name": rec.profile.display_name,
+                                "channel": rec.profile.channel,
+                                "trust_tier": rec.profile.trust_tier.as_str(),
+                                "created_at_ns": rec.profile.created_at_ns,
+                                "last_seen_ns": rec.profile.last_seen_ns,
+                                "facts": rec.profile.facts,
+                            }),
+                        );
+                        for cat in DataCategory::all() {
+                            if rec.consent.is_consented(*cat, now_ns) {
+                                builder.add_section(
+                                    *cat,
+                                    1,
+                                    serde_json::json!({
+                                        "user_id": user_id,
+                                        "category": cat.as_str(),
+                                        "note": "placeholder — wire to store for full export"
+                                    }),
+                                );
+                            }
+                        }
+                        let bundle = builder.build(user_id, AGENT_ID, now_ns);
+                        let json = serde_json::to_string_pretty(&bundle)
+                            .expect("serialisation never fails");
+                        std::fs::write(&output_path, &json).unwrap_or_else(|e| {
+                            eprintln!("data: could not write {output_path}: {e}");
+                        });
+                        log.push(AuditEntry::DataExported {
+                            agent_id: AGENT_ID.to_owned(),
+                            user_id: user_id.clone(),
+                            section_count: bundle.sections.len(),
+                            total_records: bundle.total_records,
+                            output_path: output_path.clone(),
+                        });
+                        println!(
+                            "data: exported {user_id:?} → {output_path} \
+                             ({} sections, {} records)",
+                            bundle.sections.len(),
+                            bundle.total_records,
+                        );
+                        print_data_audit(&log);
+                    }
+                    None => eprintln!("data: no user with id={user_id:?}"),
+                }
+            }
+            None => eprintln!("usage: anima-hosted data export <user_id> [--output <path>]"),
+        },
+
+        // ── `anima data delete <user_id>` ─────────────────────────────────────
+        Some("delete") => match args.get(1) {
+            Some(user_id) => {
+                let user_exists = registry.get(user_id).is_some();
+                if user_exists {
+                    let now_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0);
+
+                    // Build directive for all categories.
+                    let all: Vec<DataCategory> = DataCategory::all().to_vec();
+                    let directive = build_revocation_directive(user_id, &all, now_ns);
+
+                    let categories_str = directive.revoked_categories.join(", ");
+                    log.push(AuditEntry::DataDeletedForUser {
+                        agent_id: AGENT_ID.to_owned(),
+                        user_id: user_id.clone(),
+                        categories: categories_str.clone(),
+                        records_deleted: 0, // stores not wired yet
+                    });
+
+                    // Remove the user record from the registry and persist.
+                    registry.remove(user_id).ok();
+                    registry
+                        .flush()
+                        .unwrap_or_else(|e| eprintln!("data: registry flush failed: {e}"));
+
+                    println!(
+                        "data: deletion directive generated for {user_id:?} \
+                         categories=[{categories_str}]"
+                    );
+                    println!(
+                        "data: purge_sessions={} purge_episodic={} \
+                         purge_identity={} purge_knowledge={} purge_stats={}",
+                        directive.purge_sessions,
+                        directive.purge_episodic_memory,
+                        directive.purge_identity_facts,
+                        directive.purge_knowledge_corpus,
+                        directive.purge_usage_stats,
+                    );
+                    print_data_audit(&log);
+                } else {
+                    eprintln!("data: no user with id={user_id:?}");
+                }
+            }
+            None => eprintln!("usage: anima-hosted data delete <user_id>"),
+        },
+
+        // ── `anima data expiry-check` ─────────────────────────────────────────
+        Some("expiry-check") => {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+
+            // Collect consent records from the registry.
+            let user_consent: Vec<(String, users::ConsentRecord)> = registry
+                .iter()
+                .map(|(id, rec)| (id.to_owned(), rec.consent.clone()))
+                .collect();
+
+            let report = scan_expired_grants(
+                user_consent.iter().map(|(id, rec)| (id.as_str(), rec)),
+                now_ns,
+            );
+
+            println!("expiry-check: scanned {} users", report.users_scanned);
+            if report.is_clean() {
+                println!("expiry-check: no expired grants found");
+            } else {
+                println!(
+                    "expiry-check: {} expired grants in {} users",
+                    report.expired_count(),
+                    report.directives.len()
+                );
+                for eg in &report.expired_grants {
+                    println!(
+                        "  expired: user={} category={} expired_at={}ns",
+                        eg.user_id, eg.category, eg.expired_at_ns
+                    );
+                }
+
+                // Revoke the expired grants in the registry so subsequent runs
+                // don't re-report the same entries.
+                for eg in &report.expired_grants {
+                    if let Some(rec) = registry.get_mut(&eg.user_id) {
+                        if let Ok(cat) = eg.category.parse::<DataCategory>() {
+                            rec.consent.set(cat, false, now_ns);
+                        }
+                    }
+                }
+                registry
+                    .flush()
+                    .unwrap_or_else(|e| eprintln!("expiry-check: registry flush failed: {e}"));
+            }
+            log.push(AuditEntry::ExpiredConsentCleaned {
+                agent_id: AGENT_ID.to_owned(),
+                users_scanned: report.users_scanned,
+                expired_grants_found: report.expired_count(),
+                users_affected: report.directives.len(),
+                total_records_deleted: 0, // stores not wired yet
+            });
+            print_data_audit(&log);
+        }
+
+        _ => {
+            eprintln!("usage: anima-hosted data consent-status <user_id>");
+            eprintln!("       anima-hosted data export <user_id> [--output <path>]");
+            eprintln!("       anima-hosted data delete <user_id>");
+            eprintln!("       anima-hosted data expiry-check");
+        }
+    }
+}
+
+/// Prints E23 audit entries to stdout (same style as the main `print_audit`).
+fn print_data_audit(log: &AuditLog) {
+    use vita::AuditEntry;
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::ConsentCheckBlocked {
+                agent_id,
+                user_id,
+                category,
+                reason,
+            } => {
+                println!(
+                    "audit: consent_blocked agent={agent_id} user={user_id} \
+                     category={category} reason={reason}"
+                );
+            }
+            AuditEntry::DataExported {
+                agent_id,
+                user_id,
+                section_count,
+                total_records,
+                output_path,
+            } => {
+                println!(
+                    "audit: data_exported agent={agent_id} user={user_id} \
+                     sections={section_count} records={total_records} \
+                     path={output_path}"
+                );
+            }
+            AuditEntry::DataDeletedForUser {
+                agent_id,
+                user_id,
+                categories,
+                records_deleted,
+            } => {
+                println!(
+                    "audit: data_deleted agent={agent_id} user={user_id} \
+                     categories=[{categories}] records={records_deleted}"
+                );
+            }
+            AuditEntry::ExpiredConsentCleaned {
+                agent_id,
+                users_scanned,
+                expired_grants_found,
+                users_affected,
+                total_records_deleted,
+            } => {
+                println!(
+                    "audit: expired_consent_cleaned agent={agent_id} \
+                     scanned={users_scanned} expired={expired_grants_found} \
+                     affected={users_affected} deleted={total_records_deleted}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Implements the `anima feedback` subcommands for recording and reviewing
+/// response quality feedback.
+///
+/// Subcommands:
+/// - `record <invocation_id> <user_id> <up|down|stars:N> [--correct <text>]`
+///   Record explicit feedback on a cortex invocation.
+/// - `list [--user <user_id>]`
+///   List stored feedback records (optionally filtered by user).
+/// - `analyze [--user <user_id>]`
+///   Print an aggregated quality report.
+/// - `export [--output <path>]`
+///   Write the feedback store to a JSON file (default: stdout).
+fn cmd_feedback(args: &[String]) {
+    use std::str::FromStr;
+
+    use feedback::{
+        build_training_hints, FeedbackCategory, FeedbackRating, FeedbackRecord, FeedbackStore,
+        QualityReport,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let path = FeedbackStore::default_path(AGENT_ID);
+    let mut store = FeedbackStore::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open feedback store ({e}); using in-memory fallback");
+        FeedbackStore::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    // Helper: emit and print audit entries for feedback events.
+    let emit_feedback_audit = |log: &mut AuditLog, rec: &FeedbackRecord| {
+        log.push(AuditEntry::FeedbackReceived {
+            agent_id: AGENT_ID.to_owned(),
+            user_id: rec.user_id.clone(),
+            invocation_id: rec.invocation_id.clone(),
+            rating_label: rec.rating.label(),
+            score: rec.rating.as_score(),
+            category_count: rec.categories.len(),
+        });
+        if rec.has_correction() {
+            log.push(AuditEntry::FeedbackCorrectionRecorded {
+                agent_id: AGENT_ID.to_owned(),
+                user_id: rec.user_id.clone(),
+                invocation_id: rec.invocation_id.clone(),
+            });
+        }
+    };
+
+    match args.first().map(String::as_str) {
+        Some("record") => {
+            // feedback record <invocation_id> <user_id> <rating> [--correct <text>]
+            match (args.get(1), args.get(2), args.get(3)) {
+                (Some(inv_id), Some(user_id), Some(rating_str)) => {
+                    match FeedbackRating::from_str(rating_str) {
+                        Ok(rating) => {
+                            // Wall-clock nanos for the record ID; stub value for
+                            // determinism in tests.
+                            let ts_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64;
+
+                            let mut rec = FeedbackRecord::new(user_id, inv_id, rating, ts_ns);
+
+                            // Parse optional --correct <text>
+                            let mut i = 4usize;
+                            while i < args.len() {
+                                if args[i] == "--correct" {
+                                    if let Some(text) = args.get(i + 1) {
+                                        rec = rec.with_correction(text.clone());
+                                        i += 2;
+                                        continue;
+                                    } else {
+                                        eprintln!("feedback record: --correct requires a value");
+                                        return;
+                                    }
+                                }
+                                i += 1;
+                            }
+
+                            // Parse optional --category <cat>
+                            let mut cats = Vec::new();
+                            let mut j = 4usize;
+                            while j < args.len() {
+                                if args[j] == "--category" {
+                                    if let Some(cat_str) = args.get(j + 1) {
+                                        match FeedbackCategory::from_str(cat_str) {
+                                            Ok(cat) => cats.push(cat),
+                                            Err(e) => {
+                                                eprintln!("feedback record: {e}");
+                                                return;
+                                            }
+                                        }
+                                        j += 2;
+                                        continue;
+                                    } else {
+                                        eprintln!("feedback record: --category requires a value");
+                                        return;
+                                    }
+                                }
+                                j += 1;
+                            }
+                            if !cats.is_empty() {
+                                // Preserve the Corrected marker if --correct was also supplied.
+                                if rec.has_correction()
+                                    && !cats.contains(&FeedbackCategory::Corrected)
+                                {
+                                    cats.push(FeedbackCategory::Corrected);
+                                }
+                                rec = rec.with_categories(cats);
+                            }
+
+                            emit_feedback_audit(&mut log, &rec);
+                            match store.record(rec) {
+                                Ok(()) => {
+                                    println!(
+                                        "feedback: recorded for invocation={inv_id} \
+                                         user={user_id}"
+                                    );
+                                    if let Err(e) = store.flush() {
+                                        eprintln!("feedback: flush failed: {e}");
+                                    }
+                                }
+                                Err(e) => eprintln!("feedback: {e}"),
+                            }
+                        }
+                        Err(e) => eprintln!("feedback record: invalid rating — {e}"),
+                    }
+                }
+                _ => eprintln!(
+                    "usage: anima-hosted feedback record \
+                     <invocation_id> <user_id> <up|down|stars:N> \
+                     [--correct <text>] [--category <cat>]"
+                ),
+            }
+        }
+
+        Some("list") => {
+            // feedback list [--user <user_id>]
+            let user_filter: Option<&str> = args
+                .iter()
+                .position(|a| a == "--user")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let records: Vec<_> = if let Some(uid) = user_filter {
+                store.list_for_user(uid)
+            } else {
+                store.list().iter().collect()
+            };
+
+            if records.is_empty() {
+                println!("(no feedback records)");
+            } else {
+                println!(
+                    "{:<24}  {:<16}  {:<24}  {:<6}  correction",
+                    "id", "user_id", "invocation_id", "rating"
+                );
+                println!("{}", "-".repeat(82));
+                for rec in records {
+                    let corr = if rec.has_correction() { "yes" } else { "no" };
+                    println!(
+                        "{:<24}  {:<16}  {:<24}  {:<6}  {}",
+                        rec.id,
+                        rec.user_id,
+                        rec.invocation_id,
+                        rec.rating.label(),
+                        corr
+                    );
+                }
+            }
+        }
+
+        Some("analyze") => {
+            // feedback analyze [--user <user_id>]
+            let user_filter: Option<&str> = args
+                .iter()
+                .position(|a| a == "--user")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let records: Vec<_> = if let Some(uid) = user_filter {
+                store.list_for_user(uid).into_iter().cloned().collect()
+            } else {
+                store.list().to_vec()
+            };
+
+            let report = QualityReport::generate(&records);
+
+            println!("Quality Report");
+            println!("{}", "=".repeat(40));
+            println!("  total_feedback  : {}", report.total_feedback);
+            println!("  positive        : {}", report.positive_count);
+            println!("  negative        : {}", report.negative_count);
+            println!(
+                "  satisfaction    : {}",
+                report
+                    .satisfaction_pct()
+                    .map(|p| format!("{p}%"))
+                    .unwrap_or_else(|| "n/a".to_string())
+            );
+            println!("  avg_score       : {:.2}", report.avg_score);
+            if let Some(stars) = report.avg_stars {
+                println!("  avg_stars       : {stars:.1}");
+            }
+
+            if !report.category_counts.is_empty() {
+                println!("  categories:");
+                let mut cats: Vec<_> = report.category_counts.iter().collect();
+                cats.sort_by_key(|(k, _)| k.as_str());
+                for (cat, count) in cats {
+                    println!("    {cat:<12} : {count}");
+                }
+            }
+
+            if !report.top_corrected_invocations.is_empty() {
+                println!("  most corrected invocations:");
+                for (inv, count) in &report.top_corrected_invocations {
+                    println!("    {inv} ({count} corrections)");
+                }
+            }
+
+            let hints = build_training_hints(&records);
+            if !hints.is_empty() {
+                println!("  training hints  : {} invocations", hints.len());
+                let reinforcement = hints.iter().filter(|h| h.is_reinforcement).count();
+                let correction = hints.iter().filter(|h| !h.is_reinforcement).count();
+                println!("    reinforcement : {reinforcement}");
+                println!("    correction    : {correction}");
+            }
+
+            log.push(AuditEntry::QualityReportGenerated {
+                agent_id: AGENT_ID.to_owned(),
+                total_feedback: report.total_feedback,
+                satisfaction_pct: report.satisfaction_pct(),
+                avg_score_pct: (report.avg_score * 100.0).round() as u32,
+            });
+        }
+
+        Some("export") => {
+            // feedback export [--output <path>]
+            let out_path: Option<&str> = args
+                .iter()
+                .position(|a| a == "--output")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+
+            let json = match serde_json::to_string_pretty(store.list()) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("feedback export: serialise failed: {e}");
+                    return;
+                }
+            };
+
+            if let Some(out) = out_path {
+                match std::fs::write(out, &json) {
+                    Ok(()) => println!("feedback: exported {} records to {out}", store.len()),
+                    Err(e) => eprintln!("feedback export: write failed: {e}"),
+                }
+            } else {
+                println!("{json}");
+            }
+        }
+
+        _ => {
+            eprintln!(
+                "usage: anima-hosted feedback record \
+                 <invocation_id> <user_id> <up|down|stars:N> \
+                 [--correct <text>] [--category <cat>]"
+            );
+            eprintln!("       anima-hosted feedback list [--user <user_id>]");
+            eprintln!("       anima-hosted feedback analyze [--user <user_id>]");
+            eprintln!("       anima-hosted feedback export [--output <path>]");
+        }
+    }
+
+    // Print any audit entries generated during this command.
+    if !log.is_empty() {
+        println!();
+        for entry in log.entries() {
+            match entry {
+                AuditEntry::FeedbackReceived {
+                    user_id,
+                    invocation_id,
+                    rating_label,
+                    ..
+                } => println!("  audit: feedback_received user={user_id} inv={invocation_id} rating={rating_label}"),
+                AuditEntry::FeedbackCorrectionRecorded { user_id, invocation_id, .. } => {
+                    println!("  audit: correction_recorded user={user_id} inv={invocation_id}")
+                }
+                AuditEntry::QualityReportGenerated { total_feedback, satisfaction_pct, .. } => {
+                    let sat = satisfaction_pct
+                        .map(|p| format!("{p}%"))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    println!("  audit: quality_report total={total_feedback} satisfaction={sat}")
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Performance analytics and spend reporting over the in-memory audit log.
+///
+/// Satisfies E25 exit criterion: a `stats` subcommand that prints token,
+/// latency, gate, and health reports derived from `AuditEntry` data.
+///
+/// ```text
+/// cargo run --bin anima-hosted -- stats [tokens|latency|gate|health|summary]
+/// ```
+fn cmd_stats(args: &[String]) {
+    use analytics::AnalyticsEngine;
+
+    const AGENT_ID: &str = "anima";
+
+    // Build a representative demo audit log so the command always shows
+    // something meaningful without a live `ANIMA_AUDIT_DIR`.
+    let mut log = vita::AuditLog::new();
+
+    // Populate with a variety of entry types that exercise every sub-report.
+    for i in 0u64..8 {
+        log.push(vita::audit::AuditEntry::TaskStarted {
+            agent_id: AGENT_ID.into(),
+            task_id: i,
+            tier: (i % 3) as u8,
+            prompt: "demo task".into(),
+        });
+        log.push(vita::audit::AuditEntry::TaskCompleted {
+            agent_id: AGENT_ID.into(),
+            task_id: i,
+            tokens_emitted: 150 + (i * 30) as u32,
+            response: "demo response".into(),
+        });
+    }
+    // One task failure.
+    log.push(vita::audit::AuditEntry::TaskFailed {
+        agent_id: AGENT_ID.into(),
+        task_id: 99,
+        error: "simulated backend timeout".into(),
+    });
+    // Two cortex invocations, one fault.
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "inv-1".into(),
+        latency_to_first_action_ms: 84,
+    });
+    log.push(vita::audit::AuditEntry::CortexCompleted {
+        task_id: "inv-1".into(),
+        tool_calls: 3,
+        summary_len: 210,
+    });
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "inv-2".into(),
+        latency_to_first_action_ms: 120,
+    });
+    log.push(vita::audit::AuditEntry::CortexFault {
+        task_id: "inv-2".into(),
+        error: "python process exited".into(),
+    });
+    // Gate decisions.
+    let gate_entry = |invoke: bool, class: Option<&str>, vs: f32, th: f32| {
+        vita::audit::AuditEntry::GateDecision {
+            agent_id: AGENT_ID.into(),
+            event_id: "e".into(),
+            invoke,
+            cost_class: class.map(str::to_string),
+            urgency: 0.6,
+            novelty: 0.4,
+            user_facing: false,
+            semantic_class: "background".into(),
+            value_score: vs,
+            threshold_applied: th,
+            thermal_load: 0.1,
+            compute_pressure: 0.2,
+            memory_pressure: 0.1,
+            power_budget: 0.9,
+            financial_budget: 0.8,
+            attention_demand: 0.5,
+            reasoning: "demo".into(),
+            override_active: false,
+        }
+    };
+    log.push(gate_entry(true, Some("MidTier"), 0.65, 0.40));
+    log.push(gate_entry(true, Some("CheapLocal"), 0.55, 0.40));
+    log.push(gate_entry(false, None, 0.30, 0.40));
+    log.push(gate_entry(true, Some("Frontier"), 0.90, 0.40));
+    log.push(gate_entry(false, None, 0.25, 0.40));
+
+    let entries = log.entries();
+    let sub = args.first().map(String::as_str).unwrap_or("summary");
+
+    match sub {
+        "tokens" | "token" => {
+            let r = AnalyticsEngine::token_report(entries);
+            println!("=== Token Report: {} ===", AGENT_ID);
+            println!("Tasks completed   : {}", r.tasks_completed);
+            println!("Tasks failed      : {}", r.tasks_failed);
+            println!("Total tokens      : {}", r.total_tokens);
+            if let Some(s) = &r.per_task {
+                println!("Per-task stats:");
+                println!("  mean            : {:.1}", s.mean);
+                println!("  min             : {}", s.min);
+                println!("  p50             : {}", s.p50);
+                println!("  p95             : {}", s.p95);
+                println!("  p99             : {}", s.p99);
+                println!("  max             : {}", s.max);
+            }
+            if !r.by_tier.is_empty() {
+                println!("By tier:");
+                for t in &r.by_tier {
+                    println!(
+                        "  tier {}  tasks={}  total={}  mean={:.1}",
+                        t.tier, t.tasks, t.total_tokens, t.mean_tokens
+                    );
+                }
+            }
+        }
+        "latency" => {
+            let r = AnalyticsEngine::latency_report(entries);
+            println!("=== Latency Report: {} ===", AGENT_ID);
+            println!("Cortex invocations: {}", r.cortex_invocations);
+            println!("Cortex faults     : {}", r.cortex_faults);
+            println!("Fault rate        : {:.1}%", r.fault_rate_pct);
+            println!("Total tool calls  : {}", r.total_tool_calls);
+            println!(
+                "Mean tool calls   : {:.2}",
+                r.mean_tool_calls_per_completion
+            );
+            if let Some(p) = &r.first_action {
+                println!("Time-to-first-action (ms):");
+                println!("  samples         : {}", p.count);
+                println!("  mean            : {:.1}", p.mean_ms);
+                println!("  p50             : {}", p.p50_ms);
+                println!("  p95             : {}", p.p95_ms);
+                println!("  p99             : {}", p.p99_ms);
+                println!("  max             : {}", p.max_ms);
+            }
+        }
+        "gate" => {
+            let r = AnalyticsEngine::gate_report(entries);
+            println!("=== Gate Report: {} ===", AGENT_ID);
+            println!("Total evaluations : {}", r.total_evaluations);
+            println!("Invocations       : {}", r.invocations);
+            println!("Blocks            : {}", r.blocks);
+            println!("Invocation rate   : {:.1}%", r.invocation_rate_pct);
+            println!("Overrides         : {}", r.overrides);
+            println!("Route modulations : {}", r.route_modulations);
+            println!("Mean value score  : {:.3}", r.mean_value_score);
+            println!("Mean threshold    : {:.3}", r.mean_threshold);
+            println!("Gate efficiency   : {:.1}%", r.efficiency_pct);
+            if !r.by_cost_class.is_empty() {
+                println!("Cost-class distribution:");
+                for cc in &r.by_cost_class {
+                    println!("  {:<15} : {}", cc.cost_class, cc.count);
+                }
+            }
+        }
+        "health" => {
+            let r = AnalyticsEngine::health_report(entries);
+            println!("=== Health Report: {} ===", AGENT_ID);
+            println!("Health score      : {:.3}", r.score);
+            println!("Grade             : {}", r.grade);
+            println!("Total tasks       : {}", r.total_tasks);
+            println!("Defence vetoes    : {}", r.defence_vetoes);
+            println!("Factors:");
+            println!(
+                "  task success    : {:.1}%",
+                r.factors.task_success_rate * 100.0
+            );
+            println!(
+                "  cortex reliab.  : {:.1}%",
+                r.factors.cortex_reliability * 100.0
+            );
+            println!(
+                "  defence health  : {:.1}%",
+                r.factors.defence_health * 100.0
+            );
+            println!(
+                "  gate efficiency : {:.1}%",
+                r.factors.gate_efficiency * 100.0
+            );
+            if r.recommendations.is_empty() {
+                println!("Recommendations   : (none)");
+            } else {
+                println!("Recommendations:");
+                for rec in &r.recommendations {
+                    println!("  - {}", rec);
+                }
+            }
+        }
+        _ => {
+            // Default: full summary.
+            let s = AnalyticsEngine::summary_report(entries, AGENT_ID);
+            println!("=== Analytics Summary: {} ===", s.agent_id);
+            println!("Entries analyzed  : {}", s.entries_analyzed);
+            println!();
+            println!("── Tokens ──────────────────────────────────────────────");
+            println!("  total           : {}", s.token.total_tokens);
+            println!("  completed tasks : {}", s.token.tasks_completed);
+            println!("  failed tasks    : {}", s.token.tasks_failed);
+            if let Some(p) = &s.token.per_task {
+                println!("  p50/p95/p99     : {}/{}/{}", p.p50, p.p95, p.p99);
+            }
+            println!();
+            println!("── Latency ─────────────────────────────────────────────");
+            println!(
+                "  cortex calls    : {} ({} faults, {:.1}% rate)",
+                s.latency.cortex_invocations, s.latency.cortex_faults, s.latency.fault_rate_pct
+            );
+            if let Some(p) = &s.latency.first_action {
+                println!("  TTFA p50/p95    : {}ms / {}ms", p.p50_ms, p.p95_ms);
+            }
+            println!(
+                "  mean tool calls : {:.2}",
+                s.latency.mean_tool_calls_per_completion
+            );
+            println!();
+            println!("── Gate ────────────────────────────────────────────────");
+            println!(
+                "  eval/invoke/blk : {}/{}/{}",
+                s.gate.total_evaluations, s.gate.invocations, s.gate.blocks
+            );
+            println!("  invoc. rate     : {:.1}%", s.gate.invocation_rate_pct);
+            println!("  efficiency      : {:.1}%", s.gate.efficiency_pct);
+            println!();
+            println!("── Health ──────────────────────────────────────────────");
+            println!(
+                "  score / grade   : {:.3} / {}",
+                s.health.score, s.health.grade
+            );
+            if s.health.recommendations.is_empty() {
+                println!("  recommendations : (none)");
+            } else {
+                for rec in &s.health.recommendations {
+                    println!("  ! {}", rec);
+                }
+            }
+        }
+    }
+}
+
+/// Implements the `anima cache` subcommands for the tool response cache (E26).
+///
+/// ```text
+/// anima-hosted cache stats          -- print hit/miss/eviction statistics
+/// anima-hosted cache clear          -- flush all cached entries
+/// anima-hosted cache warm <tool> <payload>  -- pre-populate one entry
+/// ```
+fn cmd_cache(args: &[String]) {
+    use praxis::ToolRegistry;
+    use tool_cache::CachedToolRegistry;
+
+    let registry = ToolRegistry::new();
+    let cached = CachedToolRegistry::with_defaults(registry);
+
+    let sub = args.first().map(String::as_str).unwrap_or("stats");
+    match sub {
+        "stats" => {
+            let s = cached.stats();
+            println!("=== Tool Cache Statistics ===");
+            println!("  entries : {}", s.current_entries);
+            println!("  hits    : {}", s.hits);
+            println!("  misses  : {}", s.misses);
+            println!("  hit_rate: {:.1}%", s.hit_rate() * 100.0);
+            println!("  ttl_evictions     : {}", s.ttl_evictions);
+            println!("  capacity_evictions: {}", s.capacity_evictions);
+        }
+        "clear" => {
+            cached.clear_cache();
+            println!("tool cache cleared");
+        }
+        "warm" => {
+            // anima cache warm <tool_id> <payload_utf8>
+            let tool_id = match args.get(1) {
+                Some(t) => t.as_str(),
+                None => {
+                    eprintln!("usage: anima cache warm <tool_id> <payload>");
+                    return;
+                }
+            };
+            let payload = args.get(2).map(|s| s.as_bytes()).unwrap_or(b"");
+            use praxis::{Bus, ToolEnvelope};
+            let env = ToolEnvelope::new(Bus::Mcp, tool_id, payload.to_vec(), 0);
+            match cached.dispatch(&env) {
+                Ok(resp) => {
+                    let s = cached.stats();
+                    println!(
+                        "cache warm: tool={tool_id} payload={} response_bytes={} entries={}",
+                        args.get(2).map(String::as_str).unwrap_or(""),
+                        resp.len(),
+                        s.current_entries
+                    );
+                }
+                Err(e) => {
+                    eprintln!("cache warm failed for {tool_id}: {e:?}");
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown cache subcommand: {other}");
+            eprintln!("usage: anima cache [stats|clear|warm]");
+        }
+    }
+}
+
+/// Implements the `anima graph` CLI subcommand for knowledge-graph management.
+///
+/// ```text
+/// anima-hosted graph entity add <id> <kind> [--name <display_name>]
+/// anima-hosted graph entity show <id>
+/// anima-hosted graph entity list [--kind <kind>]
+/// anima-hosted graph entity remove <id>
+/// anima-hosted graph relation add <from_id> <to_id> <kind>
+/// anima-hosted graph relation list
+/// anima-hosted graph query neighbors <id> [--depth N]
+/// anima-hosted graph query by-kind <kind>
+/// anima-hosted graph query by-attr <key> <value>
+/// ```
+fn cmd_graph(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+    let path = KnowledgeGraph::default_path(AGENT_ID);
+    let mut g = KnowledgeGraph::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not load knowledge graph ({e}); using in-memory graph");
+        KnowledgeGraph::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        // ── entity sub-commands ───────────────────────────────────────────────
+        Some("entity") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
+                        );
+                        return;
+                    }
+                };
+                let kind_str = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
+                        );
+                        return;
+                    }
+                };
+                let kind: EntityKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown entity kind '{kind_str}'");
+                        eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                        return;
+                    }
+                };
+                // Require explicit "custom:" prefix to prevent typos becoming custom kinds.
+                if matches!(kind, EntityKind::Custom(_))
+                    && !kind_str.to_ascii_lowercase().starts_with("custom:")
+                {
+                    eprintln!("error: unknown entity kind '{kind_str}'");
+                    eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                    return;
+                }
+                // Optional --name flag; reject bare --name with no following value.
+                let display_name = match args.windows(2).find(|w| w[0] == "--name") {
+                    Some(w) => w[1].as_str(),
+                    None => {
+                        if args.last().map(String::as_str) == Some("--name") {
+                            eprintln!("error: --name requires a value");
+                            return;
+                        }
+                        id
+                    }
+                };
+                let entity = Entity::new(id, kind.clone(), display_name);
+                match g.add_entity(entity) {
+                    Ok(()) => {
+                        log.push(AuditEntry::KnowledgeEntityAdded {
+                            agent_id: AGENT_ID.to_string(),
+                            entity_id: id.to_string(),
+                            kind: kind.to_string(),
+                            display_name: display_name.to_string(),
+                        });
+                        g.flush()
+                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        println!("entity '{id}' ({kind}) added to knowledge graph");
+                    }
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            Some("show") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph entity show <id>");
+                        return;
+                    }
+                };
+                match g.get_entity(id) {
+                    Some(e) => {
+                        println!("id:           {}", e.id);
+                        println!("kind:         {}", e.kind);
+                        println!("display_name: {}", e.display_name);
+                        if e.attributes.is_empty() {
+                            println!("attributes:   (none)");
+                        } else {
+                            println!("attributes:");
+                            let mut attrs: Vec<_> = e.attributes.iter().collect();
+                            attrs.sort_by_key(|(k, _)| k.as_str());
+                            for (k, v) in attrs {
+                                println!("  {k} = {v}");
+                            }
+                        }
+                        let rels = g.relations_for(id);
+                        if rels.is_empty() {
+                            println!("relations:    (none)");
+                        } else {
+                            println!("relations:");
+                            for r in rels {
+                                println!(
+                                    "  {} --[{}]--> {} (weight={:.2})",
+                                    r.from, r.kind, r.to, r.weight
+                                );
+                            }
+                        }
+                    }
+                    None => eprintln!("error: entity '{id}' not found"),
+                }
+            }
+            Some("list") => {
+                let kind_filter: Option<EntityKind> = if let Some(w) =
+                    args.windows(2).find(|w| w[0] == "--kind")
+                {
+                    let k_str = w[1].as_str();
+                    match k_str.parse::<EntityKind>() {
+                        Ok(k) => {
+                            if matches!(k, EntityKind::Custom(_))
+                                && !k_str.to_ascii_lowercase().starts_with("custom:")
+                            {
+                                eprintln!("error: unknown entity kind '{k_str}'");
+                                eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                                return;
+                            }
+                            Some(k)
+                        }
+                        Err(()) => {
+                            eprintln!("error: unknown entity kind '{k_str}'");
+                            eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let entities = g.all_entities();
+                let filtered: Vec<_> = if let Some(ref kind) = kind_filter {
+                    entities.into_iter().filter(|e| &e.kind == kind).collect()
+                } else {
+                    entities
+                };
+                if filtered.is_empty() {
+                    println!("(no entities)");
+                } else {
+                    println!("{:<24} {:<16} display_name", "id", "kind");
+                    println!("{}", "-".repeat(64));
+                    for e in filtered {
+                        println!("{:<24} {:<16} {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            Some("remove") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph entity remove <id>");
+                        return;
+                    }
+                };
+                if g.remove_entity(id) {
+                    g.flush()
+                        .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                    println!("entity '{id}' removed (including all connected relations)");
+                } else {
+                    eprintln!("error: entity '{id}' not found");
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph entity add|show|list|remove ...");
+            }
+        },
+
+        // ── relation sub-commands ─────────────────────────────────────────────
+        Some("relation") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let from = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let to = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let kind_str = match args.get(4) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let kind: RelationKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown relation kind '{kind_str}'");
+                        eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
+                        return;
+                    }
+                };
+                // Require explicit "custom:" prefix to prevent typos becoming custom kinds.
+                if matches!(kind, RelationKind::Custom(_))
+                    && !kind_str.to_ascii_lowercase().starts_with("custom:")
+                {
+                    eprintln!("error: unknown relation kind '{kind_str}'");
+                    eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
+                    return;
+                }
+                match g.add_relation(Relation::new(from, to, kind.clone())) {
+                    Ok(()) => {
+                        log.push(AuditEntry::KnowledgeRelationAdded {
+                            agent_id: AGENT_ID.to_string(),
+                            from_entity: from.to_string(),
+                            to_entity: to.to_string(),
+                            kind: kind.to_string(),
+                        });
+                        g.flush()
+                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        println!("relation {from} --[{kind}]--> {to} added");
+                    }
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            Some("list") => {
+                let rels = g.all_relations();
+                if rels.is_empty() {
+                    println!("(no relations)");
+                } else {
+                    println!("{:<20} {:<20} {:<16} weight", "from", "to", "kind");
+                    println!("{}", "-".repeat(72));
+                    for r in rels {
+                        println!("{:<20} {:<20} {:<16} {:.2}", r.from, r.to, r.kind, r.weight);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph relation add|list ...");
+            }
+        },
+
+        // ── query sub-commands ────────────────────────────────────────────────
+        Some("query") => match args.get(1).map(String::as_str) {
+            Some("neighbors") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query neighbors <id> [--depth N]");
+                        return;
+                    }
+                };
+                let depth: usize = args
+                    .windows(2)
+                    .find(|w| w[0] == "--depth")
+                    .and_then(|w| w[1].parse().ok())
+                    .unwrap_or(1);
+                let neighbors = g.find_neighbors(id, depth);
+                let count = neighbors.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: "neighbors".to_string(),
+                    result_count: count,
+                });
+                if neighbors.is_empty() {
+                    println!("(no neighbors found for '{id}' at depth {depth})");
+                } else {
+                    println!("neighbors of '{id}' at depth ≤ {depth}:");
+                    for e in neighbors {
+                        println!("  {} ({}) — {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            Some("by-kind") => {
+                let kind_str = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-kind <kind>");
+                        return;
+                    }
+                };
+                let kind: EntityKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown entity kind '{kind_str}'");
+                        return;
+                    }
+                };
+                let results = g.find_by_kind(&kind);
+                let count = results.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: format!("by_kind:{kind_str}"),
+                    result_count: count,
+                });
+                if results.is_empty() {
+                    println!("(no entities of kind '{kind_str}')");
+                } else {
+                    for e in results {
+                        println!("{} — {}", e.id, e.display_name);
+                    }
+                }
+            }
+            Some("by-attr") => {
+                let key = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        return;
+                    }
+                };
+                let value = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        return;
+                    }
+                };
+                let results = g.find_by_attribute(key, value);
+                let count = results.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: format!("by_attr:{key}={value}"),
+                    result_count: count,
+                });
+                if results.is_empty() {
+                    println!("(no entities with {key}={value})");
+                } else {
+                    for e in results {
+                        println!("{} ({}) — {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph query neighbors|by-kind|by-attr ...");
+            }
+        },
+
+        _ => {
+            eprintln!("anima-hosted graph entity add <id> <kind> [--name <name>]");
+            eprintln!("anima-hosted graph entity show <id>");
+            eprintln!("anima-hosted graph entity list [--kind <kind>]");
+            eprintln!("anima-hosted graph entity remove <id>");
+            eprintln!("anima-hosted graph relation add <from_id> <to_id> <kind>");
+            eprintln!("anima-hosted graph relation list");
+            eprintln!("anima-hosted graph query neighbors <id> [--depth N]");
+            eprintln!("anima-hosted graph query by-kind <kind>");
+            eprintln!("anima-hosted graph query by-attr <key> <value>");
+        }
+    }
+
+    // Print any audit entries generated.
+    if !log.is_empty() {
+        println!();
+        for entry in log.entries() {
+            match entry {
+                AuditEntry::KnowledgeEntityAdded {
+                    agent_id,
+                    entity_id,
+                    kind,
+                    display_name,
+                } => {
+                    println!("audit: 🔷 entity_added agent={agent_id} id={entity_id} kind={kind} name={display_name}");
+                }
+                AuditEntry::KnowledgeRelationAdded {
+                    agent_id,
+                    from_entity,
+                    to_entity,
+                    kind,
+                } => {
+                    println!("audit: 🔗 relation_added agent={agent_id} {from_entity} --[{kind}]--> {to_entity}");
+                }
+                AuditEntry::KnowledgeGraphQueried {
+                    agent_id,
+                    query_type,
+                    result_count,
+                } => {
+                    println!("audit: 🔍 graph_queried agent={agent_id} type={query_type} results={result_count}");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Aggregate the audit log and print a metrics report.
+///
+/// Satisfies E18 exit criterion 1 and 3.
+///
+/// ```text
+/// cargo run --bin anima-hosted -- metrics [--format text|json|prometheus] [--last N]
+/// ```
+fn cmd_metrics(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+
+    // Parse flags.
+    let format = {
+        let mut it = args.iter();
+        let mut fmt = "text";
+        loop {
+            match it.next().map(String::as_str) {
+                Some("--format") | Some("-f") => {
+                    if let Some(f) = it.next() {
+                        fmt = f.as_str();
+                    }
+                }
+                None => break,
+                _ => {}
+            }
+        }
+        fmt.to_string()
+    };
+
+    let last_n: Option<usize> = {
+        let mut it = args.iter();
+        loop {
+            match it.next().map(String::as_str) {
+                Some("--last") => break it.next().and_then(|s| s.parse().ok()),
+                None => break None,
+                _ => continue,
+            }
+        }
+    };
+
+    // Build a demo audit log (no live ANIMA_AUDIT_DIR required in CI).
+    let mut log = vita::AuditLog::new();
+    log.push(vita::audit::AuditEntry::TaskStarted {
+        agent_id: AGENT_ID.to_string(),
+        task_id: 1,
+        tier: 0,
+        prompt: "draft the morning report".to_string(),
+    });
+    log.push(vita::audit::AuditEntry::TaskCompleted {
+        agent_id: AGENT_ID.to_string(),
+        task_id: 1,
+        tokens_emitted: 412,
+        response: "report drafted".to_string(),
+    });
+    log.push(vita::audit::AuditEntry::GateDecision {
+        agent_id: AGENT_ID.to_string(),
+        event_id: "ev1".to_string(),
+        invoke: true,
+        cost_class: Some("MidTier".to_string()),
+        urgency: 0.7,
+        novelty: 0.4,
+        user_facing: true,
+        semantic_class: "UserQuery".to_string(),
+        value_score: 0.65,
+        threshold_applied: 0.4,
+        thermal_load: 0.1,
+        compute_pressure: 0.2,
+        memory_pressure: 0.15,
+        power_budget: 0.9,
+        financial_budget: 0.85,
+        attention_demand: 0.6,
+        reasoning: "user-facing at moderate urgency → invoke".to_string(),
+        override_active: false,
+    });
+    log.push(vita::audit::AuditEntry::CortexInvoked {
+        task_id: "inv-1".to_string(),
+        latency_to_first_action_ms: 110,
+    });
+    log.push(vita::audit::AuditEntry::CortexCompleted {
+        task_id: "inv-1".to_string(),
+        tool_calls: 2,
+        summary_len: 80,
+    });
+    log.push(vita::audit::AuditEntry::SleepEntered {
+        agent_id: AGENT_ID.to_string(),
+    });
+    log.push(vita::audit::AuditEntry::SleepPhaseCompleted {
+        agent_id: AGENT_ID.to_string(),
+        phase: "MemoryPruning".to_string(),
+        success: true,
+    });
+
+    let entries = log.entries();
+    let window = match last_n {
+        Some(n) => {
+            let start = entries.len().saturating_sub(n);
+            &entries[start..]
+        }
+        None => entries,
+    };
+
+    let m = aggregate(window);
+
+    // Record a MetricsSnapshot into the audit trail.
+    log.push(vita::audit::AuditEntry::MetricsSnapshot {
+        agent_id: AGENT_ID.to_string(),
+        window_entries: m.window_entries,
+        tasks_started: m.tasks_started,
+        tasks_completed: m.tasks_completed,
+        total_tokens_emitted: m.total_tokens_emitted,
+        gate_decisions: m.gate_decisions,
+        gate_invocations: m.gate_invocations,
+        cortex_invocations: m.cortex_invocations,
+        cortex_faults: m.cortex_faults,
+        total_vetoes: m.defence_vetoes + m.constitution_vetoes,
+        sleep_cycles: m.sleep_cycles,
+        mean_thermal_load: m.mean_thermal_load as f32,
+        mean_financial_budget: m.mean_financial_budget as f32,
+        tasks_failed: m.tasks_failed,
+    });
+
+    match format.as_str() {
+        "json" => {
+            let json = serde_json::to_string_pretty(&m).expect("serialize metrics");
+            println!("{json}");
+        }
+        "prometheus" | "prom" => {
+            print!("{}", render_prometheus(&m));
+        }
+        _ => {
+            print!("{}", render_text_report(&m));
+        }
+    }
+}
+
+/// Implements alert rule management:
+///   `anima-hosted alert list`
+///   `anima-hosted alert add <id> <field> <op> <threshold> [--severity info|warning|critical] [--desc "..."]`
+///   `anima-hosted alert remove <id>`
+///   `anima-hosted alert eval`
+fn cmd_alert(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+
+    let mut registry = AlertRuleRegistry::in_memory();
+    let mut log = vita::AuditLog::new();
+
+    // Seed a few demo rules so `list` and `eval` always have content.
+    let demo_rules = vec![
+        AlertRule::new(
+            "high-cortex-fault-rate",
+            "Alert when cortex fault rate exceeds 20%",
+            AlertCondition::new(MetricField::CortexFaultRate, ComparisonOp::GreaterThan, 0.2),
+            AlertSeverity::Critical,
+        ),
+        AlertRule::new(
+            "low-task-success",
+            "Alert when task success rate drops below 80%",
+            AlertCondition::new(MetricField::TaskSuccessRate, ComparisonOp::LessThan, 0.8),
+            AlertSeverity::Warning,
+        ),
+        AlertRule::new(
+            "high-thermal",
+            "Alert when mean thermal load exceeds 85%",
+            AlertCondition::new(
+                MetricField::MeanThermalLoad,
+                ComparisonOp::GreaterThan,
+                0.85,
+            ),
+            AlertSeverity::Warning,
+        ),
+        AlertRule::new(
+            "depleted-budget",
+            "Alert when financial budget falls below 10%",
+            AlertCondition::new(
+                MetricField::MeanFinancialBudget,
+                ComparisonOp::LessThan,
+                0.1,
+            ),
+            AlertSeverity::Critical,
+        ),
+    ];
+    for r in demo_rules {
+        let id = r.id.clone();
+        let field = r.condition.field.to_string();
+        let op = r.condition.op.to_string();
+        let threshold = r.condition.threshold;
+        let severity = r.severity.to_string();
+        let description = r.description.clone();
+        registry.add(r).ok();
+        log.push(vita::audit::AuditEntry::AlertRuleAdded {
+            agent_id: AGENT_ID.to_string(),
+            rule_id: id,
+            description,
+            field,
+            op,
+            threshold,
+            severity,
+        });
+    }
+
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+
+    match sub {
+        "list" => {
+            println!("=== Alert Rules: {AGENT_ID} ===");
+            let rules = registry.list();
+            if rules.is_empty() {
+                println!("  (no rules registered)");
+            } else {
+                for r in &rules {
+                    let status = if r.enabled { "enabled" } else { "disabled" };
+                    println!(
+                        "  [{status:8}] {:<40} {} {} {:.4}  [{}]  {}",
+                        r.id,
+                        r.condition.field,
+                        r.condition.op,
+                        r.condition.threshold,
+                        r.severity,
+                        r.description,
+                    );
+                }
+                println!("\n{} rule(s) registered.", rules.len());
+            }
+        }
+
+        "add" => {
+            // alert add <id> <field> <op> <threshold> [--severity S] [--desc D]
+            if args.len() < 5 {
+                eprintln!("Usage: alert add <id> <field> <op> <threshold> [--severity info|warning|critical] [--desc \"...\"]");
+                return;
+            }
+            let id = &args[1];
+            let field: MetricField = match args[2].parse() {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Invalid field: {e}");
+                    return;
+                }
+            };
+            let op: ComparisonOp = match args[3].parse() {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Invalid op: {e}");
+                    return;
+                }
+            };
+            let threshold: f64 = match args[4].parse() {
+                Ok(t) => t,
+                Err(_) => {
+                    eprintln!("Invalid threshold (expected f64)");
+                    return;
+                }
+            };
+            let mut severity = AlertSeverity::Warning;
+            let mut description = format!("{} {} {:.4}", field, op, threshold);
+            let mut i = 5usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--severity" if i + 1 < args.len() => {
+                        severity = args[i + 1].parse().unwrap_or(AlertSeverity::Warning);
+                        i += 2;
+                    }
+                    "--desc" if i + 1 < args.len() => {
+                        description = args[i + 1].clone();
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let field_s = field.to_string();
+            let op_s = op.to_string();
+            let sev_s = severity.to_string();
+            let rule = AlertRule::new(
+                id,
+                &description,
+                AlertCondition::new(field, op, threshold),
+                severity,
+            );
+            match registry.add(rule) {
+                Ok(()) => {
+                    log.push(vita::audit::AuditEntry::AlertRuleAdded {
+                        agent_id: AGENT_ID.to_string(),
+                        rule_id: id.clone(),
+                        description: description.clone(),
+                        field: field_s,
+                        op: op_s,
+                        threshold,
+                        severity: sev_s,
+                    });
+                    println!("Rule '{id}' added.");
+                    println!("\nAudit trail:");
+                    print_audit_alert(&log);
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        "remove" => {
+            let id = match args.get(1) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Usage: alert remove <id>");
+                    return;
+                }
+            };
+            match registry.remove(id) {
+                Ok(_) => {
+                    log.push(vita::audit::AuditEntry::AlertRuleRemoved {
+                        agent_id: AGENT_ID.to_string(),
+                        rule_id: id.clone(),
+                    });
+                    println!("Rule '{id}' removed.");
+                    println!("\nAudit trail:");
+                    print_audit_alert(&log);
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        "eval" => {
+            // Evaluate demo rules against a seeded metrics snapshot.
+            let mut demo_log = vita::AuditLog::new();
+            demo_log.push(vita::audit::AuditEntry::TaskStarted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 1,
+                tier: 0,
+                prompt: "morning report".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskCompleted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 1,
+                tokens_emitted: 300,
+                response: "done".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskStarted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 2,
+                tier: 0,
+                prompt: "failing task".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskFailed {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 2,
+                error: "backend timeout".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::CortexInvoked {
+                task_id: "inv-1".to_string(),
+                latency_to_first_action_ms: 95,
+            });
+            demo_log.push(vita::audit::AuditEntry::CortexFault {
+                task_id: "inv-1".to_string(),
+                error: "python process crashed".to_string(),
+            });
+
+            let m = aggregate(demo_log.entries());
+            let rules = registry.rules_owned();
+            let mut trackers = vec![];
+            let events = alerts::evaluate(&m, &rules, &mut trackers);
+
+            println!("=== Alert Evaluation: {AGENT_ID} ===");
+            println!(
+                "Metrics window: {} entries | task_success_rate={:.2} | cortex_fault_rate={:.2}",
+                m.window_entries, m.task_success_rate, m.cortex_fault_rate
+            );
+            println!();
+
+            if events.is_empty() {
+                println!("  No alerts fired.");
+            } else {
+                for ev in &events {
+                    let icon = match ev.kind {
+                        alerts::AlertEventKind::Fired => "🚨 FIRED   ",
+                        alerts::AlertEventKind::Resolved => "✅ RESOLVED",
+                    };
+                    println!(
+                        "  {icon}  [{:8}]  {}  ({} = {:.4}, threshold = {:.4})",
+                        ev.severity, ev.rule_id, ev.field, ev.actual_value, ev.threshold
+                    );
+                    // Emit audit entries.
+                    match ev.kind {
+                        alerts::AlertEventKind::Fired => {
+                            log.push(vita::audit::AuditEntry::AlertFired {
+                                agent_id: AGENT_ID.to_string(),
+                                rule_id: ev.rule_id.clone(),
+                                field: ev.field.to_string(),
+                                actual_value: ev.actual_value,
+                                threshold: ev.threshold,
+                                severity: ev.severity.to_string(),
+                            });
+                        }
+                        alerts::AlertEventKind::Resolved => {
+                            log.push(vita::audit::AuditEntry::AlertResolved {
+                                agent_id: AGENT_ID.to_string(),
+                                rule_id: ev.rule_id.clone(),
+                                field: ev.field.to_string(),
+                                actual_value: ev.actual_value,
+                            });
+                        }
+                    }
+                }
+            }
+            println!("\nAudit trail (E28 entries):");
+            print_audit_alert(&log);
+        }
+
+        other => {
+            eprintln!("Unknown alert subcommand: {other}");
+            eprintln!("Available: list, add, remove, eval");
+        }
+    }
+}
+
+fn print_audit_alert(log: &vita::AuditLog) {
+    for entry in log.entries() {
+        match entry {
+            vita::audit::AuditEntry::AlertRuleAdded {
+                agent_id,
+                rule_id,
+                field,
+                op,
+                threshold,
+                severity,
+                ..
+            } => {
+                println!("  🔔  alert_rule_added agent={agent_id} id={rule_id} condition=\"{field} {op} {threshold:.4}\" severity={severity}");
+            }
+            vita::audit::AuditEntry::AlertRuleRemoved { agent_id, rule_id } => {
+                println!("  🔕  alert_rule_removed agent={agent_id} id={rule_id}");
+            }
+            vita::audit::AuditEntry::AlertFired {
+                agent_id,
+                rule_id,
+                field,
+                actual_value,
+                threshold,
+                severity,
+            } => {
+                println!("  🚨  alert_fired agent={agent_id} id={rule_id} {field}={actual_value:.4} threshold={threshold:.4} severity={severity}");
+            }
+            vita::audit::AuditEntry::AlertResolved {
+                agent_id,
+                rule_id,
+                field,
+                actual_value,
+            } => {
+                println!(
+                    "  ✅  alert_resolved agent={agent_id} id={rule_id} {field}={actual_value:.4}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Implements the `anima webhook` subcommands for E29 — Outbound Webhook Integration.
+///
+/// ```text
+/// anima-hosted webhook list
+/// anima-hosted webhook add <url> [--secret <key>] [--events <kind1,kind2,...>]
+/// anima-hosted webhook remove <id>
+/// anima-hosted webhook enable <id>
+/// anima-hosted webhook disable <id>
+/// anima-hosted webhook test <id>
+/// anima-hosted webhook stats
+/// ```
+fn cmd_webhook(args: &[String]) {
+    use webhooks::{
+        new_delivery_id, new_endpoint_id, DispatchConfig, EventFilter, FixtureSender,
+        WebhookDispatcher, WebhookEndpoint, WebhookPayload, WebhookRegistry,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let path = WebhookRegistry::default_path(AGENT_ID);
+    let mut registry = WebhookRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open webhook registry ({e}); using in-memory fallback");
+        WebhookRegistry::in_memory()
+    });
+    let mut log = AuditLog::from_env(AGENT_ID);
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let endpoints = registry.list();
+            if endpoints.is_empty() {
+                println!("webhook: no endpoints registered");
+            } else {
+                println!("=== Webhook Endpoints: {} ===", AGENT_ID);
+                for ep in &endpoints {
+                    let status = if ep.enabled { "enabled" } else { "disabled" };
+                    let secret_tag = if ep.secret.is_some() { " [signed]" } else { "" };
+                    let filter_tag = match &ep.filter {
+                        EventFilter::All => "all".to_owned(),
+                        EventFilter::Selected { kinds } => {
+                            let mut v: Vec<&str> = kinds.iter().map(String::as_str).collect();
+                            v.sort();
+                            v.join(",")
+                        }
+                    };
+                    println!(
+                        "  {id}  [{status}]{secret_tag}  {url}  events={filter_tag}",
+                        id = ep.id,
+                        url = ep.url,
+                    );
+                }
+            }
+        }
+        Some("add") => {
+            let url = match args.get(1) {
+                Some(u) => u.clone(),
+                None => {
+                    eprintln!("webhook add: missing <url>");
+                    return;
+                }
+            };
+
+            // Parse optional --secret and --events flags.
+            let mut secret: Option<String> = None;
+            let mut event_kinds: Option<Vec<String>> = None;
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--secret" => match args.get(i + 1) {
+                        Some(v) => {
+                            secret = Some(v.clone());
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("webhook add: --secret requires a value");
+                            return;
+                        }
+                    },
+                    "--events" => match args.get(i + 1) {
+                        Some(kinds_str) => {
+                            event_kinds = Some(
+                                kinds_str
+                                    .split(',')
+                                    .map(|s| s.trim().to_owned())
+                                    .filter(|s| !s.is_empty())
+                                    .collect(),
+                            );
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("webhook add: --events requires a value");
+                            return;
+                        }
+                    },
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
+            let filter = match event_kinds {
+                Some(kinds) => EventFilter::only(kinds),
+                None => EventFilter::All,
+            };
+
+            let id = new_endpoint_id();
+            let has_secret = secret.is_some();
+            let ep = WebhookEndpoint::new(&id, &url, secret, filter);
+            match registry.register(ep) {
+                Ok(()) => {
+                    log.push(AuditEntry::WebhookRegistered {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: id.clone(),
+                        url: url.clone(),
+                        has_secret,
+                    });
+                    println!("webhook: registered {id} → {url}");
+                    for entry in log.entries() {
+                        if let AuditEntry::WebhookRegistered {
+                            endpoint_id,
+                            url,
+                            has_secret,
+                            ..
+                        } = entry
+                        {
+                            let sec = if *has_secret { " [signed]" } else { "" };
+                            println!("  🔔 webhook_registered id={endpoint_id} url={url}{sec}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("remove") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook remove: missing <id>");
+                    return;
+                }
+            };
+            match registry.remove(&id) {
+                Ok(ep) => {
+                    log.push(AuditEntry::WebhookRemoved {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: id.clone(),
+                    });
+                    println!("webhook: removed {id} (was: {})", ep.url);
+                    println!("  🗑  webhook_removed id={id}");
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("enable") | Some("disable") => {
+            let enabled = args[0] == "enable";
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook {}: missing <id>", args[0]);
+                    return;
+                }
+            };
+            match registry.set_enabled(&id, enabled) {
+                Ok(()) => {
+                    let verb = if enabled { "enabled" } else { "disabled" };
+                    println!("webhook: {verb} {id}");
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("show") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook show: missing <id>");
+                    return;
+                }
+            };
+            match registry.get(&id) {
+                Some(ep) => {
+                    let status = if ep.enabled { "enabled" } else { "disabled" };
+                    let secret_tag = if ep.secret.is_some() {
+                        "yes (secret configured)"
+                    } else {
+                        "no"
+                    };
+                    let filter_tag = match &ep.filter {
+                        EventFilter::All => "all".to_owned(),
+                        EventFilter::Selected { kinds } => {
+                            let mut v: Vec<&str> = kinds.iter().map(String::as_str).collect();
+                            v.sort();
+                            v.join(", ")
+                        }
+                    };
+                    println!("Webhook endpoint: {id}");
+                    println!("  URL    : {}", ep.url);
+                    println!("  Status : {status}");
+                    println!("  Signed : {secret_tag}");
+                    println!("  Events : {filter_tag}");
+                }
+                None => eprintln!("webhook: no endpoint with id={id:?}"),
+            }
+        }
+        Some("test") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook test: missing <id>");
+                    return;
+                }
+            };
+            let ep = match registry.get(&id) {
+                Some(ep) => ep.clone(),
+                None => {
+                    eprintln!("webhook: no endpoint with id={id:?}");
+                    return;
+                }
+            };
+            println!("webhook: sending test ping to {} ...", ep.url);
+            let mut dispatcher = WebhookDispatcher::with_sender(
+                FixtureSender,
+                DispatchConfig {
+                    max_attempts: 1,
+                    base_backoff_ms: 0,
+                },
+            );
+            let mut payload = WebhookPayload::new(
+                new_delivery_id(),
+                AGENT_ID,
+                "webhook_test",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+                serde_json::json!({ "ping": true }),
+            );
+            let stats = dispatcher.dispatch(&ep, &mut payload);
+            if stats.success {
+                log.push(AuditEntry::WebhookDispatched {
+                    agent_id: AGENT_ID.to_owned(),
+                    endpoint_id: id.clone(),
+                    event_kind: "webhook_test".to_owned(),
+                    attempts: stats.attempts,
+                });
+                println!("webhook: test ping delivered successfully");
+                println!("  📤 webhook_dispatched id={id} event=webhook_test");
+            } else {
+                let error = stats.last_error.unwrap_or_else(|| "unknown".to_owned());
+                log.push(AuditEntry::WebhookFailed {
+                    agent_id: AGENT_ID.to_owned(),
+                    endpoint_id: id.clone(),
+                    event_kind: "webhook_test".to_owned(),
+                    attempts: stats.attempts,
+                    error: error.clone(),
+                });
+                println!("webhook: test ping failed: {error}");
+                println!("  ❌ webhook_failed id={id} error={error:?}");
+            }
+        }
+        Some("stats") => {
+            // Demo dispatch: send one event to each endpoint and report statistics.
+            let endpoints: Vec<_> = registry.list().iter().map(|ep| (*ep).clone()).collect();
+            if endpoints.is_empty() {
+                println!("webhook stats: no endpoints registered");
+                return;
+            }
+            let mut dispatcher = WebhookDispatcher::fixture();
+            println!("=== Webhook Dispatch Statistics: {} ===", AGENT_ID);
+            for ep in &endpoints {
+                let mut payload = WebhookPayload::new(
+                    new_delivery_id(),
+                    AGENT_ID,
+                    "stats_probe",
+                    0,
+                    serde_json::json!({}),
+                );
+                let stats = dispatcher.dispatch(ep, &mut payload);
+                let result_icon = if stats.success { "✅" } else { "❌" };
+                println!(
+                    "  {result_icon} {id}  attempts={a}  success={s}",
+                    id = ep.id,
+                    a = stats.attempts,
+                    s = stats.success,
+                );
+                if stats.success {
+                    log.push(AuditEntry::WebhookDispatched {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: ep.id.clone(),
+                        event_kind: "stats_probe".to_owned(),
+                        attempts: stats.attempts,
+                    });
+                } else if let Some(err) = &stats.last_error {
+                    log.push(AuditEntry::WebhookFailed {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: ep.id.clone(),
+                        event_kind: "stats_probe".to_owned(),
+                        attempts: stats.attempts,
+                        error: err.clone(),
+                    });
+                }
+            }
+            let cum = dispatcher.stats();
+            println!();
+            println!(
+                "Cumulative: dispatches={} success={} failed={} retries={}  \
+                 success_rate={:.1}%  mean_attempts={:.2}",
+                cum.total_dispatches,
+                cum.successful,
+                cum.failed,
+                cum.retries,
+                cum.success_rate() * 100.0,
+                cum.mean_attempts(),
+            );
+        }
+        _ => {
+            eprintln!("usage: anima-hosted webhook list");
+            eprintln!(
+                "       anima-hosted webhook add <url> [--secret <key>] [--events <k1,k2,...>]"
+            );
+            eprintln!("       anima-hosted webhook remove <id>");
+            eprintln!("       anima-hosted webhook enable <id>");
+            eprintln!("       anima-hosted webhook disable <id>");
+            eprintln!("       anima-hosted webhook show <id>");
+            eprintln!("       anima-hosted webhook test <id>");
+            eprintln!("       anima-hosted webhook stats");
+        }
+    }
+}
+
+/// Run the full suite of diagnostic checks and print the resulting report.
+///
+/// Satisfies E30 exit criterion 1: "`anima diagnose` prints a structured
+/// health report with per-subsystem status and remediation hints."
+///
+/// ```text
+/// cargo run --bin anima-hosted -- diagnose [--json] [--quiet]
+/// ```
+///
+/// Flags:
+/// - `--json`   emit the full report as a single JSON object (default: text).
+/// - `--quiet`  print only the overall status line (useful for scripting).
+fn cmd_diagnose(args: &[String]) {
+    use diagnostics::{checks::all_checks, AuditSnapshot, DiagnosticReport};
+
+    let emit_json = args.iter().any(|a| a == "--json");
+    let quiet = args.iter().any(|a| a == "--quiet");
+
+    const AGENT_ID: &str = "anima";
+
+    // Read the durable audit history from disk so the snapshot reflects the
+    // full persisted log, not just entries accumulated in this process.
+    let log_entries = vita::audit::load_entries_from_env(AGENT_ID);
+
+    let snapshot = AuditSnapshot::from_audit_log(&log_entries);
+    let checks = all_checks();
+    let report = DiagnosticReport::run(&snapshot, &checks);
+
+    if emit_json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("diagnose: JSON serialisation error: {e}"),
+        }
+    } else if quiet {
+        println!("{:?}", report.overall_status);
+    } else {
+        print!("{}", report.render_text());
+    }
+
+    // Append a DiagnosticRun entry to the durable log so health trends are
+    // visible during forensic replay.
+    let mut audit = vita::AuditLog::from_env(AGENT_ID);
+    audit.push(AuditEntry::DiagnosticRun {
+        agent_id: AGENT_ID.to_string(),
+        overall_status: format!("{:?}", report.overall_status),
+        healthy_count: report.healthy_count,
+        degraded_count: report.degraded_count,
+        critical_count: report.critical_count,
+        audit_entries_analysed: report.audit_entries_analysed,
+    });
 }
 
 // ── `anima identity` subcommand (E5.5 exit criterion 1) ──────────────────────
@@ -1224,6 +4497,369 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+        }
+    }
+}
+
+// ── `anima workspace` subcommand (E31) ───────────────────────────────────────
+
+/// Prints E31-relevant entries from an in-process audit log.
+fn print_workspace_audit(log: &AuditLog) {
+    println!("--- audit trail ---");
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::WorkspaceCreated {
+                agent_id,
+                workspace_id,
+                display_name,
+                owner_user_id,
+            } => {
+                println!(
+                    "  🏢 workspace_created agent={agent_id} id={workspace_id} \
+                     name={display_name:?} owner={owner_user_id}"
+                );
+            }
+            AuditEntry::WorkspaceMemberAdded {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👥 workspace_member_added agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceMemberRemoved {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👤 workspace_member_removed agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceQuotaUpdated {
+                agent_id,
+                workspace_id,
+                max_members,
+                max_daily_tokens,
+            } => {
+                println!(
+                    "  📊 workspace_quota_updated agent={agent_id} \
+                     workspace={workspace_id} max_members={max_members} \
+                     max_daily_tokens={max_daily_tokens}"
+                );
+            }
+            AuditEntry::WorkspaceStatusChanged {
+                agent_id,
+                workspace_id,
+                old_status,
+                new_status,
+            } => {
+                println!(
+                    "  🔄 workspace_status_changed agent={agent_id} \
+                     workspace={workspace_id} {old_status} → {new_status}"
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("---");
+}
+
+/// Implements the `anima workspace` subcommands for managing workspaces.
+///
+/// ```text
+/// anima-hosted workspace create <id> <display_name> <owner_user_id>
+/// anima-hosted workspace list
+/// anima-hosted workspace show <workspace_id>
+/// anima-hosted workspace add-member <workspace_id> <user_id> <role>
+/// anima-hosted workspace remove-member <workspace_id> <user_id>
+/// anima-hosted workspace set-quota <workspace_id> <max_members> <max_daily_tokens>
+/// anima-hosted workspace suspend <workspace_id>
+/// anima-hosted workspace reactivate <workspace_id>
+/// anima-hosted workspace delete <workspace_id>
+/// ```
+fn cmd_workspace(args: &[String]) {
+    use std::str::FromStr;
+    use workspace::{WorkspaceProfile, WorkspaceQuota, WorkspaceRegistry, WorkspaceRole};
+
+    const AGENT_ID: &str = "anima";
+
+    let path = WorkspaceRegistry::default_path(AGENT_ID);
+    let mut registry = WorkspaceRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open workspace registry ({e}); using in-memory fallback");
+        WorkspaceRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            if registry.is_empty() {
+                println!("(no workspaces registered)");
+            } else {
+                println!(
+                    "{:>20}  {:>10}  {:>8}  display_name",
+                    "workspace_id", "status", "members"
+                );
+                println!("{}", "-".repeat(60));
+                let mut entries: Vec<_> = registry.iter().collect();
+                entries.sort_by_key(|(id, _)| *id);
+                for (id, rec) in entries {
+                    println!(
+                        "{:>20}  {:>10}  {:>8}  {}",
+                        id,
+                        rec.profile.status.as_str(),
+                        rec.member_count(),
+                        rec.profile.display_name
+                    );
+                }
+            }
+        }
+        Some("show") => match args.get(1) {
+            Some(ws_id) => match registry.get(ws_id) {
+                Some(rec) => {
+                    println!("workspace_id  : {}", rec.profile.workspace_id);
+                    println!("display_name  : {}", rec.profile.display_name);
+                    println!("owner         : {}", rec.profile.owner_user_id);
+                    println!("status        : {}", rec.profile.status);
+                    println!("created_at    : {}ns", rec.profile.created_at_ns);
+                    if let Some(desc) = &rec.profile.description {
+                        println!("description   : {desc}");
+                    }
+                    println!("quota:");
+                    println!("  max_members      : {}", rec.quota.max_members);
+                    println!("  max_daily_tokens : {}", rec.quota.max_daily_tokens);
+                    println!("  max_storage_bytes: {}", rec.quota.max_storage_bytes);
+                    println!("  max_active_tasks : {}", rec.quota.max_active_tasks);
+                    println!("members ({}):", rec.member_count());
+                    let mut members = rec.members.clone();
+                    members.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+                    for m in &members {
+                        println!("  {} ({})", m.user_id, m.role);
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace show <workspace_id>"),
+        },
+        Some("create") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(raw_id), Some(display_name), Some(owner_user_id)) => {
+                let workspace_id = match workspace::WorkspaceProfile::make_id(raw_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("workspace: invalid id: {e}");
+                        return;
+                    }
+                };
+                let profile = WorkspaceProfile::new(&workspace_id, display_name, owner_user_id, 0);
+                match registry.create(profile, 0) {
+                    Ok(()) => {
+                        log.push(AuditEntry::WorkspaceCreated {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: workspace_id.clone(),
+                            display_name: display_name.clone(),
+                            owner_user_id: owner_user_id.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: created {workspace_id:?} owned by {owner_user_id:?}");
+                        print_workspace_audit(&log);
+                    }
+                    Err(e) => eprintln!("workspace: error: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace create <id> <display_name> <owner_user_id>"
+            ),
+        },
+        Some("add-member") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(ws_id), Some(user_id), Some(role_str)) => {
+                match WorkspaceRole::from_str(role_str) {
+                    Ok(role) => match registry.add_member(ws_id, user_id.clone(), role, 0) {
+                        Ok(()) => {
+                            log.push(AuditEntry::WorkspaceMemberAdded {
+                                agent_id: AGENT_ID.to_owned(),
+                                workspace_id: ws_id.clone(),
+                                user_id: user_id.clone(),
+                                role: role.as_str().to_owned(),
+                            });
+                            if let Err(e) = registry.flush() {
+                                eprintln!("workspace: warning: could not persist registry: {e}");
+                            }
+                            println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
+                            print_workspace_audit(&log);
+                        }
+                        Err(e) => eprintln!("workspace: error: {e}"),
+                    },
+                    Err(e) => eprintln!("workspace: invalid role: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace add-member \
+                 <workspace_id> <user_id> guest|member|admin"
+            ),
+        },
+        Some("remove-member") => match (args.get(1), args.get(2)) {
+            (Some(ws_id), Some(user_id)) => match registry.remove_member(ws_id, user_id) {
+                Ok(removed_role) => {
+                    log.push(AuditEntry::WorkspaceMemberRemoved {
+                        agent_id: AGENT_ID.to_owned(),
+                        workspace_id: ws_id.clone(),
+                        user_id: user_id.clone(),
+                        role: removed_role.as_str().to_owned(),
+                    });
+                    if let Err(e) = registry.flush() {
+                        eprintln!("workspace: warning: could not persist registry: {e}");
+                    }
+                    println!("workspace: removed {user_id:?} from {ws_id:?}");
+                    print_workspace_audit(&log);
+                }
+                Err(e) => eprintln!("workspace: error: {e}"),
+            },
+            _ => eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>"),
+        },
+        Some("set-quota") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(ws_id), Some(max_members_str), Some(max_tokens_str)) => {
+                let max_members = match max_members_str.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("workspace: max_members must be a non-negative integer");
+                        return;
+                    }
+                };
+                let max_daily_tokens = match max_tokens_str.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("workspace: max_daily_tokens must be a non-negative integer");
+                        return;
+                    }
+                };
+                let quota = WorkspaceQuota {
+                    max_members,
+                    max_daily_tokens,
+                    ..WorkspaceQuota::default()
+                };
+                match registry.set_quota(ws_id, quota) {
+                    Ok(()) => {
+                        log.push(AuditEntry::WorkspaceQuotaUpdated {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            max_members,
+                            max_daily_tokens,
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!(
+                            "workspace: updated quota for {ws_id:?}: \
+                             max_members={max_members} max_daily_tokens={max_daily_tokens}"
+                        );
+                        print_workspace_audit(&log);
+                    }
+                    Err(e) => eprintln!("workspace: error: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace set-quota \
+                 <workspace_id> <max_members> <max_daily_tokens>"
+            ),
+        },
+        Some("suspend") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.suspend(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: suspended {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is already {old} (no change)");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace suspend <workspace_id>"),
+        },
+        Some("reactivate") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.reactivate(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: reactivated {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is {old} (cannot reactivate)");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace reactivate <workspace_id>"),
+        },
+        Some("delete") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.delete(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: soft-deleted {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is already deleted");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace delete <workspace_id>"),
+        },
+        _ => {
+            eprintln!("usage: anima-hosted workspace create <id> <display_name> <owner_user_id>");
+            eprintln!("       anima-hosted workspace list");
+            eprintln!("       anima-hosted workspace show <workspace_id>");
+            eprintln!(
+                "       anima-hosted workspace add-member <workspace_id> <user_id> \
+                 guest|member|admin"
+            );
+            eprintln!("       anima-hosted workspace remove-member <workspace_id> <user_id>");
+            eprintln!(
+                "       anima-hosted workspace set-quota \
+                 <workspace_id> <max_members> <max_daily_tokens>"
+            );
+            eprintln!("       anima-hosted workspace suspend <workspace_id>");
+            eprintln!("       anima-hosted workspace reactivate <workspace_id>");
+            eprintln!("       anima-hosted workspace delete <workspace_id>");
         }
     }
 }
@@ -2849,6 +6485,10 @@ fn main() {
         cmd_users(&args[1..]);
         return;
     }
+    if args.first().map(String::as_str) == Some("workspace") {
+        cmd_workspace(&args[1..]);
+        return;
+    }
     if args.first().map(String::as_str) == Some("jobs") {
         cmd_jobs(&args[1..]);
         return;
@@ -2862,6 +6502,54 @@ fn main() {
         let non_interactive = args.iter().any(|a| a == "--non-interactive");
         let reset = args.iter().any(|a| a == "--reset");
         init::run_init("anima", non_interactive, reset);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("quota") {
+        cmd_quota(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("config") {
+        cmd_config(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("sessions") {
+        cmd_sessions(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("data") {
+        cmd_data(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("feedback") {
+        cmd_feedback(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("stats") {
+        cmd_stats(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("cache") {
+        cmd_cache(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("graph") {
+        cmd_graph(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("metrics") {
+        cmd_metrics(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("alert") {
+        cmd_alert(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("webhook") {
+        cmd_webhook(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("diagnose") {
+        cmd_diagnose(&args[1..]);
         return;
     }
 

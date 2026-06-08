@@ -53,14 +53,13 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # Enable BuildKit advanced features (cache mounts, multi-platform).
-      # Pinned SHA will be maintained by Dependabot on next weekly update.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aee5fc21bc4cd7e4e6b # v3.10.0
+        uses: docker/setup-buildx-action@v3.10.0
 
       # Log in to GHCR only on non-PR events so fork PRs never attempt to push.
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        uses: docker/login-action@v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -72,7 +71,7 @@ jobs:
       #   pull_request           → :pr-<number> (not pushed)
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbea8a987c2b64359f6c76e86a04 # v5.7.0
+        uses: docker/metadata-action@v5.7.0
         with:
           images: ghcr.io/codehalwell/animaos/hosted
           tags: |
@@ -86,7 +85,7 @@ jobs:
       # subsequent runs.  The Dockerfile's BuildKit cache mounts (--mount=type=cache)
       # are separate from layer caching and are managed by BuildKit itself.
       - name: Build and push hosted image
-        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.15.0
+        uses: docker/build-push-action@v6.15.0
         with:
           context: .
           file: docker/Dockerfile

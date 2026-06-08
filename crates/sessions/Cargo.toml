@@ -1,0 +1,13 @@
+[package]
+name = "sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Conversation history and session management for AnimaOS — Epic E22."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
