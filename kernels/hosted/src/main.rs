@@ -901,6 +901,55 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // E29 — Outbound Webhook Integration
+            AuditEntry::WebhookRegistered {
+                agent_id,
+                endpoint_id,
+                url,
+                has_secret,
+            } => {
+                let secret_tag = if *has_secret { " [signed]" } else { "" };
+                println!(
+                    "  🔔 webhook_registered agent={agent_id} id={endpoint_id} \
+                     url={url}{secret_tag}"
+                );
+            }
+            AuditEntry::WebhookRemoved {
+                agent_id,
+                endpoint_id,
+            } => {
+                println!(
+                    "  🗑  webhook_removed agent={agent_id} id={endpoint_id}"
+                );
+            }
+            AuditEntry::WebhookDispatched {
+                agent_id,
+                endpoint_id,
+                event_kind,
+                attempts,
+            } => {
+                let retry_tag = if *attempts > 1 {
+                    format!(" ({attempts} attempts)")
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  📤 webhook_dispatched agent={agent_id} id={endpoint_id} \
+                     event={event_kind}{retry_tag}"
+                );
+            }
+            AuditEntry::WebhookFailed {
+                agent_id,
+                endpoint_id,
+                event_kind,
+                attempts,
+                error,
+            } => {
+                println!(
+                    "  ❌ webhook_failed agent={agent_id} id={endpoint_id} \
+                     event={event_kind} attempts={attempts} error={error:?}"
+                );
+            }
         }
     }
 }
@@ -1210,6 +1259,292 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+        }
+    }
+}
+
+// ── `anima webhook` subcommand (E29) ─────────────────────────────────────────
+
+/// Implements the `anima webhook` subcommands for E29 — Outbound Webhook Integration.
+///
+/// ```text
+/// anima-hosted webhook list
+/// anima-hosted webhook add <url> [--secret <key>] [--events <kind1,kind2,...>]
+/// anima-hosted webhook remove <id>
+/// anima-hosted webhook enable <id>
+/// anima-hosted webhook disable <id>
+/// anima-hosted webhook test <id>
+/// anima-hosted webhook stats
+/// ```
+fn cmd_webhook(args: &[String]) {
+    use webhooks::{
+        new_delivery_id, new_endpoint_id, DispatchConfig, EventFilter, FixtureSender,
+        WebhookDispatcher, WebhookEndpoint, WebhookPayload, WebhookRegistry,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let path = WebhookRegistry::default_path(AGENT_ID);
+    let mut registry = WebhookRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open webhook registry ({e}); using in-memory fallback");
+        WebhookRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let endpoints = registry.list();
+            if endpoints.is_empty() {
+                println!("webhook: no endpoints registered");
+            } else {
+                println!("=== Webhook Endpoints: {} ===", AGENT_ID);
+                for ep in &endpoints {
+                    let status = if ep.enabled { "enabled" } else { "disabled" };
+                    let secret_tag = if ep.secret.is_some() { " [signed]" } else { "" };
+                    let filter_tag = match &ep.filter {
+                        EventFilter::All => "all".to_owned(),
+                        EventFilter::Selected { kinds } => {
+                            let mut v: Vec<&str> = kinds.iter().map(String::as_str).collect();
+                            v.sort();
+                            v.join(",")
+                        }
+                    };
+                    println!(
+                        "  {id}  [{status}]{secret_tag}  {url}  events={filter_tag}",
+                        id = ep.id,
+                        url = ep.url,
+                    );
+                }
+            }
+        }
+        Some("add") => {
+            let url = match args.get(1) {
+                Some(u) => u.clone(),
+                None => {
+                    eprintln!("webhook add: missing <url>");
+                    return;
+                }
+            };
+
+            // Parse optional --secret and --events flags.
+            let mut secret: Option<String> = None;
+            let mut event_kinds: Option<Vec<String>> = None;
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--secret" => {
+                        secret = args.get(i + 1).cloned();
+                        i += 2;
+                    }
+                    "--events" => {
+                        if let Some(kinds_str) = args.get(i + 1) {
+                            event_kinds = Some(
+                                kinds_str
+                                    .split(',')
+                                    .map(|s| s.trim().to_owned())
+                                    .filter(|s| !s.is_empty())
+                                    .collect(),
+                            );
+                        }
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
+            let filter = match event_kinds {
+                Some(kinds) => EventFilter::only(kinds),
+                None => EventFilter::All,
+            };
+
+            let id = new_endpoint_id();
+            let has_secret = secret.is_some();
+            let ep = WebhookEndpoint::new(&id, &url, secret, filter);
+            match registry.register(ep) {
+                Ok(()) => {
+                    log.push(AuditEntry::WebhookRegistered {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: id.clone(),
+                        url: url.clone(),
+                        has_secret,
+                    });
+                    println!("webhook: registered {id} → {url}");
+                    for entry in log.entries() {
+                        if let AuditEntry::WebhookRegistered {
+                            endpoint_id,
+                            url,
+                            has_secret,
+                            ..
+                        } = entry
+                        {
+                            let sec = if *has_secret { " [signed]" } else { "" };
+                            println!("  🔔 webhook_registered id={endpoint_id} url={url}{sec}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("remove") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook remove: missing <id>");
+                    return;
+                }
+            };
+            match registry.remove(&id) {
+                Ok(ep) => {
+                    log.push(AuditEntry::WebhookRemoved {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: id.clone(),
+                    });
+                    println!("webhook: removed {id} (was: {})", ep.url);
+                    println!("  🗑  webhook_removed id={id}");
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("enable") | Some("disable") => {
+            let enabled = args[0] == "enable";
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook {}: missing <id>", args[0]);
+                    return;
+                }
+            };
+            match registry.set_enabled(&id, enabled) {
+                Ok(()) => {
+                    let verb = if enabled { "enabled" } else { "disabled" };
+                    println!("webhook: {verb} {id}");
+                }
+                Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("test") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook test: missing <id>");
+                    return;
+                }
+            };
+            let ep = match registry.get(&id) {
+                Some(ep) => ep.clone(),
+                None => {
+                    eprintln!("webhook: no endpoint with id={id:?}");
+                    return;
+                }
+            };
+            println!("webhook: sending test ping to {} ...", ep.url);
+            let mut dispatcher = WebhookDispatcher::with_sender(
+                FixtureSender,
+                DispatchConfig {
+                    max_attempts: 1,
+                    base_backoff_ms: 0,
+                },
+            );
+            let mut payload = WebhookPayload::new(
+                new_delivery_id(),
+                AGENT_ID,
+                "webhook_test",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+                serde_json::json!({ "ping": true }),
+            );
+            let stats = dispatcher.dispatch(&ep, &mut payload);
+            if stats.success {
+                log.push(AuditEntry::WebhookDispatched {
+                    agent_id: AGENT_ID.to_owned(),
+                    endpoint_id: id.clone(),
+                    event_kind: "webhook_test".to_owned(),
+                    attempts: stats.attempts,
+                });
+                println!("webhook: test ping delivered successfully");
+                println!("  📤 webhook_dispatched id={id} event=webhook_test");
+            } else {
+                let error = stats.last_error.unwrap_or_else(|| "unknown".to_owned());
+                log.push(AuditEntry::WebhookFailed {
+                    agent_id: AGENT_ID.to_owned(),
+                    endpoint_id: id.clone(),
+                    event_kind: "webhook_test".to_owned(),
+                    attempts: stats.attempts,
+                    error: error.clone(),
+                });
+                println!("webhook: test ping failed: {error}");
+                println!("  ❌ webhook_failed id={id} error={error:?}");
+            }
+        }
+        Some("stats") => {
+            // Demo dispatch: send one event to each endpoint and report statistics.
+            let endpoints: Vec<_> = registry.list().iter().map(|ep| (*ep).clone()).collect();
+            if endpoints.is_empty() {
+                println!("webhook stats: no endpoints registered");
+                return;
+            }
+            let mut dispatcher = WebhookDispatcher::fixture();
+            println!("=== Webhook Dispatch Statistics: {} ===", AGENT_ID);
+            for ep in &endpoints {
+                let mut payload = WebhookPayload::new(
+                    new_delivery_id(),
+                    AGENT_ID,
+                    "stats_probe",
+                    0,
+                    serde_json::json!({}),
+                );
+                let stats = dispatcher.dispatch(ep, &mut payload);
+                let result_icon = if stats.success { "✅" } else { "❌" };
+                println!(
+                    "  {result_icon} {id}  attempts={a}  success={s}",
+                    id = ep.id,
+                    a = stats.attempts,
+                    s = stats.success,
+                );
+                if stats.success {
+                    log.push(AuditEntry::WebhookDispatched {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: ep.id.clone(),
+                        event_kind: "stats_probe".to_owned(),
+                        attempts: stats.attempts,
+                    });
+                } else if let Some(err) = &stats.last_error {
+                    log.push(AuditEntry::WebhookFailed {
+                        agent_id: AGENT_ID.to_owned(),
+                        endpoint_id: ep.id.clone(),
+                        event_kind: "stats_probe".to_owned(),
+                        attempts: stats.attempts,
+                        error: err.clone(),
+                    });
+                }
+            }
+            let cum = dispatcher.stats();
+            println!();
+            println!(
+                "Cumulative: dispatches={} success={} failed={} retries={}  \
+                 success_rate={:.1}%  mean_attempts={:.2}",
+                cum.total_dispatches,
+                cum.successful,
+                cum.failed,
+                cum.retries,
+                cum.success_rate() * 100.0,
+                cum.mean_attempts(),
+            );
+        }
+        _ => {
+            eprintln!("usage: anima-hosted webhook list");
+            eprintln!(
+                "       anima-hosted webhook add <url> [--secret <key>] [--events <k1,k2,...>]"
+            );
+            eprintln!("       anima-hosted webhook remove <id>");
+            eprintln!("       anima-hosted webhook enable <id>");
+            eprintln!("       anima-hosted webhook disable <id>");
+            eprintln!("       anima-hosted webhook test <id>");
+            eprintln!("       anima-hosted webhook stats");
         }
     }
 }
@@ -2549,6 +2884,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("webhook") {
+        cmd_webhook(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

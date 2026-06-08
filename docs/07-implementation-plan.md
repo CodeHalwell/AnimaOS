@@ -3098,3 +3098,96 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E29 — Outbound Webhook Integration ✅
+
+**Scope.** AnimaOS emits a rich audit trail internally (via `vita::AuditLog`)
+but had no mechanism to push those events to external systems.  E29 closes that
+gap: operators register HTTPS webhook endpoints that receive signed JSON
+payloads whenever matching lifecycle events occur.  The new `crates/webhooks`
+crate is a zero-dependency library (only `serde` / `serde_json`) with a
+CI-safe fixture sender so every delivery path is testable without network I/O.
+
+**Dependencies.** E17 (Trust & Human-Identity — atomic persistence pattern,
+`RegistryError` conventions), E5 (Audit trail — `vita::AuditEntry` extension
+point), E1 (hosted kernel — CLI routing pattern from `cmd_users` / `cmd_identity`).
+
+**Stories.**
+- S29.1 `WebhookEndpoint` and `EventFilter`. ✅ (`crates/webhooks/src/endpoint.rs` —
+  `WebhookEndpoint { id, url, secret, filter, enabled, created_at_ns }`;
+  `EventFilter` enum (`All` | `Selected { kinds: HashSet<String> }`) with
+  `#[derive(Default)]` / `#[default]` on `All`; `matches(kind) -> bool`;
+  `only(kinds)` constructor; `new_endpoint_id()` helper in `lib.rs`)
+- S29.2 `WebhookPayload` with HMAC signing. ✅ (`crates/webhooks/src/payload.rs` —
+  `WebhookPayload { delivery_id, agent_id, event_kind, sequence, timestamp_ns,
+  payload, signature }`; `sign(&mut self, secret)` produces
+  `"sha256=<64-hex>"` via FNV-based HMAC fixture (no external crypto crate);
+  `verify(&self, secret) -> bool` for receiver-side validation; `to_json()`
+  serialises to compact JSON; `signature` is `#[serde(skip_serializing_if = "Option::is_none")]`;
+  `new_delivery_id()` helper in `lib.rs`)
+- S29.3 `WebhookRegistry` with atomic JSON persistence. ✅
+  (`crates/webhooks/src/registry.rs` — `WebhookRegistry` backed by
+  `HashMap<String, WebhookEndpoint>`; `open(path)` or `in_memory()`;
+  `register`, `remove`, `get`, `set_enabled`, `list`, `endpoints_for_event`,
+  `len`, `is_empty`; `flush` write-to-`.tmp`-then-rename — crash-safe;
+  default path `~/.anima/<agent_id>/webhook_endpoints.json`;
+  `RegistryError::{AlreadyExists, NotFound, Io}`)
+- S29.4 `WebhookDispatcher` with retry and statistics. ✅
+  (`crates/webhooks/src/dispatcher.rs` — `WebhookSender` trait with
+  `FixtureSender` (CI always-succeed) and `AlwaysFailSender` (retry tests);
+  `WebhookDispatcher::fixture()` / `with_sender(sender, config)`;
+  `dispatch(&mut self, endpoint, payload) -> DispatchStats` — exponential
+  back-off, signs payload once before first attempt;
+  `DispatchConfig { max_attempts: u32, base_backoff_ms: u64 }` (default 3/100ms);
+  `CumulativeStats { total_dispatches, successful, failed, total_attempts, retries }`
+  with `success_rate()` and `mean_attempts()`)
+- S29.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — four new `AuditEntry`
+  variants: `WebhookRegistered { agent_id, endpoint_id, url, has_secret }`,
+  `WebhookRemoved { agent_id, endpoint_id }`,
+  `WebhookDispatched { agent_id, endpoint_id, event_kind, attempts }`,
+  `WebhookFailed { agent_id, endpoint_id, event_kind, attempts, error }`;
+  `kernels/hosted/src/main.rs` — `print_audit` arms with 🔔 / 🗑 / 📤 / ❌ prefixes)
+- S29.6 `anima webhook` CLI. ✅ (`kernels/hosted/src/main.rs` —
+  `cmd_webhook()` implements `webhook list`, `webhook add <url> [--secret S]
+  [--events E,…]`, `webhook remove <id>`, `webhook enable <id>`,
+  `webhook disable <id>`, `webhook show <id>`, `webhook test <id>`;
+  dispatched via `anima-hosted webhook …`)
+
+**New crate: `crates/webhooks`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `WebhookEndpoint` CRUD and JSON round-trip tested. ✅
+   (`event_filter_all_matches_any_kind`, `event_filter_selected_matches_only_registered_kinds`,
+   `event_filter_selected_empty_set_never_matches`, `event_filter_default_is_all`,
+   `webhook_endpoint_new_is_enabled`, `webhook_endpoint_round_trips_through_json`, +1)
+2. `WebhookPayload` signing and verification tested. ✅
+   (`new_payload_has_no_signature`, `sign_sets_signature`,
+   `verify_returns_true_for_correct_secret`, `verify_returns_false_for_wrong_secret`,
+   `verify_returns_false_after_tampering`, `sign_is_deterministic`,
+   `payload_round_trips_through_json`, `signed_payload_preserves_signature_in_json`,
+   `unsigned_payload_omits_signature_field`)
+3. `WebhookRegistry` CRUD, persistence, and error paths tested. ✅
+   (`empty_registry_has_zero_endpoints`, `register_adds_endpoint`,
+   `register_rejects_duplicate_id`, `remove_returns_endpoint`,
+   `remove_returns_not_found_for_missing_id`, `set_enabled_updates_state`,
+   `set_enabled_returns_not_found_for_missing_id`, `list_returns_endpoints_sorted_by_id`,
+   `endpoints_for_event_returns_matching_enabled_only`,
+   `endpoints_for_event_excludes_non_matching_filter`,
+   `flush_and_reload_round_trip`, `open_creates_empty_registry_when_file_absent`)
+4. `WebhookDispatcher` retry logic, stats, and signing tested. ✅
+   (`fixture_dispatcher_succeeds_on_first_attempt`,
+   `fixture_dispatcher_signs_payload_when_secret_present`,
+   `always_fail_sender_exhausts_retries`, `cumulative_stats_accumulate_across_dispatches`,
+   `cumulative_stats_record_failures`, `success_rate_zero_when_no_dispatches`,
+   `success_rate_one_when_all_succeed`, `mean_attempts_one_for_first_try_success`,
+   `dispatch_stats_round_trip_through_json`)
+5. All four new `AuditEntry` variants emitted and displayed. ✅
+   (`print_audit` arms verified; 🔔 / 🗑 / 📤 / ❌ prefixes)
+6. `cargo test --workspace` green; 41 new webhooks tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

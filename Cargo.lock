@@ -877,6 +877,7 @@ dependencies = [
  "skills",
  "users",
  "vita",
+ "webhooks",
 ]
 
 [[package]]
@@ -2742,6 +2743,15 @@ checksum = "6d621441cfc37b84979402712047321980c178f299193a3589d05b99e8763436"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webhooks"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

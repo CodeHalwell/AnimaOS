@@ -1192,6 +1192,50 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E29 — Outbound Webhook Integration ───────────────────────────────────
+    /// A new webhook endpoint was registered (E29).
+    WebhookRegistered {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable endpoint ID (e.g. `"wh-a1b2c3d4"`).
+        endpoint_id: String,
+        /// Destination URL.
+        url: String,
+        /// `true` when the endpoint has a signing secret configured.
+        has_secret: bool,
+    },
+    /// A webhook endpoint was removed (E29).
+    WebhookRemoved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable endpoint ID.
+        endpoint_id: String,
+    },
+    /// A webhook payload was dispatched successfully (E29).
+    WebhookDispatched {
+        /// Agent identifier.
+        agent_id: String,
+        /// Endpoint ID the payload was sent to.
+        endpoint_id: String,
+        /// Event kind that triggered this delivery (e.g. `"task_completed"`).
+        event_kind: String,
+        /// Delivery attempt count (1 = first try succeeded).
+        attempts: u32,
+    },
+    /// A webhook delivery failed after all retry attempts (E29).
+    WebhookFailed {
+        /// Agent identifier.
+        agent_id: String,
+        /// Endpoint ID that failed.
+        endpoint_id: String,
+        /// Event kind that was being delivered.
+        event_kind: String,
+        /// Total number of attempts made.
+        attempts: u32,
+        /// Error description from the last attempt.
+        error: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────
