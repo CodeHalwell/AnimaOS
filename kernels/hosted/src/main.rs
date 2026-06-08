@@ -1434,7 +1434,9 @@ fn cmd_workspace(args: &[String]) {
                             display_name: display_name.clone(),
                             owner_user_id: owner_user_id.clone(),
                         });
-                        let _ = registry.flush();
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
                         println!("workspace: created {workspace_id:?} owned by {owner_user_id:?}");
                         print_workspace_audit(&log);
                     }
@@ -1456,7 +1458,9 @@ fn cmd_workspace(args: &[String]) {
                                 user_id: user_id.clone(),
                                 role: role.as_str().to_owned(),
                             });
-                            let _ = registry.flush();
+                            if let Err(e) = registry.flush() {
+                                eprintln!("workspace: warning: could not persist registry: {e}");
+                            }
                             println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
                             print_workspace_audit(&log);
                         }
@@ -1467,7 +1471,7 @@ fn cmd_workspace(args: &[String]) {
             }
             _ => eprintln!(
                 "usage: anima-hosted workspace add-member \
-                 <workspace_id> <user_id> guest|member|admin|owner"
+                 <workspace_id> <user_id> guest|member|admin"
             ),
         },
         Some("remove-member") => match (args.get(1), args.get(2)) {
@@ -1479,7 +1483,9 @@ fn cmd_workspace(args: &[String]) {
                         user_id: user_id.clone(),
                         role: removed_role.as_str().to_owned(),
                     });
-                    let _ = registry.flush();
+                    if let Err(e) = registry.flush() {
+                        eprintln!("workspace: warning: could not persist registry: {e}");
+                    }
                     println!("workspace: removed {user_id:?} from {ws_id:?}");
                     print_workspace_audit(&log);
                 }
@@ -1503,7 +1509,11 @@ fn cmd_workspace(args: &[String]) {
                         return;
                     }
                 };
-                let quota = WorkspaceQuota::new(max_members, max_daily_tokens, 1_073_741_824, 200);
+                let quota = WorkspaceQuota {
+                    max_members,
+                    max_daily_tokens,
+                    ..WorkspaceQuota::default()
+                };
                 match registry.set_quota(ws_id, quota) {
                     Ok(()) => {
                         log.push(AuditEntry::WorkspaceQuotaUpdated {
@@ -1512,7 +1522,9 @@ fn cmd_workspace(args: &[String]) {
                             max_members,
                             max_daily_tokens,
                         });
-                        let _ = registry.flush();
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
                         println!(
                             "workspace: updated quota for {ws_id:?}: \
                              max_members={max_members} max_daily_tokens={max_daily_tokens}"
@@ -1539,7 +1551,9 @@ fn cmd_workspace(args: &[String]) {
                             old_status: old.clone(),
                             new_status: new.clone(),
                         });
-                        let _ = registry.flush();
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
                         println!("workspace: suspended {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
                     } else {
@@ -1562,7 +1576,9 @@ fn cmd_workspace(args: &[String]) {
                             old_status: old.clone(),
                             new_status: new.clone(),
                         });
-                        let _ = registry.flush();
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
                         println!("workspace: reactivated {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
                     } else {
@@ -1585,7 +1601,9 @@ fn cmd_workspace(args: &[String]) {
                             old_status: old.clone(),
                             new_status: new.clone(),
                         });
-                        let _ = registry.flush();
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
                         println!("workspace: soft-deleted {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
                     } else {
@@ -1602,7 +1620,7 @@ fn cmd_workspace(args: &[String]) {
             eprintln!("       anima-hosted workspace show <workspace_id>");
             eprintln!(
                 "       anima-hosted workspace add-member <workspace_id> <user_id> \
-                 guest|member|admin|owner"
+                 guest|member|admin"
             );
             eprintln!("       anima-hosted workspace remove-member <workspace_id> <user_id>");
             eprintln!(

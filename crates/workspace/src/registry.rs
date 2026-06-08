@@ -107,6 +107,13 @@ pub enum WorkspaceError {
         workspace_id: String,
         violation: crate::quota::QuotaViolation,
     },
+    /// The workspace owner cannot be removed.
+    CannotRemoveOwner {
+        workspace_id: String,
+        user_id: String,
+    },
+    /// Only one owner is allowed per workspace; use `Admin` for elevated access.
+    DuplicateOwner { workspace_id: String },
     /// Serialisation or I/O failure.
     Io(String),
 }
@@ -144,6 +151,16 @@ impl std::fmt::Display for WorkspaceError {
                 f,
                 "quota exceeded in workspace {workspace_id:?}: {violation}"
             ),
+            WorkspaceError::CannotRemoveOwner {
+                workspace_id,
+                user_id,
+            } => write!(
+                f,
+                "cannot remove owner {user_id:?} from workspace {workspace_id:?}"
+            ),
+            WorkspaceError::DuplicateOwner { workspace_id } => {
+                write!(f, "workspace {workspace_id:?} already has an owner")
+            }
             WorkspaceError::Io(e) => write!(f, "workspace registry I/O error: {e}"),
         }
     }
@@ -260,9 +277,11 @@ impl WorkspaceRegistry {
 
     /// Adds a user to a workspace with the given role.
     ///
-    /// Returns [`WorkspaceError::MemberAlreadyExists`] when the user is already
-    /// a member, and [`WorkspaceError::QuotaExceeded`] when the workspace member
-    /// quota would be exceeded.
+    /// Returns [`WorkspaceError::DuplicateOwner`] when `role` is `Owner` (a
+    /// workspace has exactly one owner: the creator).  Returns
+    /// [`WorkspaceError::MemberAlreadyExists`] when the user is already a member,
+    /// and [`WorkspaceError::QuotaExceeded`] when the workspace member quota would
+    /// be exceeded.
     pub fn add_member(
         &mut self,
         workspace_id: &str,
@@ -270,6 +289,12 @@ impl WorkspaceRegistry {
         role: WorkspaceRole,
         now_ns: u64,
     ) -> Result<(), WorkspaceError> {
+        if role == WorkspaceRole::Owner {
+            return Err(WorkspaceError::DuplicateOwner {
+                workspace_id: workspace_id.to_owned(),
+            });
+        }
+
         let user_id: String = user_id.into();
         let rec =
             self.workspaces
@@ -278,19 +303,21 @@ impl WorkspaceRegistry {
                     workspace_id: workspace_id.to_owned(),
                 })?;
 
+        // Duplicate check before quota so a re-add of an existing member
+        // never returns QuotaExceeded.
+        if rec.members.iter().any(|m| m.user_id == user_id) {
+            return Err(WorkspaceError::MemberAlreadyExists {
+                workspace_id: workspace_id.to_owned(),
+                user_id,
+            });
+        }
+
         // Quota check: would adding one member exceed the limit?
         let usage = rec.membership_usage();
         if !usage.can_add_members(1, &rec.quota) {
             return Err(WorkspaceError::QuotaExceeded {
                 workspace_id: workspace_id.to_owned(),
                 violation: crate::quota::QuotaViolation::MemberLimit,
-            });
-        }
-
-        if rec.members.iter().any(|m| m.user_id == user_id) {
-            return Err(WorkspaceError::MemberAlreadyExists {
-                workspace_id: workspace_id.to_owned(),
-                user_id,
             });
         }
 
@@ -325,6 +352,12 @@ impl WorkspaceRegistry {
             })?;
 
         let removed_role = rec.members[pos].role;
+        if removed_role == WorkspaceRole::Owner {
+            return Err(WorkspaceError::CannotRemoveOwner {
+                workspace_id: workspace_id.to_owned(),
+                user_id: user_id.to_owned(),
+            });
+        }
         rec.members.remove(pos);
         Ok(removed_role)
     }
@@ -364,7 +397,9 @@ impl WorkspaceRegistry {
         };
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| WorkspaceError::Io(e.to_string()))?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| WorkspaceError::Io(e.to_string()))?;
+            }
         }
 
         let file = RegistryFile {
@@ -574,5 +609,62 @@ mod tests {
     fn in_memory_flush_is_no_op() {
         let reg = WorkspaceRegistry::in_memory();
         assert!(reg.flush().is_ok());
+    }
+
+    #[test]
+    fn remove_member_rejects_owner_removal() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "u:1"), 0).unwrap();
+        let err = reg.remove_member("acme", "u:1").unwrap_err();
+        assert_eq!(
+            err,
+            WorkspaceError::CannotRemoveOwner {
+                workspace_id: "acme".to_owned(),
+                user_id: "u:1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn add_member_rejects_owner_role() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "u:1"), 0).unwrap();
+        let err = reg
+            .add_member("acme", "u:2", WorkspaceRole::Owner, 0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            WorkspaceError::DuplicateOwner {
+                workspace_id: "acme".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn add_member_at_capacity_returns_already_exists_for_existing_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("tiny", "u:1"), 0).unwrap();
+        reg.set_quota(
+            "tiny",
+            WorkspaceQuota::new(1, u64::MAX, u64::MAX, usize::MAX),
+        )
+        .unwrap();
+        // u:1 is already a member; should get MemberAlreadyExists, not QuotaExceeded.
+        let err = reg
+            .add_member("tiny", "u:1", WorkspaceRole::Member, 0)
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::MemberAlreadyExists { .. }));
+    }
+
+    #[test]
+    fn flush_with_relative_path_succeeds() {
+        use std::path::Path;
+        let path = Path::new("workspaces_test_temp.json");
+        let mut reg = WorkspaceRegistry::open(path).unwrap();
+        reg.create(make_profile("acme", "u:1"), 0).unwrap();
+        reg.flush().unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file("workspaces_test_temp.tmp");
     }
 }

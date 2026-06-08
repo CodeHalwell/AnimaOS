@@ -120,9 +120,9 @@ impl WorkspaceProfile {
         let slug: String = raw
             .chars()
             .map(|c| {
-                if c.is_alphanumeric() {
+                if c.is_ascii_alphanumeric() {
                     c.to_ascii_lowercase()
-                } else if c == ' ' || c == '_' {
+                } else if c == ' ' || c == '_' || c == '-' {
                     '-'
                 } else {
                     '\0'
