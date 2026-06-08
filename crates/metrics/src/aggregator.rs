@@ -255,7 +255,7 @@ pub fn aggregate(entries: &[AuditEntry]) -> AgentMetrics {
                 ..
             } => {
                 m.cortex_invocations += 1;
-                m.cortex_latency_sum_ms += latency_to_first_action_ms;
+                m.cortex_latency_sum_ms += *latency_to_first_action_ms;
             }
             AuditEntry::CortexCompleted { tool_calls, .. } => {
                 m.cortex_completions += 1;
