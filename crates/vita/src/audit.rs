@@ -22,7 +22,7 @@
 //! variable: if set, [`AuditLog::from_env`] opens
 //! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
 use std::io::Write;
 #[cfg(feature = "std")]
@@ -229,7 +229,7 @@ pub fn verify_audit_chain(
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
 /// therefore the enum derives `PartialEq` only (not `Eq`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -1097,6 +1097,48 @@ pub enum AuditEntry {
         granted: bool,
     },
 
+    // ── E18 — Per-User Rate Limiting & Token Quotas ───────────────────────────
+    /// A user request was denied because they exceeded their token or request quota.
+    ///
+    /// Emitted by the operator-layer quota gate when
+    /// `UserQuotaTracker::check_and_consume` returns `QuotaResult::Exceeded`.
+    /// The audit trail preserves the `exceeded_reason` and `retry_after_ns`
+    /// hint so operators can review access patterns without exposing raw usage
+    /// metrics to the user.
+    QuotaExceeded {
+        /// Agent identifier.
+        agent_id: String,
+        /// The user whose quota was exceeded.
+        user_id: String,
+        /// Trust tier of the user at the time of the check.
+        trust_tier: String,
+        /// Human-readable reason (e.g. `"hourly token limit: used 10000 / 10000"`).
+        exceeded_reason: String,
+        /// Number of tokens that were requested.
+        tokens_requested: u64,
+        /// Earliest nanosecond Unix timestamp at which the user may retry.
+        retry_after_ns: u64,
+    },
+
+    /// Repeated quota violations have been escalated to operator attention.
+    ///
+    /// Emitted when a user's `consecutive_violations` reaches the policy
+    /// `escalation_threshold` (default 5) and the escalation cooldown has
+    /// elapsed.  Mirrors the defence layer's `AttentionDemandEscalated`
+    /// pattern (E5.6).
+    QuotaEscalated {
+        /// Agent identifier.
+        agent_id: String,
+        /// The user whose repeated violations triggered escalation.
+        user_id: String,
+        /// Trust tier at escalation time.
+        trust_tier: String,
+        /// Number of consecutive violations that triggered this escalation.
+        violations_in_window: u32,
+        /// Policy threshold that was reached.
+        threshold: u32,
+    },
+
     // ── E16 — Multi-Agent Coordination (A2A Substrate) ────────────────────────
     /// A task was delegated to a named sub-agent via the A2A bus (E16, S16.3).
     ///
@@ -1192,6 +1234,472 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E20 — Structured Runtime Configuration ────────────────────────────────
+    /// A runtime configuration file was loaded at startup or on reload (E20).
+    ///
+    /// Emitted immediately after a valid `AnimaConfig` is parsed from disk so
+    /// operators can correlate behavioural changes with config file changes.
+    ConfigLoaded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Absolute path of the TOML file that was loaded.
+        path: String,
+        /// Schema version of the loaded config.
+        schema_version: u32,
+        /// Whether the config came from a file (`true`) or built-in defaults (`false`).
+        from_file: bool,
+    },
+
+    /// The runtime configuration was reloaded without restarting the process (E20).
+    ///
+    /// Emitted after a successful hot-reload so the operator can inspect which
+    /// section keys changed.  An empty `changed_keys` list means the file was
+    /// re-read but no values differed.
+    ConfigReloaded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Absolute path of the TOML file that was re-read.
+        path: String,
+        /// `section.key` labels of every config value that differed between the
+        /// old and new configs.
+        changed_keys: Vec<String>,
+    },
+
+    // ── E22 — Conversation History and Session Management ─────────────────────
+    /// A new conversation session was created (E22 S22.2).
+    ///
+    /// Emitted when an operator or user opens a new session context.
+    SessionStarted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier (`"sess-<hex>"`).
+        session_id: String,
+        /// User who owns this session.
+        user_id: String,
+    },
+
+    /// A turn was appended to an existing session (E22 S22.2).
+    ///
+    /// Emitted for every user, assistant, system, or tool message added.
+    SessionTurnAppended {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Speaker role (`"user"`, `"assistant"`, `"system"`, `"tool"`).
+        role: String,
+        /// Character length of the turn content (not the full text).
+        content_len: usize,
+    },
+
+    /// A session was archived (E22 S22.2).
+    ///
+    /// Emitted when an operator archives a completed session.
+    SessionArchived {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Total number of turns in the session at archive time.
+        turn_count: usize,
+        /// `true` when a summary was provided at archive time.
+        has_summary: bool,
+    },
+
+    /// A session was exported to a file or string representation (E22 S22.3).
+    SessionExported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Unique session identifier.
+        session_id: String,
+        /// Export format used (`"jsonl"` or `"markdown"`).
+        format: String,
+        /// Number of turns included in the export.
+        turn_count: usize,
+    },
+
+    // ── E23 — Consent Enforcement and Data Lifecycle ──────────────────────────
+    /// A pre-write consent check was blocked for a user/category pair (E23 S23.1).
+    ///
+    /// Written when `consent::check_write_allowed` returns `Denied` and the
+    /// calling store respects the check.  No data was written.
+    ConsentCheckBlocked {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier.
+        user_id: String,
+        /// Data category that was requested (e.g. `"episodic_memory"`).
+        category: String,
+        /// Human-readable reason returned by the consent check.
+        reason: String,
+    },
+
+    /// A personal-data export bundle was generated for a user (E23 S23.3).
+    ///
+    /// Written by the `anima data export` CLI command or any caller of the
+    /// consent export builder.  The export may be handed to the user as a
+    /// GDPR Data Subject Access Request (DSAR) response.
+    DataExported {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier whose data was exported.
+        user_id: String,
+        /// Number of data categories included in the bundle.
+        section_count: usize,
+        /// Total number of records across all categories.
+        total_records: usize,
+        /// Path where the bundle was written, or `"<in-memory>"`.
+        output_path: String,
+    },
+
+    /// All retained data for a user was deleted following consent revocation
+    /// (E23 S23.2).
+    ///
+    /// Written after the operator executes a [`consent::RevocationDirective`]
+    /// and the affected stores have been purged.
+    DataDeletedForUser {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable user identifier whose data was deleted.
+        user_id: String,
+        /// Data categories that were purged (comma-separated labels).
+        categories: String,
+        /// Total number of records deleted across all stores.
+        records_deleted: usize,
+    },
+
+    /// The scheduled expiry scan found and cleaned up lapsed consent grants
+    /// (E23 S23.4).
+    ///
+    /// Written after the lifecycle engine runs [`consent::scan_expired_grants`]
+    /// and executes the resulting directives.
+    ExpiredConsentCleaned {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of users whose consent records were scanned.
+        users_scanned: usize,
+        /// Number of grants found to have expired.
+        expired_grants_found: usize,
+        /// Number of users affected (had at least one expired grant).
+        users_affected: usize,
+        /// Total records deleted across all purged stores.
+        total_records_deleted: usize,
+    },
+
+    // ── E24 — Response Quality & Feedback Collection ──────────────────────────
+    /// Explicit quality feedback was received for a cortex invocation (E24 S24.5).
+    ///
+    /// Emitted immediately after the feedback record is stored.
+    FeedbackReceived {
+        /// Agent identifier.
+        agent_id: String,
+        /// User who submitted the feedback.
+        user_id: String,
+        /// Cortex invocation that was rated.
+        invocation_id: String,
+        /// Human-readable rating label (`"👍"`, `"👎"`, `"3★"`, …).
+        rating_label: String,
+        /// Normalised quality score in `[0.0, 1.0]`.
+        score: f64,
+        /// Number of reason-code categories attached to this feedback.
+        category_count: usize,
+    },
+
+    /// A quality report was generated over feedback records (E24 S24.3).
+    QualityReportGenerated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Total number of feedback records included in the report.
+        total_feedback: usize,
+        /// Satisfaction rate as a percentage (0–100), or `None` if no
+        /// positive-or-negative records exist.
+        satisfaction_pct: Option<u32>,
+        /// Mean quality score across all records, scaled to `[0, 100]`.
+        avg_score_pct: u32,
+    },
+
+    /// An operator-supplied correction was recorded for an invocation (E24 S24.5).
+    ///
+    /// Separate entry from `FeedbackReceived` so corrections can be queried
+    /// independently in the audit trail.
+    FeedbackCorrectionRecorded {
+        /// Agent identifier.
+        agent_id: String,
+        /// User who provided the correction.
+        user_id: String,
+        /// Cortex invocation that was corrected.
+        invocation_id: String,
+    },
+
+    // ── E26 — Tool Response Caching ───────────────────────────────────────────
+    /// A cached tool response was returned without invoking the tool (E26).
+    ///
+    /// Emitted by callers using [`tool_cache::CachedToolRegistry::dispatch_with_outcome`]
+    /// when the outcome is [`tool_cache::CacheOutcome::Hit`].
+    ToolCacheHit {
+        /// Agent identifier.
+        agent_id: String,
+        /// Tool whose response was served from cache.
+        tool_id: String,
+        /// Age of the cached entry at the time of the hit (milliseconds).
+        hit_age_ms: u64,
+    },
+
+    /// The tool cache was queried but no valid entry was found (E26).
+    ///
+    /// Emitted when the outcome is [`tool_cache::CacheOutcome::Miss`]; the tool
+    /// was invoked normally after this event.
+    ToolCacheMiss {
+        /// Agent identifier.
+        agent_id: String,
+        /// Tool that was invoked following the miss.
+        tool_id: String,
+    },
+
+    /// Expired tool-cache entries were removed (E26).
+    ///
+    /// Emitted after a call to [`tool_cache::ToolCache::evict_expired`] that
+    /// removed at least one entry.
+    ToolCacheEvicted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of entries removed.
+        count: usize,
+    },
+
+    // ── E27 — Knowledge Graph ─────────────────────────────────────────────────
+    /// A new entity was added to the knowledge graph.
+    KnowledgeEntityAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable entity id.
+        entity_id: String,
+        /// Entity kind label (e.g. "person", "technology").
+        kind: String,
+        /// Human-readable display name.
+        display_name: String,
+    },
+
+    /// A directed relation was added between two entities.
+    KnowledgeRelationAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Source entity id.
+        from_entity: String,
+        /// Target entity id.
+        to_entity: String,
+        /// Relation kind label (e.g. "works_at", "depends_on").
+        kind: String,
+    },
+
+    /// The knowledge graph was queried.
+    KnowledgeGraphQueried {
+        /// Agent identifier.
+        agent_id: String,
+        /// Type of query performed (e.g. "neighbors", "by_kind", "by_attribute").
+        query_type: String,
+        /// Number of entities returned.
+        result_count: usize,
+    },
+
+    // ── E18 — Metrics & Observability ────────────────────────────────────────
+    /// A periodic metrics snapshot was captured from the audit log (E18).
+    ///
+    /// Written by the metrics layer at the end of a reporting window so that
+    /// the snapshot itself becomes part of the durable audit trail.  Downstream
+    /// consumers can time-travel through metric history without replaying the
+    /// full entry set.
+    MetricsSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Total audit entries in the aggregation window.
+        window_entries: usize,
+        /// Tasks started in the window.
+        tasks_started: u64,
+        /// Tasks completed successfully in the window.
+        tasks_completed: u64,
+        /// Tasks failed in the window.
+        tasks_failed: u64,
+        /// Total tokens emitted by completed tasks.
+        total_tokens_emitted: u64,
+        /// Gate decisions evaluated.
+        gate_decisions: u64,
+        /// Gate decisions that resulted in a cortex invocation.
+        gate_invocations: u64,
+        /// Cortex invocations recorded.
+        cortex_invocations: u64,
+        /// Cortex faults recorded.
+        cortex_faults: u64,
+        /// Defence-layer vetoes issued (defence + constitution combined).
+        total_vetoes: u64,
+        /// Sleep cycles entered.
+        sleep_cycles: u64,
+        /// Mean interoceptive thermal load (`[0,1]`, `0.0` when no snapshots).
+        mean_thermal_load: f32,
+        /// Mean interoceptive financial budget remaining (`[0,1]`).
+        mean_financial_budget: f32,
+    },
+
+    // ── E28 — Alert Rules & Threshold Monitoring ──────────────────────────────
+    /// A new alert rule was registered (E28).
+    AlertRuleAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// Human-readable description of the rule.
+        description: String,
+        /// The metric field the rule monitors (e.g. `"cortex_fault_rate"`).
+        field: String,
+        /// Comparison operator as a string (`">"`, `"<"`, etc.).
+        op: String,
+        /// Threshold value.
+        threshold: f64,
+        /// Severity level (`"info"` / `"warning"` / `"critical"`).
+        severity: String,
+    },
+    /// An alert rule was removed (E28).
+    AlertRuleRemoved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier that was removed.
+        rule_id: String,
+    },
+    /// An alert rule's condition transitioned from Normal to Firing (E28).
+    AlertFired {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// The metric field that triggered the alert.
+        field: String,
+        /// Observed metric value at evaluation time.
+        actual_value: f64,
+        /// The configured threshold.
+        threshold: f64,
+        /// Severity level.
+        severity: String,
+    },
+    /// A previously firing alert rule returned to the Normal state (E28).
+    AlertResolved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// The metric field that resolved.
+        field: String,
+        /// Observed metric value at resolution.
+        actual_value: f64,
+    },
+
+    // ── E29 — Outbound Webhook Integration ───────────────────────────────────
+    /// A new webhook endpoint was registered (E29).
+    WebhookRegistered {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable endpoint ID (e.g. `"wh-a1b2c3d4"`).
+        endpoint_id: String,
+        /// Destination URL.
+        url: String,
+        /// `true` when the endpoint has a signing secret configured.
+        has_secret: bool,
+    },
+    /// A webhook endpoint was removed (E29).
+    WebhookRemoved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable endpoint ID.
+        endpoint_id: String,
+    },
+    /// A webhook payload was dispatched successfully (E29).
+    WebhookDispatched {
+        /// Agent identifier.
+        agent_id: String,
+        /// Endpoint ID the payload was sent to.
+        endpoint_id: String,
+        /// Event kind that triggered this delivery (e.g. `"task_completed"`).
+        event_kind: String,
+        /// Delivery attempt count (1 = first try succeeded).
+        attempts: u32,
+    },
+    /// A webhook delivery failed after all retry attempts (E29).
+    WebhookFailed {
+        /// Agent identifier.
+        agent_id: String,
+        /// Endpoint ID that failed.
+        endpoint_id: String,
+        /// Event kind that was being delivered.
+        event_kind: String,
+        /// Total number of attempts made.
+        attempts: u32,
+        /// Error description from the last attempt.
+        error: String,
+    },
+
+    // ── E30 — Agent Self-Diagnostic System ───────────────────────────────────
+    /// A diagnostic run was completed (E30, S30.5).
+    ///
+    /// Written by the `anima diagnose` CLI command after all checks have been
+    /// evaluated.  Carries the aggregate outcome so that recurring health trends
+    /// are visible in the audit log without replaying the full check detail.
+    DiagnosticRun {
+        /// Agent identifier.
+        agent_id: String,
+        /// Aggregate health status: `"Healthy"`, `"Degraded"`, `"Critical"`, or `"Unknown"`.
+        overall_status: String,
+        /// Number of checks that returned `Healthy`.
+        healthy_count: usize,
+        /// Number of checks that returned `Degraded`.
+        degraded_count: usize,
+        /// Number of checks that returned `Critical`.
+        critical_count: usize,
+        /// Number of audit entries analysed to produce the report.
+        audit_entries_analysed: u64,
+    },
+}
+
+// ── JSONL read-back utilities ─────────────────────────────────────────────────
+
+/// Deserialize all `AuditEntry` records from a JSONL file.
+///
+/// Lines that are empty or fail to deserialize are silently skipped so that a
+/// truncated or partially-written last line never prevents the rest of the log
+/// from being read.
+#[cfg(feature = "std")]
+pub fn load_entries_from_file(
+    path: impl AsRef<std::path::Path>,
+) -> std::io::Result<Vec<AuditEntry>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let mut entries = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+/// Load all persisted `AuditEntry` records for `agent_id` from
+/// `$ANIMA_AUDIT_DIR/<agent_id>.jsonl`.  Returns an empty `Vec` when the
+/// environment variable is unset, the file does not exist yet, or the file
+/// cannot be read.
+#[cfg(feature = "std")]
+pub fn load_entries_from_env(agent_id: &str) -> Vec<AuditEntry> {
+    if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
+        let path = std::path::PathBuf::from(&dir).join(format!("{agent_id}.jsonl"));
+        match load_entries_from_file(&path) {
+            Ok(entries) => return entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("anima-audit: failed to load {}: {e}", path.display()),
+        }
+    }
+    Vec::new()
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

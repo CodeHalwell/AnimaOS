@@ -52,10 +52,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "analytics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vita",
+]
+
+[[package]]
 name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
+
+[[package]]
+name = "anima-alerts"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "anima-finetune"
@@ -248,13 +267,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "consent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "users",
+]
+
+[[package]]
 name = "console"
 version = "0.1.0"
 dependencies = [
  "console-proto",
  "interoception",
+ "metrics-endpoint",
  "senses",
  "serde_json",
+ "vita",
 ]
 
 [[package]]
@@ -560,6 +601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vita",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,6 +709,15 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "feedback"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -865,18 +924,30 @@ name = "hosted"
 version = "0.1.0"
 dependencies = [
  "actuators",
+ "analytics",
+ "anima-alerts",
+ "config",
+ "consent",
  "console",
+ "diagnostics",
+ "feedback",
  "interoception",
+ "knowledge-graph",
  "lifecycle",
  "llm-backends",
  "memory",
+ "metrics",
  "praxis",
+ "quota",
  "scheduler",
  "senses",
  "serde_json",
+ "sessions",
  "skills",
+ "tool-cache",
  "users",
  "vita",
+ "webhooks",
 ]
 
 [[package]]
@@ -1168,6 +1239,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-graph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "kv-controller"
 version = "0.1.0"
 dependencies = [
@@ -1275,6 +1355,23 @@ dependencies = [
  "scheduler",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "metrics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vita",
+]
+
+[[package]]
+name = "metrics-endpoint"
+version = "0.1.0"
+dependencies = [
+ "vita",
 ]
 
 [[package]]
@@ -1464,6 +1561,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "quota"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "users",
 ]
 
 [[package]]
@@ -1804,6 +1910,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sessions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2095,6 +2210,13 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+
+[[package]]
+name = "tool-cache"
+version = "0.1.0"
+dependencies = [
+ "praxis",
+]
 
 [[package]]
 name = "tower"
@@ -2742,6 +2864,16 @@ checksum = "6d621441cfc37b84979402712047321980c178f299193a3589d05b99e8763436"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webhooks"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
 ]
 
 [[package]]

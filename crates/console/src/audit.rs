@@ -277,7 +277,11 @@ impl AuditTailer {
                         break;
                     }
                     consumed += n as u64;
-                    if let Some(event) = event_from_audit_line(line.trim_end()) {
+                    let trimmed = line.trim_end();
+                    // Update the Prometheus metric registry from every line
+                    // before the operator-event throttling (E21).
+                    self.hub.update_metrics_from_json(trimmed);
+                    if let Some(event) = event_from_audit_line(trimmed) {
                         if matches!(event, OperatorEvent::Vitals { .. }) {
                             let now = Instant::now();
                             let too_soon = last_vitals

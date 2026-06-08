@@ -8,6 +8,7 @@
 //! | `GET /events`     | Server-Sent Events: the live [`OperatorEvent`] stream.         |
 //! | `POST /guidance`  | Afferent ingress — an [`OperatorInput`] becomes a sensory packet. |
 //! | `GET /healthz`    | Liveness probe.                                                |
+//! | `GET /metrics`    | Prometheus exposition-format metrics (E21).                    |
 //!
 //! It is hand-rolled on `std::net` (thread-per-connection) precisely so the
 //! `console` crate pulls in **no** third-party HTTP stack — keeping the
@@ -313,6 +314,17 @@ impl ConsoleServer {
             ),
             ("GET", "/events") => self.serve_events(out),
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
+            // E21 — Prometheus metrics endpoint
+            ("GET", "/metrics") => {
+                let body = self.hub.render_metrics();
+                write_response(
+                    &mut out,
+                    200,
+                    "OK",
+                    "text/plain; version=0.0.4; charset=utf-8",
+                    body.as_bytes(),
+                )
+            }
             _ => write_response(
                 &mut out,
                 404,
@@ -879,6 +891,87 @@ mod tests {
         assert!(
             text.contains("hello from the agent"),
             "should receive the published event: {text}"
+        );
+    }
+
+    // ── E21: /metrics endpoint ─────────────────────────────────────────────────
+
+    #[test]
+    fn metrics_endpoint_returns_prometheus_text() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(
+            resp.contains("text/plain; version=0.0.4"),
+            "content-type: {resp}"
+        );
+        assert!(
+            resp.contains("# HELP anima_tasks_total"),
+            "prometheus help line: {resp}"
+        );
+        assert!(
+            resp.contains("# TYPE anima_tasks_total counter"),
+            "prometheus type line: {resp}"
+        );
+    }
+
+    #[test]
+    fn metrics_endpoint_reflects_audit_updates_via_hub() {
+        let (addr, hub, _bridge) = start();
+
+        // Feed a gate decision directly into the hub metrics registry.
+        let audit_line = r#"{"GateDecision":{"agent_id":"a","event_id":"e1","invoke":true,"cost_class":"Frontier","urgency":0.9,"novelty":0.5,"user_facing":true,"semantic_class":"UserQuery","value_score":0.82,"threshold_applied":0.4,"thermal_load":0.1,"compute_pressure":0.0,"memory_pressure":0.0,"power_budget":1.0,"financial_budget":1.0,"attention_demand":0.7,"reasoning":"test","override_active":false}}"#;
+        hub.update_metrics_from_json(audit_line);
+
+        let resp = http_request(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp.contains("anima_gate_decisions_total{outcome=\"invoke\"} 1"),
+            "gate counter: {resp}"
+        );
+        assert!(
+            resp.contains("anima_gate_invocations_total{cost_class=\"Frontier\"} 1"),
+            "cost_class label: {resp}"
+        );
+    }
+
+    #[test]
+    fn metrics_endpoint_requires_auth_when_token_is_configured() {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = senses::SensoryBridge::new(senses::HumanGuidance::new("test"));
+        let server = ConsoleServer::new(
+            hub.clone(),
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: Some("secret123".into()),
+            },
+        );
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        // Without token → 401.
+        let resp_no_token = http_request(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_no_token.contains("401"),
+            "should require auth: {resp_no_token}"
+        );
+
+        // With correct token → 200.
+        let resp_with_token = http_request(
+            addr,
+            "GET /metrics HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer secret123\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp_with_token.contains("200 OK"),
+            "should accept valid token: {resp_with_token}"
         );
     }
 }
