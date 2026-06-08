@@ -1192,6 +1192,44 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E18 — Metrics & Observability ────────────────────────────────────────
+    /// A periodic metrics snapshot was captured from the audit log (E18).
+    ///
+    /// Written by the metrics layer at the end of a reporting window so that
+    /// the snapshot itself becomes part of the durable audit trail.  Downstream
+    /// consumers can time-travel through metric history without replaying the
+    /// full entry set.
+    MetricsSnapshot {
+        /// Agent identifier.
+        agent_id: String,
+        /// Total audit entries in the aggregation window.
+        window_entries: usize,
+        /// Tasks started in the window.
+        tasks_started: u64,
+        /// Tasks completed successfully in the window.
+        tasks_completed: u64,
+        /// Tasks failed in the window.
+        tasks_failed: u64,
+        /// Total tokens emitted by completed tasks.
+        total_tokens_emitted: u64,
+        /// Gate decisions evaluated.
+        gate_decisions: u64,
+        /// Gate decisions that resulted in a cortex invocation.
+        gate_invocations: u64,
+        /// Cortex invocations recorded.
+        cortex_invocations: u64,
+        /// Cortex faults recorded.
+        cortex_faults: u64,
+        /// Defence-layer vetoes issued (defence + constitution combined).
+        total_vetoes: u64,
+        /// Sleep cycles entered.
+        sleep_cycles: u64,
+        /// Mean interoceptive thermal load (`[0,1]`, `0.0` when no snapshots).
+        mean_thermal_load: f32,
+        /// Mean interoceptive financial budget remaining (`[0,1]`).
+        mean_financial_budget: f32,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

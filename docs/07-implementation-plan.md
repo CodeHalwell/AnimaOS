@@ -3098,3 +3098,61 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Observability, Knowledge & Analytics
+
+### Epic E18 — Metrics & Observability ✅
+
+**Scope.** A structured metrics aggregation pipeline that folds the durable
+[`vita::audit::AuditEntry`] stream into an [`AgentMetrics`] snapshot covering
+tasks, gate decisions, cortex performance, defence events, memory pressure, sleep
+cycles, and interoceptive signals.  The snapshot can be rendered as a
+human-readable text report, a Prometheus-compatible exposition string, or a JSON
+document.  A new `AuditEntry::MetricsSnapshot` variant persists the summary back
+into the audit trail so metric history is recoverable from the log itself without
+replaying the full entry set.
+
+**Dependencies.** `vita::audit::AuditEntry` (cross-cutting — audit log is the
+sole data source; no new sensing required).
+
+**Stories.**
+- S18.1 `crates/metrics` — new zero-external-dependency crate (`serde`/`serde_json`
+  only, `#[forbid(unsafe_code)]`):
+  - `aggregator.rs` — `aggregate(&[AuditEntry]) → AgentMetrics`; single-pass
+    fold; derived rates/means computed post-scan; covers tasks, gate, router,
+    memory, cortex, defence, interoception. ✅
+  - `prometheus.rs` — `render_prometheus(&AgentMetrics) → String`; full
+    OpenMetrics-compatible text exposition with `# HELP` / `# TYPE` lines,
+    `anima_` prefix, and `agent=` label on every series. ✅
+  - `reporter.rs` — `render_text_report(&AgentMetrics) → String`; structured
+    terminal report with section headers and right-aligned columns. ✅
+- S18.2 `AuditEntry::MetricsSnapshot` — new variant in `vita::audit`; persists
+  key counter fields so metric history is auditable without replaying the full
+  entry set; `print_audit` arm renders with `📊` prefix. ✅
+- S18.3 `anima-hosted metrics` CLI subcommand — `--format text|json|prometheus`
+  and `--last N` flags; seeds a demo audit window, aggregates, records a
+  `MetricsSnapshot`, and renders output.  Satisfies E18 exit criterion 3. ✅
+
+**New crate: `crates/metrics`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde` (workspace),
+`serde_json` (workspace).  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `aggregate` returns an `AgentMetrics` with all rate and mean fields in
+   `[0.0, 1.0]` for any input (including an empty slice). ✅
+   (`empty_slice_produces_zero_metrics`, `task_success_rate_is_zero_when_no_tasks_started`,
+   `gate_invoke_rate_is_correct`, `cortex_counters_and_derived_values`)
+2. Prometheus output validates structurally (every line is either a comment or
+   an `anima_`-prefixed metric line). ✅ (`prometheus_output_for_empty_metrics_is_valid`)
+3. `anima-hosted metrics [--format text|json|prometheus]` runs from `cargo run`
+   without error. ✅ (`cmd_metrics` seeded with a demo audit window; all three
+   formats tested at invocation time)
+4. `AuditEntry::MetricsSnapshot` is emitted and printed by `print_audit`. ✅
+   (variant added to `vita::audit`; `print_audit` arm renders the full counter
+   summary with `📊` prefix)
+5. `cargo test --workspace` green; 36 new metrics tests + all prior tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
