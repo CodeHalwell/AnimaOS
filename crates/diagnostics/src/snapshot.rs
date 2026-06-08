@@ -247,9 +247,11 @@ mod tests {
 
     #[test]
     fn l1_fill_fraction_computed_correctly() {
-        let mut snap = AuditSnapshot::default();
-        snap.last_l1_tokens = 2048;
-        snap.last_l1_max_context = 4096;
+        let snap = AuditSnapshot {
+            last_l1_tokens: 2048,
+            last_l1_max_context: 4096,
+            ..Default::default()
+        };
         let frac = snap.l1_fill_fraction();
         assert!((frac - 0.5).abs() < 1e-6);
     }
