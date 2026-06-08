@@ -3150,7 +3150,11 @@ to operator attention, mirroring the defence layer's escalation pattern (E5.6).
 `Cargo.toml` dependencies: `users` (workspace), `serde` (workspace),
 ## Stage 9 — Observability, Knowledge & Analytics
 
-### Epic E18 — Metrics & Observability ✅
+### Epic E19 — Metrics & Observability ✅
+
+> Renumbered E18 → **E19** at integration: the E18 identifier is held by
+> Per-User Rate Limiting & Token Quotas (above). The live Prometheus scrape
+> endpoint that originally shared this work is split out as **E21** (below).
 
 **Scope.** A structured metrics aggregation pipeline that folds the durable
 [`vita::audit::AuditEntry`] stream into an [`AgentMetrics`] snapshot covering
@@ -3936,3 +3940,54 @@ tracked in the audit log over time without replaying full check detail.
    tests pass. ✅
 6. `cargo clippy --workspace -- -D warnings` clean. ✅
 7. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Live Metrics Endpoint
+
+### Epic E21 — Prometheus Metrics Endpoint ✅
+
+**Scope.** A live, in-process Prometheus exposition served from the operator
+console, complementing E19's offline audit-log aggregation. The
+`metrics-endpoint` crate provides a `MetricRegistry` that the console's
+`AuditTailer` feeds from every audit line as it streams; the console HTTP
+server exposes it at `GET /metrics` for a Prometheus scraper, plus a
+human-readable `metrics_summary()`.
+
+**Relationship to E19.** E19 (`crates/metrics`) folds a *bounded* audit slice
+into an `AgentMetrics` snapshot for `anima-hosted metrics` and the
+`MetricsSnapshot` audit entry. E21 (`crates/metrics-endpoint`) is a *live*
+counter/gauge registry for continuous scrape. Both ship; the crate was renamed
+from `metrics` to `metrics-endpoint` at integration to coexist with E19.
+
+**Stories.**
+- S21.1 `MetricRegistry` — counters, gauges, histogram observations derived
+  from `vita::AuditEntry`; `render()` emits OpenMetrics text. ✅
+  (`crates/metrics-endpoint/src/lib.rs`)
+- S21.2 Console wiring — `Hub::{update_metrics_from_json, render_metrics,
+  metrics_summary}`; `GET /metrics` route; `AuditTailer` updates the registry
+  per line. ✅ (`crates/console/src/{hub,server,audit}.rs`)
+
+**Exit criteria.** `GET /metrics` returns Prometheus exposition text reflecting
+streamed audit updates; `cargo test/clippy/fmt` green across the workspace. ✅
+
+---
+
+## Stage 9 — Integration Notes (E18–E30 wave)
+
+The E18–E30 epics were developed as 14 independent feature branches off the
+E1–E17 somatic core. They were integrated as a single coherent line. Decisions
+made at integration:
+
+| Concern | Resolution |
+|---|---|
+| `quota` appeared in two branches (standalone + a quota+webhooks bundle) | Kept the standalone (`crates/quota`, E18); the bundle's identical copy was dropped |
+| `webhooks` appeared in two branches (a 2-file bundle + a 6-module crate) | Kept the richer 6-module `crates/webhooks` (E29); the bundle was dropped |
+| `metrics` appeared in three branches | Kept the aggregator (`crates/metrics`, E19), required by `alerts`; the bundled duplicate was dropped; the live scrape endpoint was split out as `crates/metrics-endpoint` (E21) |
+| The quota+webhooks bundle branch | Fully redundant against E18 + E29 → dropped entirely |
+| Duplicate epic number `E18` (quota vs metrics) | Metrics renumbered to **E19**; the wave now occupies a clean **E18–E30** |
+
+Final crate ↔ epic map: E18 `quota`, E19 `metrics`, E20 `config`,
+E21 `metrics-endpoint`, E22 `sessions`, E23 `consent`, E24 `feedback`,
+E25 `analytics`, E26 `tool-cache`, E27 `knowledge-graph`, E28 `alerts`,
+E29 `webhooks`, E30 `diagnostics`.

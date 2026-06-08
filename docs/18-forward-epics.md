@@ -103,15 +103,20 @@ trust/lifecycle tooling.
 - Auto-promotion scope for prompt-only skills (E11) vs human-in-the-loop.
 - Mid-tier backend binding (E8 §4): Ollama-large vs Claude Haiku.
 
-## 6. Noted but unscoped (candidate E16+)
+## 6. Shipped beyond E15 (E16–E30)
 
-Surfaced during design; **not yet scoped** — flagged so they are not lost.
-(The value charter, alignment evals, and cognitive-health items have since been
-scoped into E13–E15.)
+The two items originally flagged here as "noted but unscoped" have since been
+scoped and **shipped**:
 
-- **Trust, human-identity & privacy** — authenticating *which human* is messaging
-  (E10 channels), multi-user/relationship model, consent UX, and data governance
-  for an agent brokering a person's private life. *(Reviewed, deferred.)*
-- **Multi-agent society** — multiple AnimaOS agents cooperating/delegating, or an
-  agent spawning scoped sub-agents over the existing (unused) A2A bus.
-  *(Reviewed, deferred.)*
+- **E16 — Multi-Agent Coordination** ✅ — A2A substrate (`AgentPool`,
+  `A2aDispatcher`, audit pipeline) over the previously-unused A2A bus.
+  See `docs/07` Stage 7.
+- **E17 — Trust, Human-Identity & Privacy** ✅ — per-user identity
+  (`crates/users`), trust tiers, and a consent model. See `docs/07` Stage 8.
+
+Beyond the autonomous-agent layer, an **operational/observability wave
+(E18–E30)** has also shipped — rate-limiting/quotas, runtime config, session
+history, consent enforcement, feedback, analytics, tool-cache, knowledge graph,
+metrics (offline + live `/metrics`), alerts, webhooks, and self-diagnostics.
+The crate ↔ epic map and the integration/de-duplication decisions are recorded
+in `docs/07` (Stage 9 — Integration Notes).
