@@ -1192,6 +1192,53 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E32 — Scheduled Job and Cron Engine ───────────────────────────────────
+    /// A new job was registered in the [`JobRegistry`] (E32 S32.3).
+    JobScheduled {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable job identifier.
+        job_id: String,
+        /// Human-readable description of the job.
+        description: String,
+        /// Schedule type label (`"immediate"`, `"once"`, `"cron"`).
+        schedule_type: String,
+        /// Workspace the job belongs to; empty string = global.
+        workspace_id: String,
+    },
+
+    /// A job fired and its payload was dispatched to the executor (E32 S32.4).
+    JobFired {
+        /// Agent identifier.
+        agent_id: String,
+        /// Job identifier.
+        job_id: String,
+        /// 1-based attempt number.
+        attempt: u32,
+    },
+
+    /// A job execution attempt concluded (E32 S32.4).
+    JobCompleted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Job identifier.
+        job_id: String,
+        /// `true` when the execution succeeded.
+        success: bool,
+        /// Duration of the execution in milliseconds.
+        duration_ms: u64,
+    },
+
+    /// A job was cancelled or removed from the registry (E32 S32.3).
+    JobCancelled {
+        /// Agent identifier.
+        agent_id: String,
+        /// Job identifier.
+        job_id: String,
+        /// Human-readable reason supplied by the operator.
+        reason: String,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

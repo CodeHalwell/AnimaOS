@@ -901,6 +901,20 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E32 — Scheduled Job and Cron Engine ───────────────────────────
+            AuditEntry::JobScheduled { agent_id, job_id, description, schedule_type, workspace_id } => {
+                println!("  📅 job_scheduled agent={agent_id} id={job_id} desc={description:?} schedule={schedule_type} workspace={workspace_id:?}");
+            }
+            AuditEntry::JobFired { agent_id, job_id, attempt } => {
+                println!("  🔔 job_fired agent={agent_id} id={job_id} attempt={attempt}");
+            }
+            AuditEntry::JobCompleted { agent_id, job_id, success, duration_ms } => {
+                let icon = if *success { "✅" } else { "❌" };
+                println!("  {icon} job_completed agent={agent_id} id={job_id} success={success} duration={duration_ms}ms");
+            }
+            AuditEntry::JobCancelled { agent_id, job_id, reason } => {
+                println!("  🚫 job_cancelled agent={agent_id} id={job_id} reason={reason:?}");
+            }
         }
     }
 }
@@ -1210,6 +1224,290 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+        }
+    }
+}
+
+// ── `anima jobs` subcommand (E32) ────────────────────────────────────────────
+
+/// Manages scheduled jobs in the AnimaOS cron engine.
+///
+/// ```text
+/// anima-hosted jobs list
+/// anima-hosted jobs add --description <desc> [--cron <expr>] [--at <ns>] [--workspace <id>] [--payload <json>]
+/// anima-hosted jobs show <job_id>
+/// anima-hosted jobs remove <job_id> [<reason>]
+/// anima-hosted jobs run <job_id>
+/// ```
+fn cmd_jobs(args: &[String]) {
+    use jobs::{
+        due_job_ids, record_run_result, JobRegistry, JobSchedule, JobStatus, RunResult,
+        ScheduledJob,
+    };
+
+    const AGENT_ID: &str = "anima";
+
+    let mut registry = {
+        let path = JobRegistry::default_path(AGENT_ID);
+        JobRegistry::open(&path).unwrap_or_else(|_| JobRegistry::in_memory())
+    };
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let mut jobs: Vec<&ScheduledJob> = registry.iter().map(|(_, j)| j).collect();
+            jobs.sort_by_key(|j| &j.job_id);
+            if jobs.is_empty() {
+                println!("jobs: no scheduled jobs");
+            } else {
+                println!(
+                    "{:<36}  {:<12}  {:<10}  DESCRIPTION",
+                    "JOB ID", "SCHEDULE", "STATUS"
+                );
+                for job in jobs {
+                    println!(
+                        "{:<36}  {:<12}  {:<10}  {}",
+                        job.job_id,
+                        job.schedule.type_label(),
+                        job.status,
+                        job.description,
+                    );
+                }
+            }
+        }
+        Some("show") => match args.get(1) {
+            Some(job_id) => match registry.get(job_id) {
+                Some(job) => {
+                    println!("Job ID   : {}", job.job_id);
+                    println!("Desc     : {}", job.description);
+                    println!(
+                        "Workspace: {}",
+                        if job.workspace_id.is_empty() {
+                            "(global)"
+                        } else {
+                            &job.workspace_id
+                        }
+                    );
+                    println!("Schedule : {} ({})", job.schedule.type_label(), {
+                        match &job.schedule {
+                            JobSchedule::Immediate => "fire-immediately".to_owned(),
+                            JobSchedule::Once { at_ns } => format!("at {at_ns} ns"),
+                            JobSchedule::Cron { expression } => expression.clone(),
+                        }
+                    });
+                    println!("Status   : {}", job.status);
+                    println!("Payload  : {}", job.payload);
+                    println!(
+                        "Retries  : max={} delay={}s consecutive_failures={}",
+                        job.retry_policy.max_attempts,
+                        job.retry_policy.retry_delay_secs,
+                        job.consecutive_failures,
+                    );
+                    if let Some(last) = &job.last_run {
+                        println!(
+                            "Last run : attempt={} success={} duration={}ms fired_at={}",
+                            last.attempt, last.success, last.duration_ms, last.fired_at_ns
+                        );
+                        if let Some(err) = &last.error {
+                            println!("           error={err}");
+                        }
+                    } else {
+                        println!("Last run : (never)");
+                    }
+                }
+                None => eprintln!("jobs: no job with id={job_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted jobs show <job_id>"),
+        },
+        Some("add") => {
+            // Parse flags: --description, --cron, --at, --workspace, --payload
+            let description = flag_value(args, "--description").unwrap_or_default();
+            if description.is_empty() {
+                eprintln!("jobs add: --description is required");
+                return;
+            }
+            let workspace = flag_value(args, "--workspace").unwrap_or_default();
+            let payload = flag_value(args, "--payload").unwrap_or_default();
+
+            let schedule = if let Some(expr) = flag_value(args, "--cron") {
+                JobSchedule::Cron { expression: expr }
+            } else if let Some(at_str) = flag_value(args, "--at") {
+                match at_str.parse::<u64>() {
+                    Ok(at_ns) => JobSchedule::Once { at_ns },
+                    Err(_) => {
+                        eprintln!("jobs add: --at must be a Unix nanosecond timestamp (u64)");
+                        return;
+                    }
+                }
+            } else {
+                JobSchedule::Immediate
+            };
+
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            let job = ScheduledJob::new(&description, &workspace, &payload, schedule, now_ns);
+            let job_id = job.job_id.clone();
+            let schedule_type = job.schedule.type_label().to_owned();
+
+            match registry.add(job) {
+                Ok(()) => {
+                    log.push(AuditEntry::JobScheduled {
+                        agent_id: AGENT_ID.to_owned(),
+                        job_id: job_id.clone(),
+                        description: description.clone(),
+                        schedule_type,
+                        workspace_id: workspace,
+                    });
+                    println!("jobs: scheduled {job_id:?}");
+                    if let Err(e) = registry.flush() {
+                        eprintln!("jobs: flush failed: {e}");
+                    }
+                    print_jobs_audit(&log);
+                }
+                Err(e) => eprintln!("jobs: {e}"),
+            }
+        }
+        Some("remove") => match args.get(1) {
+            Some(job_id) => {
+                let reason = args
+                    .get(2)
+                    .cloned()
+                    .unwrap_or_else(|| "operator-requested".to_owned());
+                match registry.remove(job_id) {
+                    Some(_) => {
+                        log.push(AuditEntry::JobCancelled {
+                            agent_id: AGENT_ID.to_owned(),
+                            job_id: job_id.clone(),
+                            reason: reason.clone(),
+                        });
+                        println!("jobs: removed {job_id:?} (reason={reason:?})");
+                        if let Err(e) = registry.flush() {
+                            eprintln!("jobs: flush failed: {e}");
+                        }
+                        print_jobs_audit(&log);
+                    }
+                    None => eprintln!("jobs: no job with id={job_id:?}"),
+                }
+            }
+            None => eprintln!("usage: anima-hosted jobs remove <job_id> [<reason>]"),
+        },
+        Some("run") => match args.get(1) {
+            Some(job_id) => {
+                if registry.get(job_id).is_none() {
+                    eprintln!("jobs: no job with id={job_id:?}");
+                    return;
+                }
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+
+                let attempt = registry
+                    .get(job_id)
+                    .and_then(|j| j.last_run.as_ref())
+                    .map_or(1, |r| r.attempt + 1);
+
+                log.push(AuditEntry::JobFired {
+                    agent_id: AGENT_ID.to_owned(),
+                    job_id: job_id.clone(),
+                    attempt,
+                });
+                println!("jobs: firing {job_id:?} (attempt={attempt})");
+
+                // Simulate a successful execution (no real task dispatch in CLI mode).
+                let result = RunResult::success(job_id.as_str(), 1, attempt);
+                record_run_result(&mut registry, job_id, &result, now_ns);
+
+                log.push(AuditEntry::JobCompleted {
+                    agent_id: AGENT_ID.to_owned(),
+                    job_id: job_id.clone(),
+                    success: true,
+                    duration_ms: 1,
+                });
+
+                let new_status = registry
+                    .get(job_id)
+                    .map(|j| j.status)
+                    .unwrap_or(JobStatus::Active);
+                println!("jobs: completed {job_id:?} → status={new_status}");
+                if let Err(e) = registry.flush() {
+                    eprintln!("jobs: flush failed: {e}");
+                }
+                print_jobs_audit(&log);
+            }
+            None => eprintln!("usage: anima-hosted jobs run <job_id>"),
+        },
+        Some("poll") => {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let due = due_job_ids(&registry, now_ns);
+            if due.is_empty() {
+                println!("jobs poll: no jobs due at this time");
+            } else {
+                println!("jobs poll: {} job(s) due:", due.len());
+                for id in &due {
+                    println!("  {id}");
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: anima-hosted jobs list");
+            eprintln!("       anima-hosted jobs add --description <desc> [--cron <expr>|--at <ns>] [--workspace <id>] [--payload <json>]");
+            eprintln!("       anima-hosted jobs show <job_id>");
+            eprintln!("       anima-hosted jobs remove <job_id> [<reason>]");
+            eprintln!("       anima-hosted jobs run <job_id>");
+            eprintln!("       anima-hosted jobs poll");
+        }
+    }
+}
+
+/// Extracts the value of a named CLI flag (`--flag <value>`).
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
+/// Prints E32 job-related audit entries to stdout.
+fn print_jobs_audit(log: &AuditLog) {
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::JobScheduled {
+                agent_id,
+                job_id,
+                description,
+                schedule_type,
+                workspace_id,
+            } => {
+                println!("📅 [JobScheduled] agent={agent_id} job={job_id} desc={description:?} schedule={schedule_type} workspace={workspace_id:?}");
+            }
+            AuditEntry::JobFired {
+                agent_id,
+                job_id,
+                attempt,
+            } => {
+                println!("🔔 [JobFired] agent={agent_id} job={job_id} attempt={attempt}");
+            }
+            AuditEntry::JobCompleted {
+                agent_id,
+                job_id,
+                success,
+                duration_ms,
+            } => {
+                let icon = if *success { "✅" } else { "❌" };
+                println!("{icon} [JobCompleted] agent={agent_id} job={job_id} success={success} duration={duration_ms}ms");
+            }
+            AuditEntry::JobCancelled {
+                agent_id,
+                job_id,
+                reason,
+            } => {
+                println!("🚫 [JobCancelled] agent={agent_id} job={job_id} reason={reason:?}");
+            }
+            _ => {}
         }
     }
 }
@@ -2549,6 +2847,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("jobs") {
+        cmd_jobs(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {
