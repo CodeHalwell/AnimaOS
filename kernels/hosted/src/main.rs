@@ -85,6 +85,9 @@ use memory::VirtualContextManager;
 use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
 // E11: skill crate referenced inside cmd_skills via use statements
+use alerts::{
+    AlertCondition, AlertRule, AlertRuleRegistry, AlertSeverity, ComparisonOp, MetricField,
+};
 use metrics::{aggregate, render_prometheus, render_text_report};
 use vita::gate::Gate;
 use vita::{
@@ -925,6 +928,35 @@ fn print_audit(manager: &LifecycleManager) {
                      gate={gate_invocations}/{gate_decisions} cortex={cortex_invocations} \
                      faults={cortex_faults} vetoes={total_vetoes} sleep={sleep_cycles} \
                      thermal={mean_thermal_load:.2} fin_budget={mean_financial_budget:.2}"
+                );
+            }
+            // ── E28 — Alert Rules ─────────────────────────────────────────────
+            AuditEntry::AlertRuleAdded {
+                agent_id, rule_id, description, field, op, threshold, severity,
+            } => {
+                println!(
+                    "  🔔  alert_rule_added agent={agent_id} id={rule_id} \
+                     condition=\"{field} {op} {threshold:.4}\" severity={severity} \
+                     desc=\"{description}\""
+                );
+            }
+            AuditEntry::AlertRuleRemoved { agent_id, rule_id } => {
+                println!("  🔕  alert_rule_removed agent={agent_id} id={rule_id}");
+            }
+            AuditEntry::AlertFired {
+                agent_id, rule_id, field, actual_value, threshold, severity,
+            } => {
+                println!(
+                    "  🚨  alert_fired agent={agent_id} id={rule_id} \
+                     {field}={actual_value:.4} threshold={threshold:.4} severity={severity}"
+                );
+            }
+            AuditEntry::AlertResolved {
+                agent_id, rule_id, field, actual_value,
+            } => {
+                println!(
+                    "  ✅  alert_resolved agent={agent_id} id={rule_id} \
+                     {field}={actual_value:.4}"
                 );
             }
         }
@@ -2668,6 +2700,329 @@ fn cmd_metrics(args: &[String]) {
     }
 }
 
+// ── `anima alert` subcommand (E28) ────────────────────────────────────────────
+
+/// Implements alert rule management:
+///   `anima-hosted alert list`
+///   `anima-hosted alert add <id> <field> <op> <threshold> [--severity info|warning|critical] [--desc "..."]`
+///   `anima-hosted alert remove <id>`
+///   `anima-hosted alert eval`
+fn cmd_alert(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+
+    let mut registry = AlertRuleRegistry::in_memory();
+    let mut log = vita::AuditLog::new();
+
+    // Seed a few demo rules so `list` and `eval` always have content.
+    let demo_rules = vec![
+        AlertRule::new(
+            "high-cortex-fault-rate",
+            "Alert when cortex fault rate exceeds 20%",
+            AlertCondition::new(MetricField::CortexFaultRate, ComparisonOp::GreaterThan, 0.2),
+            AlertSeverity::Critical,
+        ),
+        AlertRule::new(
+            "low-task-success",
+            "Alert when task success rate drops below 80%",
+            AlertCondition::new(MetricField::TaskSuccessRate, ComparisonOp::LessThan, 0.8),
+            AlertSeverity::Warning,
+        ),
+        AlertRule::new(
+            "high-thermal",
+            "Alert when mean thermal load exceeds 85%",
+            AlertCondition::new(
+                MetricField::MeanThermalLoad,
+                ComparisonOp::GreaterThan,
+                0.85,
+            ),
+            AlertSeverity::Warning,
+        ),
+        AlertRule::new(
+            "depleted-budget",
+            "Alert when financial budget falls below 10%",
+            AlertCondition::new(
+                MetricField::MeanFinancialBudget,
+                ComparisonOp::LessThan,
+                0.1,
+            ),
+            AlertSeverity::Critical,
+        ),
+    ];
+    for r in demo_rules {
+        let id = r.id.clone();
+        let field = r.condition.field.to_string();
+        let op = r.condition.op.to_string();
+        let threshold = r.condition.threshold;
+        let severity = r.severity.to_string();
+        let description = r.description.clone();
+        registry.add(r).ok();
+        log.push(vita::audit::AuditEntry::AlertRuleAdded {
+            agent_id: AGENT_ID.to_string(),
+            rule_id: id,
+            description,
+            field,
+            op,
+            threshold,
+            severity,
+        });
+    }
+
+    let sub = args.first().map(String::as_str).unwrap_or("list");
+
+    match sub {
+        "list" => {
+            println!("=== Alert Rules: {AGENT_ID} ===");
+            let rules = registry.list();
+            if rules.is_empty() {
+                println!("  (no rules registered)");
+            } else {
+                for r in &rules {
+                    let status = if r.enabled { "enabled" } else { "disabled" };
+                    println!(
+                        "  [{status:8}] {:<40} {} {} {:.4}  [{}]  {}",
+                        r.id,
+                        r.condition.field,
+                        r.condition.op,
+                        r.condition.threshold,
+                        r.severity,
+                        r.description,
+                    );
+                }
+                println!("\n{} rule(s) registered.", rules.len());
+            }
+        }
+
+        "add" => {
+            // alert add <id> <field> <op> <threshold> [--severity S] [--desc D]
+            if args.len() < 5 {
+                eprintln!("Usage: alert add <id> <field> <op> <threshold> [--severity info|warning|critical] [--desc \"...\"]");
+                return;
+            }
+            let id = &args[1];
+            let field: MetricField = match args[2].parse() {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Invalid field: {e}");
+                    return;
+                }
+            };
+            let op: ComparisonOp = match args[3].parse() {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Invalid op: {e}");
+                    return;
+                }
+            };
+            let threshold: f64 = match args[4].parse() {
+                Ok(t) => t,
+                Err(_) => {
+                    eprintln!("Invalid threshold (expected f64)");
+                    return;
+                }
+            };
+            let mut severity = AlertSeverity::Warning;
+            let mut description = format!("{} {} {:.4}", field, op, threshold);
+            let mut i = 5usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--severity" if i + 1 < args.len() => {
+                        severity = args[i + 1].parse().unwrap_or(AlertSeverity::Warning);
+                        i += 2;
+                    }
+                    "--desc" if i + 1 < args.len() => {
+                        description = args[i + 1].clone();
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let field_s = field.to_string();
+            let op_s = op.to_string();
+            let sev_s = severity.to_string();
+            let rule = AlertRule::new(
+                id,
+                &description,
+                AlertCondition::new(field, op, threshold),
+                severity,
+            );
+            match registry.add(rule) {
+                Ok(()) => {
+                    log.push(vita::audit::AuditEntry::AlertRuleAdded {
+                        agent_id: AGENT_ID.to_string(),
+                        rule_id: id.clone(),
+                        description: description.clone(),
+                        field: field_s,
+                        op: op_s,
+                        threshold,
+                        severity: sev_s,
+                    });
+                    println!("Rule '{id}' added.");
+                    println!("\nAudit trail:");
+                    print_audit_alert(&log);
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        "remove" => {
+            let id = match args.get(1) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Usage: alert remove <id>");
+                    return;
+                }
+            };
+            match registry.remove(id) {
+                Ok(_) => {
+                    log.push(vita::audit::AuditEntry::AlertRuleRemoved {
+                        agent_id: AGENT_ID.to_string(),
+                        rule_id: id.clone(),
+                    });
+                    println!("Rule '{id}' removed.");
+                    println!("\nAudit trail:");
+                    print_audit_alert(&log);
+                }
+                Err(e) => eprintln!("Error: {e}"),
+            }
+        }
+
+        "eval" => {
+            // Evaluate demo rules against a seeded metrics snapshot.
+            let mut demo_log = vita::AuditLog::new();
+            demo_log.push(vita::audit::AuditEntry::TaskStarted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 1,
+                tier: 0,
+                prompt: "morning report".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskCompleted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 1,
+                tokens_emitted: 300,
+                response: "done".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskStarted {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 2,
+                tier: 0,
+                prompt: "failing task".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::TaskFailed {
+                agent_id: AGENT_ID.to_string(),
+                task_id: 2,
+                error: "backend timeout".to_string(),
+            });
+            demo_log.push(vita::audit::AuditEntry::CortexInvoked {
+                task_id: "inv-1".to_string(),
+                latency_to_first_action_ms: 95,
+            });
+            demo_log.push(vita::audit::AuditEntry::CortexFault {
+                task_id: "inv-1".to_string(),
+                error: "python process crashed".to_string(),
+            });
+
+            let m = aggregate(demo_log.entries());
+            let rules = registry.rules_owned();
+            let mut trackers = vec![];
+            let events = alerts::evaluate(&m, &rules, &mut trackers);
+
+            println!("=== Alert Evaluation: {AGENT_ID} ===");
+            println!(
+                "Metrics window: {} entries | task_success_rate={:.2} | cortex_fault_rate={:.2}",
+                m.window_entries, m.task_success_rate, m.cortex_fault_rate
+            );
+            println!();
+
+            if events.is_empty() {
+                println!("  No alerts fired.");
+            } else {
+                for ev in &events {
+                    let icon = match ev.kind {
+                        alerts::AlertEventKind::Fired => "🚨 FIRED   ",
+                        alerts::AlertEventKind::Resolved => "✅ RESOLVED",
+                    };
+                    println!(
+                        "  {icon}  [{:8}]  {}  ({} = {:.4}, threshold = {:.4})",
+                        ev.severity, ev.rule_id, ev.field, ev.actual_value, ev.threshold
+                    );
+                    // Emit audit entries.
+                    match ev.kind {
+                        alerts::AlertEventKind::Fired => {
+                            log.push(vita::audit::AuditEntry::AlertFired {
+                                agent_id: AGENT_ID.to_string(),
+                                rule_id: ev.rule_id.clone(),
+                                field: ev.field.to_string(),
+                                actual_value: ev.actual_value,
+                                threshold: ev.threshold,
+                                severity: ev.severity.to_string(),
+                            });
+                        }
+                        alerts::AlertEventKind::Resolved => {
+                            log.push(vita::audit::AuditEntry::AlertResolved {
+                                agent_id: AGENT_ID.to_string(),
+                                rule_id: ev.rule_id.clone(),
+                                field: ev.field.to_string(),
+                                actual_value: ev.actual_value,
+                            });
+                        }
+                    }
+                }
+            }
+            println!("\nAudit trail (E28 entries):");
+            print_audit_alert(&log);
+        }
+
+        other => {
+            eprintln!("Unknown alert subcommand: {other}");
+            eprintln!("Available: list, add, remove, eval");
+        }
+    }
+}
+
+fn print_audit_alert(log: &vita::AuditLog) {
+    for entry in log.entries() {
+        match entry {
+            vita::audit::AuditEntry::AlertRuleAdded {
+                agent_id,
+                rule_id,
+                field,
+                op,
+                threshold,
+                severity,
+                ..
+            } => {
+                println!("  🔔  alert_rule_added agent={agent_id} id={rule_id} condition=\"{field} {op} {threshold:.4}\" severity={severity}");
+            }
+            vita::audit::AuditEntry::AlertRuleRemoved { agent_id, rule_id } => {
+                println!("  🔕  alert_rule_removed agent={agent_id} id={rule_id}");
+            }
+            vita::audit::AuditEntry::AlertFired {
+                agent_id,
+                rule_id,
+                field,
+                actual_value,
+                threshold,
+                severity,
+            } => {
+                println!("  🚨  alert_fired agent={agent_id} id={rule_id} {field}={actual_value:.4} threshold={threshold:.4} severity={severity}");
+            }
+            vita::audit::AuditEntry::AlertResolved {
+                agent_id,
+                rule_id,
+                field,
+                actual_value,
+            } => {
+                println!(
+                    "  ✅  alert_resolved agent={agent_id} id={rule_id} {field}={actual_value:.4}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2715,6 +3070,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("metrics") {
         cmd_metrics(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("alert") {
+        cmd_alert(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

@@ -58,6 +58,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
+name = "anima-alerts"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "anima-finetune"
 version = "0.1.0"
 dependencies = [
@@ -865,6 +875,7 @@ name = "hosted"
 version = "0.1.0"
 dependencies = [
  "actuators",
+ "anima-alerts",
  "console",
  "interoception",
  "lifecycle",

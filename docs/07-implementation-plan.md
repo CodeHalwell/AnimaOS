@@ -3156,3 +3156,61 @@ sole data source; no new sensing required).
 5. `cargo test --workspace` green; 36 new metrics tests + all prior tests pass. ✅
 6. `cargo clippy --workspace -- -D warnings` clean. ✅
 7. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E28 — Alert Rules & Threshold Monitoring ✅
+
+**Scope.** Threshold-based alert rules evaluated over [`AgentMetrics`] (E18).
+Operators define named rules — `<metric_field> <op> <threshold>` — and the
+`AlertEvaluator` produces `AlertFired` / `AlertResolved` events as the agent's
+health state changes.  Builds directly on E18; no new sensing or I/O required.
+
+**Dependencies.** E18 (`AgentMetrics`, `aggregate`).
+
+**Stories.**
+- S28.1 `AlertRule` + `AlertCondition` + `MetricField` + `ComparisonOp` + `AlertSeverity`. ✅
+  (`crates/alerts/src/rule.rs` — 13 addressable metric fields; `>`, `>=`, `<`, `<=`
+  operators; `Info / Warning / Critical` severity; `FromStr` + `Display` for all types;
+  `AlertRule::fires(actual)` convenience predicate; 12 unit tests)
+- S28.2 `AlertState` machine (`Normal → Firing → Resolved`) and `AlertStateTracker`. ✅
+  (`crates/alerts/src/state.rs` — `StateTransition` enum suppresses duplicate fire events
+  and synthesises resolved events; `total_fires` counter; JSON round-trip; 8 unit tests)
+- S28.3 Pure `evaluate()` function. ✅
+  (`crates/alerts/src/evaluator.rs` — `evaluate(&AgentMetrics, &[AlertRule], &mut Vec<Tracker>)
+  → Vec<AlertEvent>`; `AlertEventKind::{Fired, Resolved}`; `extract_field` maps all 13
+  `MetricField` variants to `AgentMetrics` fields; 9 unit tests)
+- S28.4 `AlertRuleRegistry` with atomic JSON persistence. ✅
+  (`crates/alerts/src/registry.rs` — `add`, `remove`, `set_enabled`, `list` (sorted),
+  `update_trackers`; write-to-`.tmp`-then-rename; `in_memory()` for tests;
+  `default_path(agent_id)` → `~/.anima/<id>/alert_rules.json`; 11 unit tests)
+- S28.5 Four new `AuditEntry` variants and `anima-hosted alert` CLI. ✅
+  (`vita::audit::AuditEntry::{AlertRuleAdded, AlertRuleRemoved, AlertFired, AlertResolved}`;
+  `print_audit` arms with 🔔 / 🔕 / 🚨 / ✅ prefixes;
+  `cmd_alert()` — `list`, `add <id> <field> <op> <threshold>`, `remove <id>`, `eval`
+  subcommands with demo audit output)
+
+**New crate: `crates/alerts` (`anima-alerts`).**
+Dependencies: `metrics` (workspace), `serde`, `serde_json`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `AlertCondition` + `ComparisonOp` fire correctly at boundary values (including the
+   equal-to case for `>=` / `<=`). ✅
+   (`comparison_op_gte_lte_boundary`, `alert_rule_fires_when_condition_met`,
+   `comparison_op_greater_than_fires_correctly`, `comparison_op_less_than_fires_correctly`)
+2. Duplicate `Fired` events are suppressed; `Resolved` fires exactly once when the
+   condition clears. ✅
+   (`evaluate_suppresses_duplicate_fire_events`,
+   `evaluate_generates_resolved_event_when_condition_clears`,
+   `still_firing_does_not_increment_total_fires`)
+3. Disabled rules produce no events regardless of metric values. ✅
+   (`disabled_rule_never_fires`, `evaluate_disabled_rule_produces_no_events`)
+4. All 13 `MetricField` variants extract without panic on a zero-entry metrics
+   snapshot. ✅ (`extract_field_covers_all_metric_fields`)
+5. `AlertRuleRegistry` CRUD and atomic persistence round-trip. ✅
+   (`flush_and_reload_round_trip`, `open_creates_empty_registry_when_file_absent`,
+   `add_rejects_duplicate_id`, `remove_returns_not_found_for_missing_rule`)
+6. `cargo test --workspace` green; 37 new alerts tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅

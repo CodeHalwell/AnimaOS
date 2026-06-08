@@ -1230,6 +1230,58 @@ pub enum AuditEntry {
         /// Mean interoceptive financial budget remaining (`[0,1]`).
         mean_financial_budget: f32,
     },
+
+    // ── E28 — Alert Rules & Threshold Monitoring ──────────────────────────────
+    /// A new alert rule was registered (E28).
+    AlertRuleAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// Human-readable description of the rule.
+        description: String,
+        /// The metric field the rule monitors (e.g. `"cortex_fault_rate"`).
+        field: String,
+        /// Comparison operator as a string (`">"`, `"<"`, etc.).
+        op: String,
+        /// Threshold value.
+        threshold: f64,
+        /// Severity level (`"info"` / `"warning"` / `"critical"`).
+        severity: String,
+    },
+    /// An alert rule was removed (E28).
+    AlertRuleRemoved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier that was removed.
+        rule_id: String,
+    },
+    /// An alert rule's condition transitioned from Normal to Firing (E28).
+    AlertFired {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// The metric field that triggered the alert.
+        field: String,
+        /// Observed metric value at evaluation time.
+        actual_value: f64,
+        /// The configured threshold.
+        threshold: f64,
+        /// Severity level.
+        severity: String,
+    },
+    /// A previously firing alert rule returned to the Normal state (E28).
+    AlertResolved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Rule identifier.
+        rule_id: String,
+        /// The metric field that resolved.
+        field: String,
+        /// Observed metric value at resolution.
+        actual_value: f64,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

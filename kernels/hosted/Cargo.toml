@@ -23,3 +23,4 @@ praxis = { path = "../../crates/praxis" }
 serde_json = { workspace = true }
 users = { path = "../../crates/users" }
 metrics = { path = "../../crates/metrics" }
+alerts = { path = "../../crates/alerts", package = "anima-alerts" }

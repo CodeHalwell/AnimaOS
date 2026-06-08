@@ -1,0 +1,13 @@
+[package]
+name = "anima-alerts"
+version = "0.1.0"
+edition = "2021"
+description = "E28 — Alert rules and threshold monitoring for AnimaOS"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+metrics = { path = "../metrics" }
+
+[dev-dependencies]
+tempfile = "3"
