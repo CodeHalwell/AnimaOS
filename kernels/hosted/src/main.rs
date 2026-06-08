@@ -2590,12 +2590,25 @@ fn cmd_graph(args: &[String]) {
                         return;
                     }
                 };
-                // Optional --name flag.
-                let display_name = args
-                    .windows(2)
-                    .find(|w| w[0] == "--name")
-                    .map(|w| w[1].as_str())
-                    .unwrap_or(id);
+                // Require explicit "custom:" prefix to prevent typos becoming custom kinds.
+                if matches!(kind, EntityKind::Custom(_))
+                    && !kind_str.to_ascii_lowercase().starts_with("custom:")
+                {
+                    eprintln!("error: unknown entity kind '{kind_str}'");
+                    eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                    return;
+                }
+                // Optional --name flag; reject bare --name with no following value.
+                let display_name = match args.windows(2).find(|w| w[0] == "--name") {
+                    Some(w) => w[1].as_str(),
+                    None => {
+                        if args.last().map(String::as_str) == Some("--name") {
+                            eprintln!("error: --name requires a value");
+                            return;
+                        }
+                        id
+                    }
+                };
                 let entity = Entity::new(id, kind.clone(), display_name);
                 match g.add_entity(entity) {
                     Ok(()) => {
@@ -2652,10 +2665,30 @@ fn cmd_graph(args: &[String]) {
                 }
             }
             Some("list") => {
-                let kind_filter: Option<EntityKind> = args
-                    .windows(2)
-                    .find(|w| w[0] == "--kind")
-                    .and_then(|w| w[1].parse().ok());
+                let kind_filter: Option<EntityKind> = if let Some(w) =
+                    args.windows(2).find(|w| w[0] == "--kind")
+                {
+                    let k_str = w[1].as_str();
+                    match k_str.parse::<EntityKind>() {
+                        Ok(k) => {
+                            if matches!(k, EntityKind::Custom(_))
+                                && !k_str.to_ascii_lowercase().starts_with("custom:")
+                            {
+                                eprintln!("error: unknown entity kind '{k_str}'");
+                                eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                                return;
+                            }
+                            Some(k)
+                        }
+                        Err(()) => {
+                            eprintln!("error: unknown entity kind '{k_str}'");
+                            eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let entities = g.all_entities();
                 let filtered: Vec<_> = if let Some(ref kind) = kind_filter {
@@ -2732,6 +2765,14 @@ fn cmd_graph(args: &[String]) {
                         return;
                     }
                 };
+                // Require explicit "custom:" prefix to prevent typos becoming custom kinds.
+                if matches!(kind, RelationKind::Custom(_))
+                    && !kind_str.to_ascii_lowercase().starts_with("custom:")
+                {
+                    eprintln!("error: unknown relation kind '{kind_str}'");
+                    eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
+                    return;
+                }
                 match g.add_relation(Relation::new(from, to, kind.clone())) {
                     Ok(()) => {
                         log.push(AuditEntry::KnowledgeRelationAdded {

@@ -54,7 +54,13 @@ impl FromStr for RelationKind {
             "collaborates" => Ok(RelationKind::Collaborates),
             "is_a" | "is-a" => Ok(RelationKind::IsA),
             other => {
-                let label = other.strip_prefix("custom:").unwrap_or(other);
+                // Preserve original casing: extract label from the original string, not
+                // the lowercased `other`.
+                let label = if other.starts_with("custom:") {
+                    &s[7..] // skip the 7-byte "custom:" prefix
+                } else {
+                    s
+                };
                 if label.is_empty() {
                     Err(())
                 } else {
@@ -93,17 +99,23 @@ impl Relation {
     }
 
     /// Create a relation with an explicit weight, clamped to `[0.0, 1.0]`.
+    /// NaN is treated as `0.0` since `f32::clamp` propagates NaN.
     pub fn with_weight(
         from: impl Into<String>,
         to: impl Into<String>,
         kind: RelationKind,
         weight: f32,
     ) -> Self {
+        let w = if weight.is_nan() {
+            0.0
+        } else {
+            weight.clamp(0.0, 1.0)
+        };
         Relation {
             from: from.into(),
             to: to.into(),
             kind,
-            weight: weight.clamp(0.0, 1.0),
+            weight: w,
             created_at_ns: now_ns(),
         }
     }
@@ -138,6 +150,12 @@ mod tests {
     #[test]
     fn relation_weight_is_clamped_below_zero() {
         let r = Relation::with_weight("a", "b", RelationKind::DependsOn, -0.5);
+        assert_eq!(r.weight, 0.0);
+    }
+
+    #[test]
+    fn relation_weight_nan_becomes_zero() {
+        let r = Relation::with_weight("a", "b", RelationKind::DependsOn, f32::NAN);
         assert_eq!(r.weight, 0.0);
     }
 

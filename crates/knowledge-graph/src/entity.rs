@@ -45,7 +45,13 @@ impl FromStr for EntityKind {
             "technology" => Ok(EntityKind::Technology),
             "organization" | "org" => Ok(EntityKind::Organization),
             other => {
-                let label = other.strip_prefix("custom:").unwrap_or(other);
+                // Preserve original casing: extract label from the original string, not
+                // the lowercased `other`.
+                let label = if other.starts_with("custom:") {
+                    &s[7..] // skip the 7-byte "custom:" prefix
+                } else {
+                    s
+                };
                 if label.is_empty() {
                     Err(())
                 } else {

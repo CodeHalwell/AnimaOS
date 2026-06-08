@@ -149,15 +149,15 @@ impl KnowledgeGraph {
         if !self.entities.contains_key(&relation.to) {
             return Err(GraphError::EntityNotFound(relation.to));
         }
-        let kind_str = relation.kind.to_string();
-        let already_exists = self.relations.iter().any(|r| {
-            r.from == relation.from && r.to == relation.to && r.kind.to_string() == kind_str
-        });
+        let already_exists = self
+            .relations
+            .iter()
+            .any(|r| r.from == relation.from && r.to == relation.to && r.kind == relation.kind);
         if already_exists {
             return Err(GraphError::RelationAlreadyExists {
                 from: relation.from,
                 to: relation.to,
-                kind: kind_str,
+                kind: relation.kind.to_string(),
             });
         }
         self.adjacency
@@ -174,10 +174,9 @@ impl KnowledgeGraph {
 
     /// Remove the relation matching (from, to, kind). Returns `true` if found.
     pub fn remove_relation(&mut self, from: &str, to: &str, kind: &RelationKind) -> bool {
-        let kind_str = kind.to_string();
         let before = self.relations.len();
         self.relations
-            .retain(|r| !(r.from == from && r.to == to && r.kind.to_string() == kind_str));
+            .retain(|r| !(r.from == from && r.to == to && &r.kind == kind));
         let removed = self.relations.len() < before;
         if removed {
             self.rebuild_adjacency();
@@ -228,17 +227,22 @@ impl KnowledgeGraph {
         result
     }
 
-    /// Return all entities whose kind matches the given `EntityKind`.
+    /// Return all entities whose kind matches the given `EntityKind`, sorted by id.
     pub fn find_by_kind(&self, kind: &EntityKind) -> Vec<&Entity> {
-        self.entities.values().filter(|e| &e.kind == kind).collect()
+        let mut v: Vec<&Entity> = self.entities.values().filter(|e| &e.kind == kind).collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 
-    /// Return all entities that have an attribute `key` with value `value`.
+    /// Return all entities that have an attribute `key` with value `value`, sorted by id.
     pub fn find_by_attribute(&self, key: &str, value: &str) -> Vec<&Entity> {
-        self.entities
+        let mut v: Vec<&Entity> = self
+            .entities
             .values()
             .filter(|e| e.get_attribute(key) == Some(value))
-            .collect()
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 
     /// Return all relations where `from` or `to` matches `entity_id`.
