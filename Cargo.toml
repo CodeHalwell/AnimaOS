@@ -33,6 +33,7 @@ members = [
   "crates/alerts",
   "crates/webhooks",
   "crates/diagnostics",
+  "crates/workspace",
   "kernels/hosted",
   "llm-backends",
 ]

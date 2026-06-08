@@ -1259,6 +1259,64 @@ fn print_audit(manager: &LifecycleManager) {
                      entries_analysed={audit_entries_analysed}"
                 );
             }
+
+            // ── E31 — Multi-Tenant Workspace Management ──────────────────────
+            AuditEntry::WorkspaceCreated {
+                agent_id,
+                workspace_id,
+                display_name,
+                owner_user_id,
+            } => {
+                println!(
+                    "  🏢 workspace_created agent={agent_id} id={workspace_id} \
+                     name={display_name:?} owner={owner_user_id}"
+                );
+            }
+            AuditEntry::WorkspaceMemberAdded {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👥 workspace_member_added agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceMemberRemoved {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👤 workspace_member_removed agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceQuotaUpdated {
+                agent_id,
+                workspace_id,
+                max_members,
+                max_daily_tokens,
+            } => {
+                println!(
+                    "  📊 workspace_quota_updated agent={agent_id} \
+                     workspace={workspace_id} max_members={max_members} \
+                     max_daily_tokens={max_daily_tokens}"
+                );
+            }
+            AuditEntry::WorkspaceStatusChanged {
+                agent_id,
+                workspace_id,
+                old_status,
+                new_status,
+            } => {
+                println!(
+                    "  🔄 workspace_status_changed agent={agent_id} \
+                     workspace={workspace_id} {old_status} → {new_status}"
+                );
+            }
         }
     }
 }
@@ -4429,6 +4487,369 @@ fn cmd_users(args: &[String]) {
     }
 }
 
+// ── `anima workspace` subcommand (E31) ───────────────────────────────────────
+
+/// Prints E31-relevant entries from an in-process audit log.
+fn print_workspace_audit(log: &AuditLog) {
+    println!("--- audit trail ---");
+    for entry in log.entries() {
+        match entry {
+            AuditEntry::WorkspaceCreated {
+                agent_id,
+                workspace_id,
+                display_name,
+                owner_user_id,
+            } => {
+                println!(
+                    "  🏢 workspace_created agent={agent_id} id={workspace_id} \
+                     name={display_name:?} owner={owner_user_id}"
+                );
+            }
+            AuditEntry::WorkspaceMemberAdded {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👥 workspace_member_added agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceMemberRemoved {
+                agent_id,
+                workspace_id,
+                user_id,
+                role,
+            } => {
+                println!(
+                    "  👤 workspace_member_removed agent={agent_id} \
+                     workspace={workspace_id} user={user_id} role={role}"
+                );
+            }
+            AuditEntry::WorkspaceQuotaUpdated {
+                agent_id,
+                workspace_id,
+                max_members,
+                max_daily_tokens,
+            } => {
+                println!(
+                    "  📊 workspace_quota_updated agent={agent_id} \
+                     workspace={workspace_id} max_members={max_members} \
+                     max_daily_tokens={max_daily_tokens}"
+                );
+            }
+            AuditEntry::WorkspaceStatusChanged {
+                agent_id,
+                workspace_id,
+                old_status,
+                new_status,
+            } => {
+                println!(
+                    "  🔄 workspace_status_changed agent={agent_id} \
+                     workspace={workspace_id} {old_status} → {new_status}"
+                );
+            }
+            _ => {}
+        }
+    }
+    println!("---");
+}
+
+/// Implements the `anima workspace` subcommands for managing workspaces.
+///
+/// ```text
+/// anima-hosted workspace create <id> <display_name> <owner_user_id>
+/// anima-hosted workspace list
+/// anima-hosted workspace show <workspace_id>
+/// anima-hosted workspace add-member <workspace_id> <user_id> <role>
+/// anima-hosted workspace remove-member <workspace_id> <user_id>
+/// anima-hosted workspace set-quota <workspace_id> <max_members> <max_daily_tokens>
+/// anima-hosted workspace suspend <workspace_id>
+/// anima-hosted workspace reactivate <workspace_id>
+/// anima-hosted workspace delete <workspace_id>
+/// ```
+fn cmd_workspace(args: &[String]) {
+    use std::str::FromStr;
+    use workspace::{WorkspaceProfile, WorkspaceQuota, WorkspaceRegistry, WorkspaceRole};
+
+    const AGENT_ID: &str = "anima";
+
+    let path = WorkspaceRegistry::default_path(AGENT_ID);
+    let mut registry = WorkspaceRegistry::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not open workspace registry ({e}); using in-memory fallback");
+        WorkspaceRegistry::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            if registry.is_empty() {
+                println!("(no workspaces registered)");
+            } else {
+                println!(
+                    "{:>20}  {:>10}  {:>8}  display_name",
+                    "workspace_id", "status", "members"
+                );
+                println!("{}", "-".repeat(60));
+                let mut entries: Vec<_> = registry.iter().collect();
+                entries.sort_by_key(|(id, _)| *id);
+                for (id, rec) in entries {
+                    println!(
+                        "{:>20}  {:>10}  {:>8}  {}",
+                        id,
+                        rec.profile.status.as_str(),
+                        rec.member_count(),
+                        rec.profile.display_name
+                    );
+                }
+            }
+        }
+        Some("show") => match args.get(1) {
+            Some(ws_id) => match registry.get(ws_id) {
+                Some(rec) => {
+                    println!("workspace_id  : {}", rec.profile.workspace_id);
+                    println!("display_name  : {}", rec.profile.display_name);
+                    println!("owner         : {}", rec.profile.owner_user_id);
+                    println!("status        : {}", rec.profile.status);
+                    println!("created_at    : {}ns", rec.profile.created_at_ns);
+                    if let Some(desc) = &rec.profile.description {
+                        println!("description   : {desc}");
+                    }
+                    println!("quota:");
+                    println!("  max_members      : {}", rec.quota.max_members);
+                    println!("  max_daily_tokens : {}", rec.quota.max_daily_tokens);
+                    println!("  max_storage_bytes: {}", rec.quota.max_storage_bytes);
+                    println!("  max_active_tasks : {}", rec.quota.max_active_tasks);
+                    println!("members ({}):", rec.member_count());
+                    let mut members = rec.members.clone();
+                    members.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+                    for m in &members {
+                        println!("  {} ({})", m.user_id, m.role);
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace show <workspace_id>"),
+        },
+        Some("create") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(raw_id), Some(display_name), Some(owner_user_id)) => {
+                let workspace_id = match workspace::WorkspaceProfile::make_id(raw_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("workspace: invalid id: {e}");
+                        return;
+                    }
+                };
+                let profile = WorkspaceProfile::new(&workspace_id, display_name, owner_user_id, 0);
+                match registry.create(profile, 0) {
+                    Ok(()) => {
+                        log.push(AuditEntry::WorkspaceCreated {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: workspace_id.clone(),
+                            display_name: display_name.clone(),
+                            owner_user_id: owner_user_id.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: created {workspace_id:?} owned by {owner_user_id:?}");
+                        print_workspace_audit(&log);
+                    }
+                    Err(e) => eprintln!("workspace: error: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace create <id> <display_name> <owner_user_id>"
+            ),
+        },
+        Some("add-member") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(ws_id), Some(user_id), Some(role_str)) => {
+                match WorkspaceRole::from_str(role_str) {
+                    Ok(role) => match registry.add_member(ws_id, user_id.clone(), role, 0) {
+                        Ok(()) => {
+                            log.push(AuditEntry::WorkspaceMemberAdded {
+                                agent_id: AGENT_ID.to_owned(),
+                                workspace_id: ws_id.clone(),
+                                user_id: user_id.clone(),
+                                role: role.as_str().to_owned(),
+                            });
+                            if let Err(e) = registry.flush() {
+                                eprintln!("workspace: warning: could not persist registry: {e}");
+                            }
+                            println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
+                            print_workspace_audit(&log);
+                        }
+                        Err(e) => eprintln!("workspace: error: {e}"),
+                    },
+                    Err(e) => eprintln!("workspace: invalid role: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace add-member \
+                 <workspace_id> <user_id> guest|member|admin"
+            ),
+        },
+        Some("remove-member") => match (args.get(1), args.get(2)) {
+            (Some(ws_id), Some(user_id)) => match registry.remove_member(ws_id, user_id) {
+                Ok(removed_role) => {
+                    log.push(AuditEntry::WorkspaceMemberRemoved {
+                        agent_id: AGENT_ID.to_owned(),
+                        workspace_id: ws_id.clone(),
+                        user_id: user_id.clone(),
+                        role: removed_role.as_str().to_owned(),
+                    });
+                    if let Err(e) = registry.flush() {
+                        eprintln!("workspace: warning: could not persist registry: {e}");
+                    }
+                    println!("workspace: removed {user_id:?} from {ws_id:?}");
+                    print_workspace_audit(&log);
+                }
+                Err(e) => eprintln!("workspace: error: {e}"),
+            },
+            _ => eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>"),
+        },
+        Some("set-quota") => match (args.get(1), args.get(2), args.get(3)) {
+            (Some(ws_id), Some(max_members_str), Some(max_tokens_str)) => {
+                let max_members = match max_members_str.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("workspace: max_members must be a non-negative integer");
+                        return;
+                    }
+                };
+                let max_daily_tokens = match max_tokens_str.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("workspace: max_daily_tokens must be a non-negative integer");
+                        return;
+                    }
+                };
+                let quota = WorkspaceQuota {
+                    max_members,
+                    max_daily_tokens,
+                    ..WorkspaceQuota::default()
+                };
+                match registry.set_quota(ws_id, quota) {
+                    Ok(()) => {
+                        log.push(AuditEntry::WorkspaceQuotaUpdated {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            max_members,
+                            max_daily_tokens,
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!(
+                            "workspace: updated quota for {ws_id:?}: \
+                             max_members={max_members} max_daily_tokens={max_daily_tokens}"
+                        );
+                        print_workspace_audit(&log);
+                    }
+                    Err(e) => eprintln!("workspace: error: {e}"),
+                }
+            }
+            _ => eprintln!(
+                "usage: anima-hosted workspace set-quota \
+                 <workspace_id> <max_members> <max_daily_tokens>"
+            ),
+        },
+        Some("suspend") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.suspend(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: suspended {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is already {old} (no change)");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace suspend <workspace_id>"),
+        },
+        Some("reactivate") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.reactivate(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: reactivated {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is {old} (cannot reactivate)");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace reactivate <workspace_id>"),
+        },
+        Some("delete") => match args.get(1) {
+            Some(ws_id) => match registry.get_mut(ws_id) {
+                Some(rec) => {
+                    let old = rec.profile.status.as_str().to_owned();
+                    if rec.profile.delete(0) {
+                        let new = rec.profile.status.as_str().to_owned();
+                        log.push(AuditEntry::WorkspaceStatusChanged {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            old_status: old.clone(),
+                            new_status: new.clone(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: soft-deleted {ws_id:?} ({old} → {new})");
+                        print_workspace_audit(&log);
+                    } else {
+                        println!("workspace: {ws_id:?} is already deleted");
+                    }
+                }
+                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+            },
+            None => eprintln!("usage: anima-hosted workspace delete <workspace_id>"),
+        },
+        _ => {
+            eprintln!("usage: anima-hosted workspace create <id> <display_name> <owner_user_id>");
+            eprintln!("       anima-hosted workspace list");
+            eprintln!("       anima-hosted workspace show <workspace_id>");
+            eprintln!(
+                "       anima-hosted workspace add-member <workspace_id> <user_id> \
+                 guest|member|admin"
+            );
+            eprintln!("       anima-hosted workspace remove-member <workspace_id> <user_id>");
+            eprintln!(
+                "       anima-hosted workspace set-quota \
+                 <workspace_id> <max_members> <max_daily_tokens>"
+            );
+            eprintln!("       anima-hosted workspace suspend <workspace_id>");
+            eprintln!("       anima-hosted workspace reactivate <workspace_id>");
+            eprintln!("       anima-hosted workspace delete <workspace_id>");
+        }
+    }
+}
+
 // ── `anima why` subcommand (E5.2 exit criterion 3 + E5.7 exit criterion 2) ───
 
 /// Exercises the Striatal Gate on representative events, records the decisions
@@ -5764,6 +6185,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("workspace") {
+        cmd_workspace(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

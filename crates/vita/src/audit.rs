@@ -1657,6 +1657,67 @@ pub enum AuditEntry {
         /// Number of audit entries analysed to produce the report.
         audit_entries_analysed: u64,
     },
+
+    // ── E31 — Multi-Tenant Workspace Management ───────────────────────────────
+    /// A new workspace was created (E31 S31.1).
+    WorkspaceCreated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable workspace identifier slug.
+        workspace_id: String,
+        /// Human-readable display name.
+        display_name: String,
+        /// The `user_id` of the workspace owner.
+        owner_user_id: String,
+    },
+
+    /// A user was added to a workspace (E31 S31.2).
+    WorkspaceMemberAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Target workspace.
+        workspace_id: String,
+        /// The user who was added.
+        user_id: String,
+        /// Role granted to the new member.
+        role: String,
+    },
+
+    /// A user was removed from a workspace (E31 S31.2).
+    WorkspaceMemberRemoved {
+        /// Agent identifier.
+        agent_id: String,
+        /// Target workspace.
+        workspace_id: String,
+        /// The user who was removed.
+        user_id: String,
+        /// The role that was revoked.
+        role: String,
+    },
+
+    /// The resource quota for a workspace was updated (E31 S31.3).
+    WorkspaceQuotaUpdated {
+        /// Agent identifier.
+        agent_id: String,
+        /// Target workspace.
+        workspace_id: String,
+        /// New maximum member count.
+        max_members: usize,
+        /// New daily token limit.
+        max_daily_tokens: u64,
+    },
+
+    /// The lifecycle status of a workspace changed (E31 S31.1).
+    WorkspaceStatusChanged {
+        /// Agent identifier.
+        agent_id: String,
+        /// Target workspace.
+        workspace_id: String,
+        /// Previous status label.
+        old_status: String,
+        /// New status label.
+        new_status: String,
+    },
 }
 
 // ── JSONL read-back utilities ─────────────────────────────────────────────────

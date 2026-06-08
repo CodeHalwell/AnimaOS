@@ -34,3 +34,4 @@ metrics = { path = "../../crates/metrics" }
 alerts = { path = "../../crates/alerts", package = "anima-alerts" }
 webhooks = { path = "../../crates/webhooks" }
 diagnostics = { path = "../../crates/diagnostics" }
+workspace = { path = "../../crates/workspace" }

@@ -3991,3 +3991,98 @@ Final crate ↔ epic map: E18 `quota`, E19 `metrics`, E20 `config`,
 E21 `metrics-endpoint`, E22 `sessions`, E23 `consent`, E24 `feedback`,
 E25 `analytics`, E26 `tool-cache`, E27 `knowledge-graph`, E28 `alerts`,
 E29 `webhooks`, E30 `diagnostics`.
+
+---
+
+## Stage 9 — Multi-Tenancy & Workspace Management
+
+### Epic E31 — Multi-Tenant Workspace Management ✅
+
+**Scope.** Logical tenant grouping for multi-user deployments: a `WorkspaceProfile`
+with lifecycle status, a role-based membership model (`Guest < Member < Admin < Owner`),
+per-workspace resource quotas (members, daily tokens, storage, active tasks), and
+an atomic JSON-persisted `WorkspaceRegistry`.  All mutations emit structured
+`AuditEntry` variants.  An `anima workspace` CLI surfaces the full CRUD surface
+to operators without requiring API access.
+
+**Dependencies.** E17 (per-user identity — `user_id` strings form workspace member
+keys), EX.2 (audit log for workspace events).
+
+**New crate: `crates/workspace`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Stories.**
+- S31.1 `WorkspaceProfile` and `WorkspaceStatus`. ✅ (`crates/workspace/src/workspace.rs` —
+  `WorkspaceProfile { workspace_id, display_name, owner_user_id, description?,
+  status, created_at_ns, updated_at_ns, schema_version }`; `WorkspaceStatus` (Active /
+  Suspended / Deleted) with `Ord`-implied lifecycle; `suspend()`, `reactivate()`,
+  `delete()` return `false` on no-op transitions; `make_id(raw)` normalises a raw name
+  into a lowercase alphanumeric slug)
+- S31.2 `WorkspaceRole` and `WorkspaceMembership`. ✅ (`crates/workspace/src/membership.rs` —
+  `WorkspaceRole` (Guest=0 → Member=1 → Admin=2 → Owner=3) with total `Ord` ordering;
+  `at_least(minimum)` predicate; `can_manage()` guard for Admin+ operations;
+  `FromStr` + `Display`; `WorkspaceMembership { workspace_id, user_id, role, joined_at_ns }`)
+- S31.3 `WorkspaceQuota` and `QuotaUsage`. ✅ (`crates/workspace/src/quota.rs` —
+  `WorkspaceQuota { max_members, max_daily_tokens, max_storage_bytes, max_active_tasks }`;
+  generous defaults (25 members, 5 M tokens/day, 1 GiB, 200 tasks);
+  `QuotaUsage::check(&quota)` returns the first `QuotaViolation` (MemberLimit /
+  DailyTokenLimit / StorageLimit / ActiveTaskLimit), checked in priority order;
+  `can_add_members(n, quota)` convenience predicate; `token_budget_fraction()`)
+- S31.4 `WorkspaceRegistry` with atomic JSON persistence. ✅ (`crates/workspace/src/registry.rs` —
+  `WorkspaceRecord { profile, quota, members }`; `WorkspaceRegistry` backed by
+  `HashMap<String, WorkspaceRecord>`; `open(path)` / `in_memory()` constructors;
+  `create(profile, now_ns)` auto-adds owner as `Owner` member;
+  `add_member` enforces quota and rejects duplicates; `remove_member` returns the
+  revoked role; `set_quota`; `iter`; `flush` via write-to-`.tmp`-then-rename —
+  crash-safe; default path `~/.anima/<agent_id>/workspaces.json`)
+- S31.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — five new `AuditEntry` variants:
+  `WorkspaceCreated { agent_id, workspace_id, display_name, owner_user_id }`,
+  `WorkspaceMemberAdded { agent_id, workspace_id, user_id, role }`,
+  `WorkspaceMemberRemoved { agent_id, workspace_id, user_id, role }`,
+  `WorkspaceQuotaUpdated { agent_id, workspace_id, max_members, max_daily_tokens }`,
+  `WorkspaceStatusChanged { agent_id, workspace_id, old_status, new_status }`;
+  `print_audit` arms with 🏢 / 👥 / 👤 / 📊 / 🔄 prefixes)
+- S31.6 `anima workspace` CLI. ✅ (`kernels/hosted/src/main.rs` —
+  `cmd_workspace()` implements `workspace create`, `list`, `show`, `add-member`,
+  `remove-member`, `set-quota`, `suspend`, `reactivate`, `delete`; every mutating
+  subcommand pushes the appropriate `AuditEntry` and calls `registry.flush()`;
+  `print_workspace_audit()` helper mirrors the `anima users` pattern)
+
+**Exit criteria.**
+1. `WorkspaceRole` ordering (`Guest < Member < Admin < Owner`) and `FromStr`
+   round-trip covered by unit tests; `can_manage()` returns `true` only for
+   Admin+. ✅
+   (`role_ordering_is_correct`, `role_at_least_predicate`, `role_can_manage_predicate`,
+   `role_from_str_round_trips`, `role_from_str_rejects_unknown`)
+2. `WorkspaceProfile` lifecycle transitions tested; `make_id` normalises names
+   correctly; profile round-trips through JSON. ✅
+   (`workspace_profile_new_is_active`, `make_id_lowercases_and_replaces_spaces`,
+   `make_id_strips_special_characters`, `make_id_collapses_consecutive_hyphens`,
+   `make_id_returns_error_for_empty_result`, `suspend_transitions_active_to_suspended`,
+   `suspend_is_no_op_when_already_suspended`, `reactivate_transitions_suspended_to_active`,
+   `delete_transitions_to_deleted`, `delete_is_no_op_when_already_deleted`,
+   `profile_round_trips_through_json`)
+3. `QuotaUsage::check` returns the correct first violation; quota enforcement
+   prevents member over-allocation; `token_budget_fraction` is bounded
+   to `[0.0, 1.0]`. ✅
+   (`usage_within_limits_returns_none`, `member_limit_detected`,
+   `daily_token_limit_detected`, `storage_limit_detected`, `active_task_limit_detected`,
+   `member_limit_checked_before_token_limit`, `can_add_members_within_limit`,
+   `token_budget_fraction_is_bounded`, `token_budget_fraction_caps_at_one`,
+   `quota_usage_round_trips_through_json`)
+4. `WorkspaceRegistry` CRUD, membership management, quota enforcement, and
+   persistence tested. ✅
+   (`empty_registry_has_zero_workspaces`, `create_adds_workspace_with_owner_as_member`,
+   `create_rejects_duplicate_workspace_id`, `get_returns_none_for_missing_workspace`,
+   `set_quota_updates_the_quota`, `set_quota_returns_error_for_missing_workspace`,
+   `add_member_increases_count`, `add_member_rejects_duplicate`,
+   `add_member_respects_quota`, `remove_member_reduces_count`,
+   `remove_member_returns_error_for_non_member`, `member_role_returns_none_for_non_member`,
+   `iter_returns_all_workspaces`, `flush_and_reload_round_trip`,
+   `open_creates_empty_registry_when_file_absent`, `in_memory_flush_is_no_op`)
+5. `cargo test --workspace` green; 48 new workspace tests (47 unit + 1 doc) +
+   all prior tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --all --check` clean. ✅
