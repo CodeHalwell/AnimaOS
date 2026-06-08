@@ -3101,6 +3101,899 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 
 ---
 
+## Stage 9 — Rate Limiting & Quota Enforcement
+
+### Epic E18 — Per-User Rate Limiting & Token Quotas ✅
+
+**Scope.** Building on E17's user identity and trust model, enforce
+configurable token and request budgets for every channel user. Unknown-tier
+users receive a tight hourly/daily budget; Operator-tier users are
+unconstrained. Quota violations are audited; repeated violations escalate
+to operator attention, mirroring the defence layer's escalation pattern (E5.6).
+
+**Dependencies.** E17 (`TrustTier`, `UserRegistry`), EX.2 (audit log).
+
+**Stories.**
+- S18.1 `TierLimits` and `QuotaPolicy`: per-tier token/request ceilings with the
+  `TierLimits::UNLIMITED` sentinel for Operator. Defaults: `Unknown` 10 K t/h /
+  50 K t/d / 10 r/h; `Verified` 50 K / 200 K / 50; `Trusted` 200 K / 1 M / 200;
+  `Operator` unlimited. Configurable at runtime via `QuotaPolicy`. ✅
+  (`crates/quota/src/lib.rs` — `TierLimits`, `QuotaPolicy`, `QuotaPolicy::for_tier`)
+- S18.2 `UserQuotaTracker` with rolling-window accounting: `check_and_consume(user_id,
+  tier, tokens, now_ns) -> QuotaResult` applies the hourly-request, hourly-token, and
+  daily-token limits in that order (cheapest check first); stale window entries are lazily drained on
+  each call; `Operator` tier bypasses all checks. `QuotaResult::Allowed` returns
+  remaining capacity; `QuotaResult::Exceeded` carries the `ExceededReason` and a
+  `retry_after_ns` hint. ✅
+  (`crates/quota/src/lib.rs` — `UserQuotaTracker`, `QuotaResult`, `ExceededReason`)
+- S18.3 `QuotaSnapshot`: non-mutating point-in-time read of one user's usage using
+  `_at(now_ns)` accessors that exclude stale entries without draining. Drives the
+  `quota show` CLI display. ✅
+  (`crates/quota/src/lib.rs` — `QuotaSnapshot`, `UserQuotaTracker::snapshot`)
+- S18.4 Escalation: `should_escalate(user_id, now_ns)` returns `true` when
+  `consecutive_violations ≥ escalation_threshold` (default 5) and the escalation
+  cooldown (default 5 min) has elapsed. `record_escalation` starts the cooldown.
+  Callers emit `AuditEntry::QuotaEscalated` and call `record_escalation`. ✅
+  (`crates/quota/src/lib.rs` — `UserQuotaTracker::should_escalate / record_escalation`)
+- S18.5 Audit entries: `AuditEntry::QuotaExceeded` (user, tier, reason, tokens
+  requested, retry hint) and `AuditEntry::QuotaEscalated` (user, tier, violation
+  count, threshold). Both rendered by `print_audit` in the hosted kernel. ✅
+  (`crates/vita/src/audit.rs` — two new variants; `kernels/hosted/src/main.rs` —
+  `print_audit` arms with 🚫 / 🔔 prefixes; `print_user_audit` arms)
+- S18.6 CLI — `anima quota show [<user_id>]`, `anima quota reset <user_id>`,
+  `anima quota policy`. `policy` runs a self-contained demo (tight `Unknown`-tier
+  budget) that exercises the audit pipeline end-to-end and renders quota-exceeded
+  and quota-escalated entries. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_quota()`, wired via `anima-hosted quota …`)
+
+**New crate: `crates/quota`.**
+`Cargo.toml` dependencies: `users` (workspace), `serde` (workspace),
+## Stage 9 — Observability, Knowledge & Analytics
+
+### Epic E19 — Metrics & Observability ✅
+
+> Renumbered E18 → **E19** at integration: the E18 identifier is held by
+> Per-User Rate Limiting & Token Quotas (above). The live Prometheus scrape
+> endpoint that originally shared this work is split out as **E21** (below).
+
+**Scope.** A structured metrics aggregation pipeline that folds the durable
+[`vita::audit::AuditEntry`] stream into an [`AgentMetrics`] snapshot covering
+tasks, gate decisions, cortex performance, defence events, memory pressure, sleep
+cycles, and interoceptive signals.  The snapshot can be rendered as a
+human-readable text report, a Prometheus-compatible exposition string, or a JSON
+document.  A new `AuditEntry::MetricsSnapshot` variant persists the summary back
+into the audit trail so metric history is recoverable from the log itself without
+replaying the full entry set.
+
+**Dependencies.** `vita::audit::AuditEntry` (cross-cutting — audit log is the
+sole data source; no new sensing required).
+
+**Stories.**
+- S18.1 `crates/metrics` — new zero-external-dependency crate (`serde`/`serde_json`
+  only, `#[forbid(unsafe_code)]`):
+  - `aggregator.rs` — `aggregate(&[AuditEntry]) → AgentMetrics`; single-pass
+    fold; derived rates/means computed post-scan; covers tasks, gate, router,
+    memory, cortex, defence, interoception. ✅
+  - `prometheus.rs` — `render_prometheus(&AgentMetrics) → String`; full
+    OpenMetrics-compatible text exposition with `# HELP` / `# TYPE` lines,
+    `anima_` prefix, and `agent=` label on every series. ✅
+  - `reporter.rs` — `render_text_report(&AgentMetrics) → String`; structured
+    terminal report with section headers and right-aligned columns. ✅
+- S18.2 `AuditEntry::MetricsSnapshot` — new variant in `vita::audit`; persists
+  key counter fields so metric history is auditable without replaying the full
+  entry set; `print_audit` arm renders with `📊` prefix. ✅
+- S18.3 `anima-hosted metrics` CLI subcommand — `--format text|json|prometheus`
+  and `--last N` flags; seeds a demo audit window, aggregates, records a
+  `MetricsSnapshot`, and renders output.  Satisfies E18 exit criterion 3. ✅
+
+**New crate: `crates/metrics`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde` (workspace),
+`serde_json` (workspace).  `#![forbid(unsafe_code)]`.  Workspace root
+`Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `TierLimits::UNLIMITED` sentinel has all fields at `u64::MAX`; `is_unlimited()`
+   returns `true`. ✅ (`tier_limits_unlimited_sentinel_has_max_values`)
+2. `QuotaPolicy::for_tier(TrustTier::Operator)` returns unlimited; `Unknown` has the
+   tightest limits; limits are monotonically increasing across tiers. ✅
+   (`policy_for_operator_tier_is_unlimited`, `policy_for_unknown_tier_has_tight_limits`,
+   `policy_tiers_are_monotonically_increasing`)
+3. `check_and_consume` allows within limits and correctly computes remaining capacity;
+   Operator tier is always allowed. ✅
+   (`within_limits_is_allowed_and_returns_remaining`, `operator_tier_is_always_allowed`)
+4. Hourly-token, daily-token, and hourly-request limits are each independently
+   enforced with the correct `ExceededReason`. ✅
+   (`exceeding_hourly_token_limit_is_denied`, `exceeding_daily_token_limit_is_denied`,
+   `exceeding_hourly_request_limit_is_denied`)
+5. Rolling window drains stale entries; daily window is independent of hourly window.
+   ✅ (`stale_events_are_drained_before_check`,
+   `daily_window_is_independent_of_hourly_window`)
+6. Escalation fires after `escalation_threshold` consecutive violations; escalation
+   is rate-limited by `escalation_cooldown_ns`. ✅
+   (`escalation_fires_after_threshold_violations`, `escalation_is_rate_limited_by_cooldown`)
+7. `reset` clears all usage windows; snapshot correctly reflects live usage and
+   excludes stale entries. ✅ (`reset_clears_all_usage_for_user`,
+   `snapshot_reflects_current_usage`, `snapshot_excludes_stale_entries`)
+8. `cargo test --workspace` green; 23 new quota tests + all prior tests pass. ✅
+9. `cargo clippy --workspace -- -D warnings` clean. ✅
+10. `cargo fmt --check` clean. ✅
+### Epic E20 — Structured Runtime Configuration ✅
+
+**Scope.** A TOML-backed unified runtime configuration system for AnimaOS.
+Operators can tune the Striatal Gate coefficients, memory tier limits,
+MLFQ scheduler knobs, and logging settings through a single `anima.toml`
+file without recompilation.  Every config load is audited.  A
+`anima-hosted config` CLI subcommand provides `show`, `validate`, and
+`init` operations.
+
+**Dependencies.** E5.2 (Striatal Gate — gate coefficients documented),
+E2.1 (memory limits), E1.4 (scheduler knobs), EX.2 (audit trail).
+
+**Stories.**
+- S20.1 `AnimaConfig` schema — six sections (`[schema]`, `[agent]`,
+  `[gate]`, `[memory]`, `[scheduler]`, `[logging]`) with production-
+  ready defaults derived from the E5.2 `GateConfig::default()` values;
+  `to_toml_string()` TOML serialisation; `to_display_string()` summary. ✅
+  (`crates/config/src/schema.rs`)
+- S20.2 Config loading & validation — `AnimaConfig::from_file()` parses
+  and validates; schema-version guard rejects files newer than the binary;
+  `load_or_defaults()` falls back to built-in defaults when no file is
+  present; `ConfigSource` enum records the provenance. ✅
+  (`crates/config/src/loader.rs`)
+- S20.3 Semantic validation — `validate()` checks all numeric bounds
+  (unit-interval gate weights, positive-nonzero token counts, path
+  sanity on `agent.id`); `ValidationError { field, message }` pinpoints
+  the violated field. ✅
+  (`crates/config/src/validate.rs`)
+- S20.4 `anima config` CLI — `show` (prints resolved config + audit entry),
+  `validate [<path>]` (exits 0/1), `init [--path <p>]` (atomic-write
+  default template). ✅
+  (`kernels/hosted/src/main.rs` — `cmd_config()` + dispatch in `main()`)
+- S20.5 Audit trail — `AuditEntry::ConfigLoaded { agent_id, path,
+  schema_version, from_file }` and `AuditEntry::ConfigReloaded { agent_id,
+  path, changed_keys }` added to `vita::audit`; `print_audit()` renders
+  both with `⚙` prefix. ✅
+  (`crates/vita/src/audit.rs`, `kernels/hosted/src/main.rs`)
+
+**New crate: `crates/config`.**
+Dependencies: `serde` (workspace), `serde_json` (workspace), `toml = "0.8"`.
+## Stage 9 — Conversation History and Session Management
+
+### Epic E22 — Conversation History and Session Management ✅
+
+**Scope.** Durable, searchable conversation history for every user interaction.
+A *session* is a bounded sequence of [`ConversationTurn`]s owned by a specific
+user and managed by a specific agent.  Sessions persist across process restarts,
+are searchable by user or content, and can be exported to JSONL or Markdown.
+They are the durable record that bridges the ephemeral `somatic_execution_loop`
+with the long-term episodic memory in L3.
+
+**Dependencies.** E17 (`UserRegistry` — user identity model), E5.5 (episodic
+memory — consolidation target), E5.1 (cortex invocations as the source of
+`assistant` turns).
+
+**Stories.**
+- S22.1 `SessionRecord`, `ConversationTurn`, `ConversationRole`, `SessionStatus`.
+  ✅ (`crates/sessions/src/record.rs` —
+  `SessionRecord { id, user_id, agent_id, started_at_ns, last_active_ns, status,
+  turns, summary, total_tokens, schema_version }`;
+  `ConversationTurn { index, role, content, tool_calls, timestamp_ns, tokens }`;
+  `ConversationRole { User | Assistant | System | Tool }` with `Display` +
+  `FromStr` + `serde(rename_all = "lowercase")`;
+  `SessionStatus { Active | Archived | Deleted }` with `Display`;
+  `SessionRecord::append_turn` auto-assigns index, enforces active-session
+  invariant, accumulates `total_tokens`; `archive(summary)` + `delete()`;
+  `matches_query(q)` case-insensitive substring search across turns and summary;
+  `make_session_id(nonce)` → `"sess-<hex>"` format;
+  14 unit tests covering all core behaviours and JSON round-trip)
+- S22.2 `SessionStore` with atomic JSON persistence, `SessionQuery` filtering,
+  `ExportFormat`.
+  ✅ (`crates/sessions/src/store.rs` —
+  `SessionStore::open(path)` / `in_memory()` / `default_path(agent_id)`;
+  `flush()` uses write-to-`.tmp`-then-rename crash-safe pattern;
+  `insert`, `get`, `get_mut`, `append_turn`, `archive`, `delete` CRUD;
+  `list(query)` returns sessions sorted by `started_at_ns` descending with
+  deleted-excluded-by-default semantics;
+  `SessionQuery { user_id, status, content_query, limit }` with `for_user()`,
+  `with_content()`, `active_only()`, `with_limit()` builders;
+  `export(id, format)` → JSONL or Markdown;
+  `ExportFormat { Jsonl | Markdown }` with `FromStr` + `Display`;
+  21 unit tests covering CRUD, persistence, query, and export)
+- S22.3 Audit trail: four new `AuditEntry` variants.
+  ✅ (`crates/vita/src/audit.rs` —
+  `SessionStarted { agent_id, session_id, user_id }`,
+  `SessionTurnAppended { agent_id, session_id, role, content_len }`,
+  `SessionArchived { agent_id, session_id, turn_count, has_summary }`,
+  `SessionExported { agent_id, session_id, format, turn_count }`;
+  `print_audit()` in `kernels/hosted/src/main.rs` renders all four variants
+  with `💬` / `📁` / `📤` emoji prefixes)
+- S22.4 `anima sessions` CLI.
+  ✅ (`kernels/hosted/src/main.rs` — `cmd_sessions()` implements:
+  `sessions list [--user <user_id>]` — list all visible sessions;
+  `sessions show <session_id>` — full session detail with turn preview;
+  `sessions new <user_id>` — create a session with a nonce-derived ID;
+  `sessions append <session_id> <role> <content>` — append a turn;
+  `sessions archive <session_id> [--summary <text>]` — archive a session;
+  `sessions export <session_id> [--format jsonl|markdown]` — export;
+  `sessions search <query>` — content-search across all sessions;
+  `print_session_audit()` helper echoes E22 audit entries after each mutation)
+
+**New crate: `crates/sessions`.**
+## Stage 9 — Knowledge Graph & Entity Tracking
+
+### Epic E27 — Knowledge Graph & Entity Tracking ✅
+
+**Scope.** A structured entity and relationship graph that adds a *structural
+layer* on top of E14's document-level knowledge corpus.  Where the corpus stores
+and retrieves unstructured documents by embedding similarity, E27 lets the agent
+model *who and what exist* and *how they connect*: named entities with typed
+attributes, directed relationships with salience weights, BFS neighbour
+traversal, and attribute/kind-filtered queries.  The new `crates/knowledge-graph`
+crate is a zero-dependency library (only `serde` / `serde_json`) so it composes
+cleanly with the comms layer (E10), multi-agent pool (E16), and future
+identity-extraction cortex tools.
+
+**Dependencies.** E14 (knowledge corpus — complements rather than replaces),
+E5.5 (atomic-write pattern), E17 (audit log extension pattern).
+
+**Stories.**
+- S27.1 `Entity` and `EntityKind`. ✅ (`crates/knowledge-graph/src/entity.rs` —
+  `EntityKind` (Person / Place / Project / Concept / Technology / Organization /
+  Custom); `Entity { id, kind, display_name, attributes: HashMap, created_at_ns }`;
+  `set_attribute` / `get_attribute`; `FromStr` + `Display` on `EntityKind` with
+  `org` alias; JSON serde; 8 unit tests)
+- S27.2 `Relation` and `RelationKind`. ✅ (`crates/knowledge-graph/src/relation.rs` —
+  `RelationKind` (WorksAt / RelatedTo / PartOf / CreatedBy / DependsOn /
+  Collaborates / IsA / Custom); `Relation { from, to, kind, weight, created_at_ns }`;
+  `Relation::new` (weight 1.0) and `Relation::with_weight` (clamps to \[0, 1\]);
+  hyphenated-alias parsing; JSON serde; 7 unit tests)
+- S27.3 `KnowledgeGraph` mutation and query API. ✅
+  (`crates/knowledge-graph/src/graph.rs` — `add_entity` / `remove_entity` (cascade
+  to relations) / `get_entity` / `get_entity_mut`; `add_relation` / `remove_relation`
+  (duplicate detection); BFS `find_neighbors(id, max_depth)` traversing both forward
+  and backward adjacency; `find_by_kind` / `find_by_attribute`; `all_entities`
+  (sorted) / `all_relations` / `relations_for`; entity count / relation count /
+  `is_empty`; `GraphError` enum)
+- S27.4 Atomic JSON persistence. ✅ (`KnowledgeGraph::open(path)` /
+  `KnowledgeGraph::in_memory()`; `flush()` write-to-`.tmp`-then-rename;
+  `default_path(agent_id)` → `~/.anima/<id>/knowledge_graph.json`;
+  24 graph-module unit tests including persistence round-trip)
+- S27.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — three new `AuditEntry`
+  variants: `KnowledgeEntityAdded { agent_id, entity_id, kind, display_name }`,
+  `KnowledgeRelationAdded { agent_id, from_entity, to_entity, kind }`,
+  `KnowledgeGraphQueried { agent_id, query_type, result_count }`;
+  `print_audit` arms with 🔷 / 🔗 / 🔍 prefixes)
+- S27.6 `anima graph` CLI. ✅ (`kernels/hosted/src/main.rs` — `cmd_graph()`:
+  `graph entity add|show|list|remove`, `graph relation add|list`,
+  `graph query neighbors|by-kind|by-attr`; dispatched from `main()`;
+  every mutating command emits an audit entry; `--depth` and `--kind` flags)
+
+**New crate: `crates/knowledge-graph`.**
+### Epic E29 — Outbound Webhook Integration ✅
+
+**Scope.** AnimaOS emits a rich audit trail internally (via `vita::AuditLog`)
+but had no mechanism to push those events to external systems.  E29 closes that
+gap: operators register HTTPS webhook endpoints that receive signed JSON
+payloads whenever matching lifecycle events occur.  The new `crates/webhooks`
+crate is a zero-dependency library (only `serde` / `serde_json`) with a
+CI-safe fixture sender so every delivery path is testable without network I/O.
+
+**Dependencies.** E17 (Trust & Human-Identity — atomic persistence pattern,
+`RegistryError` conventions), E5 (Audit trail — `vita::AuditEntry` extension
+point), E1 (hosted kernel — CLI routing pattern from `cmd_users` / `cmd_identity`).
+
+**Stories.**
+- S29.1 `WebhookEndpoint` and `EventFilter`. ✅ (`crates/webhooks/src/endpoint.rs` —
+  `WebhookEndpoint { id, url, secret, filter, enabled, created_at_ns }`;
+  `EventFilter` enum (`All` | `Selected { kinds: HashSet<String> }`) with
+  `#[derive(Default)]` / `#[default]` on `All`; `matches(kind) -> bool`;
+  `only(kinds)` constructor; `new_endpoint_id()` helper in `lib.rs`)
+- S29.2 `WebhookPayload` with HMAC signing. ✅ (`crates/webhooks/src/payload.rs` —
+  `WebhookPayload { delivery_id, agent_id, event_kind, timestamp_ns, data }`;
+  signature is **not** embedded in the JSON body — computed over the
+  serialised body bytes via `WebhookPayload::sign(body_json, secret) -> String`
+  (real HMAC-SHA256 using `sha2 0.11`) and transmitted as the
+  `X-Anima-Signature: sha256=<64-hex>` HTTP header;
+  `verify_signature(body_json, secret, sig) -> bool` for receiver-side validation;
+  `to_json()` serialises to compact JSON; `new_delivery_id()` helper in `lib.rs`)
+- S29.3 `WebhookRegistry` with atomic JSON persistence. ✅
+  (`crates/webhooks/src/registry.rs` — `WebhookRegistry` backed by
+  `HashMap<String, WebhookEndpoint>`; `open(path)` or `in_memory()`;
+  `register`, `remove`, `get`, `set_enabled`, `list`, `endpoints_for_event`,
+  `len`, `is_empty`; `flush` write-to-`.tmp`-then-rename — crash-safe;
+  default path `~/.anima/<agent_id>/webhook_endpoints.json`;
+  `RegistryError::{AlreadyExists, NotFound, Io}`)
+- S29.4 `WebhookDispatcher` with retry and statistics. ✅
+  (`crates/webhooks/src/dispatcher.rs` — `WebhookSender` trait with
+  `FixtureSender` (CI always-succeed) and `AlwaysFailSender` (retry tests);
+  `WebhookDispatcher::fixture()` / `with_sender(sender, config)`;
+  `dispatch(&mut self, endpoint, payload) -> DispatchStats` — exponential
+  back-off, signs payload once before first attempt;
+  `DispatchConfig { max_attempts: u32, base_backoff_ms: u64 }` (default 3/100ms);
+  `CumulativeStats { total_dispatches, successful, failed, total_attempts, retries }`
+  with `success_rate()` and `mean_attempts()`)
+- S29.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — four new `AuditEntry`
+  variants: `WebhookRegistered { agent_id, endpoint_id, url, has_secret }`,
+  `WebhookRemoved { agent_id, endpoint_id }`,
+  `WebhookDispatched { agent_id, endpoint_id, event_kind, attempts }`,
+  `WebhookFailed { agent_id, endpoint_id, event_kind, attempts, error }`;
+  `kernels/hosted/src/main.rs` — `print_audit` arms with 🔔 / 🗑 / 📤 / ❌ prefixes)
+- S29.6 `anima webhook` CLI. ✅ (`kernels/hosted/src/main.rs` —
+  `cmd_webhook()` implements `webhook list`, `webhook add <url> [--secret S]
+  [--events E,…]`, `webhook remove <id>`, `webhook enable <id>`,
+  `webhook disable <id>`, `webhook show <id>`, `webhook test <id>`;
+  dispatched via `anima-hosted webhook …`)
+
+**New crate: `crates/webhooks`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `anima-hosted config init` writes a valid default config;
+   `config validate` accepts it without error. ✅
+   (`load_from_file_succeeds_on_valid_toml` — defaults serialise to TOML
+   and reload as an equal value; `config init` in `cmd_config()` uses the
+   same atomic-write pattern as identity/users)
+2. Config round-trips through TOML without data loss. ✅
+   (`config_round_trips_through_toml` — `to_toml_string()` → `toml::from_str()`
+   produces an equal `AnimaConfig`)
+3. Semantic validation rejects invalid configs with actionable field paths. ✅
+   (`empty_agent_id_is_rejected`, `path_traversal_in_agent_id_is_rejected`,
+   `zero_base_threshold_is_rejected`, `ceiling_above_floor_is_rejected`,
+   `zero_max_context_tokens_is_rejected`, `block_size_larger_than_context_is_rejected`,
+   `zero_boost_interval_is_rejected`, `zero_schema_version_is_rejected`,
+   `empty_logging_dir_is_rejected`)
+4. Schema-too-new guard rejects future-version configs. ✅
+   (`load_from_file_rejects_future_schema_version`)
+5. `AuditEntry::ConfigLoaded` is emitted on every `config show` and
+   `config init` invocation; `print_audit()` renders it with `⚙` prefix. ✅
+   (audit entries written in both `cmd_config` branches; `print_audit` arms
+   added for `ConfigLoaded` and `ConfigReloaded`)
+6. `cargo test --workspace` green; 25 new config tests + all prior tests
+   pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅
+1. `SessionRecord` persists across a simulated process restart with byte-for-byte
+   identical JSON round-trip; turn indices are auto-assigned and monotone. ✅
+   (`session_json_round_trip`, `append_turn_auto_assigns_index`,
+   `flush_and_reload_round_trip`)
+2. `SessionQuery` filtering by user, status, content, and limit is correct;
+   deleted sessions are excluded from default listings. ✅
+   (`list_excludes_deleted_by_default`, `list_filters_by_user_id`,
+   `list_filters_by_content_query`, `list_respects_limit`,
+   `list_active_only_excludes_archived`)
+3. JSONL export produces one line per turn; Markdown export includes the session
+   header, summary, and all turns in labelled sections. ✅
+   (`export_jsonl_produces_one_line_per_turn`,
+   `export_markdown_contains_session_id_and_turns`,
+   `export_markdown_includes_summary_when_archived`)
+4. All four `AuditEntry` variants emitted and displayed with emoji prefixes. ✅
+   (`AuditEntry::SessionStarted`, `SessionTurnAppended`, `SessionArchived`,
+   `SessionExported` added to `vita::audit`; `print_audit` and
+   `print_session_audit` arms verified)
+5. `cargo test --workspace` green; 36 new sessions tests (35 unit + 1 doc)
+   + all prior workspace tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
+## Stage 9 — Data Governance and Lifecycle
+
+### Epic E23 — Consent Enforcement and Data Lifecycle ✅
+
+**Scope.** Wire the E17 `ConsentRecord` model into active enforcement and
+lifecycle operations, closing the gap between the consent *model* and actual
+data governance.  New `crates/consent` crate (zero new external dependencies —
+only `users` + `serde` / `serde_json`).
+
+**Dependencies.** E17 (user registry with `ConsentRecord`, `DataCategory`).
+
+**Stories.**
+
+- **S23.1 — Pre-write consent gate.** `check_write_allowed(user_id, category,
+  consent, now_ns) -> ConsentCheckOutcome` — pure function that returns `Allowed`
+  when an active grant exists, `Denied { reason }` otherwise.  Time-limited and
+  revoked grants are both treated as denial.  `AuditEntry::ConsentCheckBlocked`
+  emitted by callers when a write is rejected. ✅
+  (`consent::check_write_allowed`; 5 unit tests covering allowed, denied-absent,
+  denied-revoked, denied-expired, all-categories-denied-by-default)
+
+- **S23.2 — Revocation directives.** `build_revocation_directive(user_id,
+  revoked_categories, now_ns) -> RevocationDirective` — maps revoked
+  `DataCategory` values to per-store purge flags (`purge_sessions`,
+  `purge_episodic_memory`, `purge_identity_facts`, `purge_knowledge_corpus`,
+  `purge_usage_stats`).  The crate generates the directive; the operator
+  executes it.  `AuditEntry::DataDeletedForUser` emitted after execution. ✅
+  (`consent::build_revocation_directive`; 7 unit tests; JSON round-trip;
+  `anima data delete <user_id>` CLI demo)
+
+- **S23.3 — Personal-data export (GDPR/DSAR).** `DataExportBuilder` accumulates
+  per-category sections into a `DataExportBundle` (user_id, agent_id, timestamp,
+  sections, total_records).  `anima data export <user_id> [--output <path>]`
+  writes the bundle as pretty-printed JSON.  `AuditEntry::DataExported` records
+  the export. ✅
+  (`consent::DataExportBuilder` / `DataExportBundle`; 3 unit tests; doc-test;
+  `anima data export` CLI)
+
+- **S23.4 — Expiry scanner.** `scan_expired_grants(users, now_ns) -> ExpiryReport`
+  iterates a collection of `(user_id, ConsentRecord)` pairs, identifies grants
+  that were set to `granted=true` but whose `expires_at_ns` has passed, and
+  returns pre-built `RevocationDirective`s.  Designed to run at the end of each
+  sleep cycle.  `AuditEntry::ExpiredConsentCleaned` summarises the pass. ✅
+  (`consent::scan_expired_grants`; 7 unit tests; `anima data expiry-check` CLI)
+
+- **S23.5 — `anima data` CLI and audit trail.** Four new `AuditEntry` variants:
+  `ConsentCheckBlocked`, `DataExported`, `DataDeletedForUser`,
+  `ExpiredConsentCleaned`.  `print_audit` arms in `kernels/hosted` render all
+  four variants.  CLI subcommands: `data consent-status <user_id>`, `data export
+  <user_id>`, `data delete <user_id>`, `data expiry-check`. ✅
+
+**New crate: `crates/consent`.**
+`Cargo.toml` dependencies: `users` (workspace), `serde` (workspace),
+`serde_json` (workspace).  Dev-dependency: `tempfile = "3"`.
+`#![forbid(unsafe_code)]`.  Workspace root `Cargo.toml` and
+`kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria — all met:**
+1. `check_write_allowed` allows writes for consented categories and denies for
+   all others (absent, revoked, expired). ✅
+   (5 tests: `allowed_when_category_is_consented`, `denied_when_category_is_not_consented`,
+   `denied_when_grant_is_revoked`, `denied_when_grant_has_expired`,
+   `all_categories_denied_by_default`)
+2. `build_revocation_directive` sets the correct per-store purge flags for every
+   revoked category; the directive serialises to JSON. ✅
+   (7 tests: `directive_sets_correct_purge_flags_for_*` × 4 categories,
+   `directive_for_all_categories_sets_all_flags`, `directive_serialises_and_deserialises`)
+3. `DataExportBuilder` accumulates sections and counts records correctly; bundle
+   round-trips through JSON. ✅
+   (3 tests: `export_builder_accumulates_sections_and_counts_records`,
+   `empty_export_bundle_has_zero_records`,
+   `export_bundle_round_trips_through_json`)
+4. `scan_expired_grants` finds exactly the grants that have lapsed without
+   false-positives on unexpired, perpetual, or revoked grants. ✅
+   (7 tests: `scan_returns_empty_report_when_no_users`, `scan_finds_expired_grant`,
+   `scan_does_not_flag_unexpired_grants`, `scan_does_not_flag_perpetual_grants`,
+   `scan_does_not_flag_revoked_grants_as_expired`,
+   `scan_multiple_users_produces_correct_counts`,
+   `expiry_report_serialises_cleanly`)
+5. All four new `AuditEntry` variants emitted and displayed in `print_audit`. ✅
+6. `cargo test --workspace` green; 24 new consent tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅
+### Epic E24 — Response Quality & Feedback Collection ✅
+
+**Scope.** Closes the cortex feedback loop: users and operators can attach
+explicit quality signals (thumbs-up/down, star ratings, corrections) to
+completed invocations. Feedback is stored durably, surfaced as aggregated
+quality reports, and consumed by the E8 fine-tuning pipeline as weighted
+training hints.
+
+**Dependencies.** E17 (user profiles — `user_id` comes from `UserProfile`),
+E5.1 (cortex invocations — `invocation_id` references `AuditEntry::CortexCompleted`),
+E8 (fine-tuning pipeline — `WeightedTrainingHint` is the hand-off type).
+
+**New crate: `crates/feedback`.** Zero new external dependencies (`serde` +
+`serde_json` only). `#![forbid(unsafe_code)]`. 32 unit tests.
+
+**Stories.**
+- S24.1 `FeedbackRecord` schema: `id`, `user_id`, `invocation_id`, `session_id?`,
+  `rating` (`ThumbsUp` / `ThumbsDown` / `Stars(1–5)`), `categories`
+  (`Wrong` / `Incomplete` / `Unsafe` / `TooSlow` / `Excellent` / `Corrected`),
+  `correction?`, `created_at_ns`. `FeedbackRating::as_score()` normalises to
+  `[0.0, 1.0]`. `FeedbackRating::FromStr` accepts `up|down|stars:N`. ✅
+  (`crates/feedback/src/record.rs` — 15 unit tests)
+- S24.2 `FeedbackStore` with atomic JSON persistence: `record()` (idempotency
+  guard on duplicate ID), `list()`, `list_for_user()`, `list_for_invocation()`,
+  `flush()` (write-to-.tmp-then-rename), `open()` / `in_memory()`, `default_path()`. ✅
+  (`crates/feedback/src/store.rs` — 9 unit tests)
+- S24.3 `QualityReport` aggregation: `positive_count`, `negative_count`,
+  `avg_stars`, `avg_score`, `category_counts`, `top_corrected_invocations`,
+  `top_rated_invocations`; `satisfaction_rate()` / `satisfaction_pct()`. ✅
+  `WeightedTrainingHint` and `build_training_hints()` — one hint per
+  `invocation_id`, sorted descending by mean score, carries `correction_text`
+  for contrastive training pairs. ✅
+  (`crates/feedback/src/report.rs` — 8 unit tests)
+- S24.5 Three new `AuditEntry` variants: `FeedbackReceived` (rating label,
+  normalised score, category count), `QualityReportGenerated` (total, satisfaction
+  pct, avg score pct), `FeedbackCorrectionRecorded` (user + invocation IDs). ✅
+  (`crates/vita/src/audit.rs`; `print_audit` arms in `kernels/hosted/src/main.rs`
+  with 💬 / 📊 / ✏️ prefixes)
+- S24.6 `anima feedback` CLI: `record`, `list [--user]`, `analyze [--user]`,
+  `export [--output]`. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_feedback()`)
+
+**Exit criteria.**
+1. `FeedbackRecord` and `FeedbackRating` round-trip through JSON; `FromStr`
+   accepts all documented tokens and rejects out-of-range stars. ✅
+   (`rating_from_str_round_trips`, `record_round_trips_through_json`,
+   `rating_from_str_rejects_out_of_range_stars`)
+2. `FeedbackStore` CRUD and disk persistence tested; duplicate guard returns
+   `StoreError::Duplicate`; flush and reload round-trips intact. ✅
+   (`flush_and_reload_round_trip`, `duplicate_id_returns_error`,
+   `open_creates_empty_store_when_file_absent`, `in_memory_flush_is_no_op`)
+3. `QualityReport` aggregates satisfaction rate, avg stars, and category counts
+   correctly; `build_training_hints` weights by mean score and surfaces
+   correction text. ✅
+   (`all_thumbs_up_has_full_satisfaction`, `category_counts_are_correct`,
+   `build_training_hints_weights_correctly`, `build_training_hints_carries_correction_text`,
+   `build_training_hints_sorted_descending_by_weight`)
+4. All three `AuditEntry` variants are emitted by `cmd_feedback` and rendered
+   by `print_audit`. ✅ (audit entries verified in `cmd_feedback` inline audit
+   print; `print_audit` arms cover `FeedbackReceived`, `QualityReportGenerated`,
+   `FeedbackCorrectionRecorded`)
+5. `cargo test --workspace` green; 32 new feedback tests + all prior tests
+   pass. ✅
+### Epic E25 — Performance Analytics and Spend Reporting ✅
+
+**Scope.** Historical analytics derived from the existing durable audit log:
+token spend per task (with per-tier breakdown and p50/p95/p99 distribution),
+cortex latency percentiles (time-to-first-action), Striatal Gate analytics
+(invocation rate, cost-class distribution, gate efficiency), and an
+overall agent health score (letter grade A–F) with actionable
+recommendations.  No new `AuditEntry` variants are required — all data
+comes from entries already written by Stages 1–8.
+
+**Scope boundary.** E25 is complementary to E21 (Prometheus real-time
+metrics): E21 is for online monitoring and alerting; E25 is for
+retrospective analysis and reporting over a log window.
+
+**Dependencies.** `vita::audit::AuditEntry` (all entry variants used by
+Stages 1–8), `kernels/hosted` binary (CLI).
+
+**Stories.**
+- S25.1 Token usage analytics — `TokenReport` with total, per-task
+  statistics (p50/p95/p99), and breakdown by MLFQ dispatch tier. ✅
+  (`crates/analytics/src/token.rs` — `compute_token_report`; 7 unit tests)
+- S25.2 Cortex latency and reliability analytics — `LatencyReport` with
+  time-to-first-action percentiles from `CortexInvoked` entries, fault
+  rate, and mean tool calls per completion. ✅
+  (`crates/analytics/src/latency.rs` — `compute_latency_report`; 7 unit tests)
+- S25.3 Gate and routing analytics — `GateReport` with invocation rate,
+  cost-class distribution, route modulation count, override count, and
+  gate efficiency (fraction of invocations that organically cleared the
+  threshold vs. required override). ✅
+  (`crates/analytics/src/gate.rs` — `compute_gate_report`; 7 unit tests)
+- S25.4 Agent health scoring — `HealthReport` with a composite score
+  (task success 35%, cortex reliability 30%, defence health 20%, gate
+  efficiency 15%), letter grade A–F, per-factor breakdown, and
+  recommendations generated when a factor falls below its healthy range. ✅
+  (`crates/analytics/src/health.rs` — `compute_health_report`; 6 unit tests)
+- S25.5 `AnalyticsEngine` namespace + `SummaryReport` — single entry point
+  grouping all four reports behind one import. ✅
+  (`crates/analytics/src/engine.rs` — `AnalyticsEngine`; 5 unit tests)
+- S25.6 `anima stats` CLI subcommand — `stats tokens`, `stats latency`,
+  `stats gate`, `stats health`, and `stats [summary]` (default). ✅
+  (`kernels/hosted/src/main.rs` — `cmd_stats()` with demo audit log
+  seeded with representative entries so the command is always useful
+  without a live `ANIMA_AUDIT_DIR`)
+
+**New crate: `crates/analytics`.**
+`Cargo.toml` dependencies: `vita` (workspace), `serde` (workspace),
+`serde_json` (workspace). No dev-dependencies. `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. All four sub-reports are deterministic pure folds over `&[AuditEntry]`
+   — identical inputs produce identical outputs. ✅
+   (`empty_entries_produce_zero_report` / `empty_entries_produce_grade_a`
+   in every module; `summary_report_token_gate_latency_health_consistent`
+   verifies sub-report fields in the summary match individual report
+   values)
+2. `HealthReport` grade A on a clean audit log (all factors default to
+   their healthy baseline when no problematic entries are present). ✅
+   (`health_report_grade_a_on_clean_log`; `empty_entries_produce_grade_a`)
+3. Health recommendations fire when factors cross their thresholds. ✅
+   (`all_tasks_failed_degrades_health_significantly`
+   — score < 0.70 with 5/5 failures;
+   `high_cortex_fault_rate_triggers_recommendation`
+   — 60% fault rate recommendation emitted)
+4. `cargo run --bin anima-hosted -- stats summary` prints a structured
+   report covering all four sub-sections (Tokens, Latency, Gate, Health)
+   with no live API calls. ✅
+5. `cargo test --workspace` green; 34 new analytics tests + all prior
+   tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
+## Stage 9 — Performance and Operational Efficiency
+
+Operational reliability, performance observability, and API infrastructure
+for production deployments of AnimaOS.
+
+### Epic E26 — Tool Response Caching with TTL and Deduplication ✅
+
+**Scope.** A transparent caching layer for the `praxis` tool dispatch path
+that reduces redundant computation and LLM-side API cost. Idempotent tool
+calls are served from an in-process store keyed on `(tool_id, payload_hash)`;
+non-idempotent tools are bypassed via a configurable list. TTL expiry prevents
+stale responses; capacity eviction (oldest-first) bounds memory usage.
+
+**Dependencies.** E2.3 (`ToolRegistry`, `ToolDriver`, `ToolEnvelope`), EX.2
+(audit log for cache hit/miss/eviction events).
+
+**New crate: `crates/tool-cache`.**
+`Cargo.toml` dependencies: `praxis` (workspace).  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Stories.**
+- S26.1 `CacheConfig`: `default_ttl_ms`, `max_entries`, `bypass_tools`,
+  `tool_ttl_overrides` (per-tool TTL override map). ✅
+  (`crates/tool-cache/src/lib.rs` — `Default` sets 60 s TTL, 1 024 entries,
+  `"clock"` bypassed; `CacheConfig::with_ttl` convenience constructor)
+- S26.2 `ToolCache`: thread-safe `Arc<Mutex<HashMap>>` store with `get`,
+  `insert`, `evict_expired`, `clear`, `stats`, `len`. ✅
+  (FNV-1a hash of payload bytes as cache key; lazy TTL eviction on read;
+  eager sweep via `evict_expired`; `Clone` shares the same underlying store)
+- S26.3 Capacity eviction: oldest-insertion-time entry displaced when
+  `max_entries` is reached and a new key is inserted. ✅
+  (`capacity_limit_evicts_oldest_entry` test)
+- S26.4 `CacheStats`: `hits`, `misses`, `ttl_evictions`, `capacity_evictions`,
+  `current_entries`; `hit_rate()` and `total_lookups()` helpers. ✅
+- S26.5 `CacheOutcome`: `Hit { age_ms }`, `Miss`, `Bypassed` — returned by
+  `CachedToolRegistry::dispatch_with_outcome` for upstream audit integration. ✅
+- S26.6 `CachedToolRegistry`: wraps `ToolRegistry` with `ToolCache`; provides
+  `dispatch` (discards outcome) and `dispatch_with_outcome` (returns
+  `CacheOutcome`); failed invocations are never cached. ✅
+- S26.7 Audit integration: three new `AuditEntry` variants added to
+  `crates/vita/src/audit.rs` — `ToolCacheHit { agent_id, tool_id, hit_age_ms }`,
+  `ToolCacheMiss { agent_id, tool_id }`, `ToolCacheEvicted { agent_id, count }`;
+  `print_audit` arms in `kernels/hosted/src/main.rs` with `💾 / 🔍 / 🗑` prefixes. ✅
+- S26.8 `anima cache` CLI subcommand (`stats`, `clear`, `warm`). ✅
+  (`cmd_cache()` in `kernels/hosted/src/main.rs`)
+
+**Exit criteria.**
+1. Cache hit on the second identical dispatch; miss on the first. ✅
+   (`second_dispatch_of_same_call_is_a_cache_hit`,
+   `cached_response_matches_original`)
+2. Bypassed tools are never cached; the `clock` tool is bypassed by default. ✅
+   (`bypassed_tool_is_never_cached`,
+   `bypassed_tool_always_returns_live_result`,
+   `dispatch_with_outcome_reports_bypassed_for_clock`)
+3. Expired entries are evicted lazily on read and eagerly via `evict_expired`. ✅
+   (`expired_entry_is_evicted_on_read`,
+   `evict_expired_removes_only_expired_entries`)
+4. Capacity limit displaces the oldest entry; counter incremented. ✅
+   (`capacity_limit_evicts_oldest_entry`)
+5. Failed invocations are not cached; error is returned to the caller. ✅
+   (`failed_dispatch_is_not_cached`)
+6. Concurrent readers and writers produce no panics. ✅
+   (`concurrent_reads_do_not_panic` — 8 threads × 50 dispatches)
+7. `CacheOutcome` discriminates `Hit`, `Miss`, and `Bypassed` for audit callers. ✅
+   (`dispatch_with_outcome_returns_hit_on_second_call`,
+   `dispatch_with_outcome_reports_bypassed_for_clock`)
+8. `cargo test --workspace` green; 28 new cache tests + all prior tests pass. ✅
+9. `cargo clippy --workspace -- -D warnings` clean. ✅
+10. `cargo fmt --check` clean. ✅
+1. `KnowledgeGraph` entity and relation CRUD covered by 39 unit tests; all
+   pass under `cargo test -p knowledge-graph`. ✅
+2. BFS neighbour traversal at depth 1 returns only direct neighbours; at
+   depth 2 includes both direct and two-hop neighbours; undirected (both
+   forward and backward edges traversed). ✅
+   (`find_neighbors_depth_1_returns_direct_neighbors`,
+   `find_neighbors_depth_2_reaches_two_hops`,
+   `find_neighbors_backward_edge_traversed_undirected`)
+3. Persistence round-trip: entities and relations survive a process restart
+   (write → reload → assert). ✅ (`graph_persistence_round_trip`)
+4. All three `AuditEntry` variants emitted by CLI commands and displayed in
+   `print_audit` with structured field output. ✅
+5. `cargo test --workspace` green; 39 new knowledge-graph tests + all prior
+   workspace tests pass. ✅
+1. `aggregate` returns an `AgentMetrics` with all rate and mean fields in
+   `[0.0, 1.0]` for any input (including an empty slice). ✅
+   (`empty_slice_produces_zero_metrics`, `task_success_rate_is_zero_when_no_tasks_started`,
+   `gate_invoke_rate_is_correct`, `cortex_counters_and_derived_values`)
+2. Prometheus output validates structurally (every line is either a comment or
+   an `anima_`-prefixed metric line). ✅ (`prometheus_output_for_empty_metrics_is_valid`)
+3. `anima-hosted metrics [--format text|json|prometheus]` runs from `cargo run`
+   without error. ✅ (`cmd_metrics` seeded with a demo audit window; all three
+   formats tested at invocation time)
+4. `AuditEntry::MetricsSnapshot` is emitted and printed by `print_audit`. ✅
+   (variant added to `vita::audit`; `print_audit` arm renders the full counter
+   summary with `📊` prefix)
+5. `cargo test --workspace` green; 36 new metrics tests + all prior tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E28 — Alert Rules & Threshold Monitoring ✅
+
+**Scope.** Threshold-based alert rules evaluated over [`AgentMetrics`] (E18).
+Operators define named rules — `<metric_field> <op> <threshold>` — and the
+`AlertEvaluator` produces `AlertFired` / `AlertResolved` events as the agent's
+health state changes.  Builds directly on E18; no new sensing or I/O required.
+
+**Dependencies.** E18 (`AgentMetrics`, `aggregate`).
+
+**Stories.**
+- S28.1 `AlertRule` + `AlertCondition` + `MetricField` + `ComparisonOp` + `AlertSeverity`. ✅
+  (`crates/alerts/src/rule.rs` — 13 addressable metric fields; `>`, `>=`, `<`, `<=`
+  operators; `Info / Warning / Critical` severity; `FromStr` + `Display` for all types;
+  `AlertRule::fires(actual)` convenience predicate; 12 unit tests)
+- S28.2 `AlertState` machine (`Normal → Firing → Resolved`) and `AlertStateTracker`. ✅
+  (`crates/alerts/src/state.rs` — `StateTransition` enum suppresses duplicate fire events
+  and synthesises resolved events; `total_fires` counter; JSON round-trip; 8 unit tests)
+- S28.3 Pure `evaluate()` function. ✅
+  (`crates/alerts/src/evaluator.rs` — `evaluate(&AgentMetrics, &[AlertRule], &mut Vec<Tracker>)
+  → Vec<AlertEvent>`; `AlertEventKind::{Fired, Resolved}`; `extract_field` maps all 13
+  `MetricField` variants to `AgentMetrics` fields; 9 unit tests)
+- S28.4 `AlertRuleRegistry` with atomic JSON persistence. ✅
+  (`crates/alerts/src/registry.rs` — `add`, `remove`, `set_enabled`, `list` (sorted),
+  `update_trackers`; write-to-`.tmp`-then-rename; `in_memory()` for tests;
+  `default_path(agent_id)` → `~/.anima/<id>/alert_rules.json`; 11 unit tests)
+- S28.5 Four new `AuditEntry` variants and `anima-hosted alert` CLI. ✅
+  (`vita::audit::AuditEntry::{AlertRuleAdded, AlertRuleRemoved, AlertFired, AlertResolved}`;
+  `print_audit` arms with 🔔 / 🔕 / 🚨 / ✅ prefixes;
+  `cmd_alert()` — `list`, `add <id> <field> <op> <threshold>`, `remove <id>`, `eval`
+  subcommands with demo audit output)
+
+**New crate: `crates/alerts` (`anima-alerts`).**
+Dependencies: `metrics` (workspace), `serde`, `serde_json`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `AlertCondition` + `ComparisonOp` fire correctly at boundary values (including the
+   equal-to case for `>=` / `<=`). ✅
+   (`comparison_op_gte_lte_boundary`, `alert_rule_fires_when_condition_met`,
+   `comparison_op_greater_than_fires_correctly`, `comparison_op_less_than_fires_correctly`)
+2. Duplicate `Fired` events are suppressed; `Resolved` fires exactly once when the
+   condition clears. ✅
+   (`evaluate_suppresses_duplicate_fire_events`,
+   `evaluate_generates_resolved_event_when_condition_clears`,
+   `still_firing_does_not_increment_total_fires`)
+3. Disabled rules produce no events regardless of metric values. ✅
+   (`disabled_rule_never_fires`, `evaluate_disabled_rule_produces_no_events`)
+4. All 13 `MetricField` variants extract without panic on a zero-entry metrics
+   snapshot. ✅ (`extract_field_covers_all_metric_fields`)
+5. `AlertRuleRegistry` CRUD and atomic persistence round-trip. ✅
+   (`flush_and_reload_round_trip`, `open_creates_empty_registry_when_file_absent`,
+   `add_rejects_duplicate_id`, `remove_returns_not_found_for_missing_rule`)
+6. `cargo test --workspace` green; 37 new alerts tests + all prior tests pass. ✅
+1. `WebhookEndpoint` CRUD and JSON round-trip tested. ✅
+   (`event_filter_all_matches_any_kind`, `event_filter_selected_matches_only_registered_kinds`,
+   `event_filter_selected_empty_set_never_matches`, `event_filter_default_is_all`,
+   `webhook_endpoint_new_is_enabled`, `webhook_endpoint_round_trips_through_json`, +1)
+2. `WebhookPayload` signing and verification tested. ✅
+   (`new_payload_has_no_signature`, `sign_sets_signature`,
+   `verify_returns_true_for_correct_secret`, `verify_returns_false_for_wrong_secret`,
+   `verify_returns_false_after_tampering`, `sign_is_deterministic`,
+   `payload_round_trips_through_json`, `signed_payload_preserves_signature_in_json`,
+   `unsigned_payload_omits_signature_field`)
+3. `WebhookRegistry` CRUD, persistence, and error paths tested. ✅
+   (`empty_registry_has_zero_endpoints`, `register_adds_endpoint`,
+   `register_rejects_duplicate_id`, `remove_returns_endpoint`,
+   `remove_returns_not_found_for_missing_id`, `set_enabled_updates_state`,
+   `set_enabled_returns_not_found_for_missing_id`, `list_returns_endpoints_sorted_by_id`,
+   `endpoints_for_event_returns_matching_enabled_only`,
+   `endpoints_for_event_excludes_non_matching_filter`,
+   `flush_and_reload_round_trip`, `open_creates_empty_registry_when_file_absent`)
+4. `WebhookDispatcher` retry logic, stats, and signing tested. ✅
+   (`fixture_dispatcher_succeeds_on_first_attempt`,
+   `fixture_dispatcher_signs_payload_when_secret_present`,
+   `always_fail_sender_exhausts_retries`, `cumulative_stats_accumulate_across_dispatches`,
+   `cumulative_stats_record_failures`, `success_rate_zero_when_no_dispatches`,
+   `success_rate_one_when_all_succeed`, `mean_attempts_one_for_first_try_success`,
+   `dispatch_stats_round_trip_through_json`)
+5. All four new `AuditEntry` variants emitted and displayed. ✅
+   (`print_audit` arms verified; 🔔 / 🗑 / 📤 / ❌ prefixes)
+6. `cargo test --workspace` green; 41 new webhooks tests + all prior tests pass. ✅
+7. `cargo clippy --workspace -- -D warnings` clean. ✅
+8. `cargo fmt --check` clean. ✅
+### Epic E30 — Agent Self-Diagnostic System ✅
+
+**Scope.** A stateless health-check framework that aggregates observable
+state from all AnimaOS subsystems into actionable `DiagnosticReport`s.
+All checks operate on an `AuditSnapshot` derived from the existing durable
+audit log — no new instrumentation is required and no hot-path cost is added.
+
+**Dependencies.** `vita::audit::AuditEntry` (all stages) — the audit log
+is the sole data source.
+
+**Stories.**
+- S30.1 `DiagnosticCheck` trait, `CheckResult`, `HealthStatus`. ✅
+  (`crates/diagnostics/src/check.rs` — `HealthStatus` (Healthy/Degraded/
+  Critical/Unknown); `CheckResult` with remediation hints and structured
+  JSON detail; `DiagnosticCheck` object-safe trait; `worst()` aggregator)
+- S30.2 `AuditSnapshot` — point-in-time view derived from the audit log. ✅
+  (`crates/diagnostics/src/snapshot.rs` — O(n) fold over `&[AuditEntry]`;
+  tracks task failures, cortex faults, defence vetoes, sleep cycle outcomes,
+  L1 fill fraction, interoceptive signals; computed rate helpers)
+- S30.3 11 built-in checks for all major subsystems. ✅
+  (`crates/diagnostics/src/checks.rs` — `TaskFailureRateCheck`,
+  `CortexFaultRateCheck`, `MemoryPressureCheck`, `FinancialBudgetCheck`,
+  `ThermalLoadCheck`, `DefenceVetoCheck`, `SleepCycleHealthCheck`,
+  `KvControllerHealthCheck`, `AgentDelegationCheck`,
+  `ConsolidationHealthCheck`, `RouterModulationCheck`;
+  `all_checks()` returns all 11; each has calibrated Healthy/Degraded/
+  Critical thresholds and operator-facing remediation guidance)
+- S30.4 `DiagnosticReport` aggregator with text and JSON rendering. ✅
+  (`crates/diagnostics/src/report.rs` — `DiagnosticReport::run()` folds
+  check results; `render_text()` ANSI-icon summary; `serde::Serialize` for
+  `--json` output; `actionable_items()` filters to Degraded/Critical)
+- S30.5 `anima diagnose` CLI + `AuditEntry::DiagnosticRun` audit integration. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_diagnose()` supports `--json` and
+  `--quiet` flags; loads audit log from `ANIMA_AUDIT_DIR` if configured;
+  emits `AuditEntry::DiagnosticRun` with aggregate counts; `print_audit`
+  renders with emoji prefix; `diagnose` dispatch added to `main()`)
+
+**New crate: `crates/diagnostics`.**
+Dependencies: `vita`, `memory`, `interoception`, `scheduler`, `serde`,
+`serde_json`. `#![forbid(unsafe_code)]`. Added to workspace root `Cargo.toml`
+and `kernels/hosted/Cargo.toml`.
+
+**New `vita::audit::AuditEntry` variant (E30).**
+`DiagnosticRun { agent_id, overall_status, healthy_count, degraded_count,
+critical_count, audit_entries_analysed }` — allows health trends to be
+tracked in the audit log over time without replaying full check detail.
+
+**Exit criteria.**
+1. `anima diagnose` prints a human-readable health report covering all 11
+   subsystems, with per-check status icons and remediation hints for any
+   Degraded or Critical item. ✅
+   (`cmd_diagnose()` in `kernels/hosted/src/main.rs`)
+2. `anima diagnose --json` emits a machine-readable JSON report suitable
+   for scripted health monitoring. ✅ (`serde::Serialize` on `DiagnosticReport`)
+3. Each check returns `Unknown` (not `Critical`) when the relevant subsystem
+   has no audit data yet — no false alarms on a fresh agent. ✅
+   (all checks gate on `snapshot.tasks_dispatched == 0` / `total_audit_entries == 0` etc.)
+4. A healthy agent snapshot produces `overall_status = Healthy` with zero
+   degraded or critical checks. ✅ (`healthy_snapshot_shows_all_healthy` test)
+5. `cargo test --workspace` green; 41 new diagnostics tests + all prior
+   tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Live Metrics Endpoint
+
+### Epic E21 — Prometheus Metrics Endpoint ✅
+
+**Scope.** A live, in-process Prometheus exposition served from the operator
+console, complementing E19's offline audit-log aggregation. The
+`metrics-endpoint` crate provides a `MetricRegistry` that the console's
+`AuditTailer` feeds from every audit line as it streams; the console HTTP
+server exposes it at `GET /metrics` for a Prometheus scraper, plus a
+human-readable `metrics_summary()`.
+
+**Relationship to E19.** E19 (`crates/metrics`) folds a *bounded* audit slice
+into an `AgentMetrics` snapshot for `anima-hosted metrics` and the
+`MetricsSnapshot` audit entry. E21 (`crates/metrics-endpoint`) is a *live*
+counter/gauge registry for continuous scrape. Both ship; the crate was renamed
+from `metrics` to `metrics-endpoint` at integration to coexist with E19.
+
+**Stories.**
+- S21.1 `MetricRegistry` — counters, gauges, histogram observations derived
+  from `vita::AuditEntry`; `render()` emits OpenMetrics text. ✅
+  (`crates/metrics-endpoint/src/lib.rs`)
+- S21.2 Console wiring — `Hub::{update_metrics_from_json, render_metrics,
+  metrics_summary}`; `GET /metrics` route; `AuditTailer` updates the registry
+  per line. ✅ (`crates/console/src/{hub,server,audit}.rs`)
+
+**Exit criteria.** `GET /metrics` returns Prometheus exposition text reflecting
+streamed audit updates; `cargo test/clippy/fmt` green across the workspace. ✅
+
+---
+
+## Stage 9 — Integration Notes (E18–E30 wave)
+
+The E18–E30 epics were developed as 14 independent feature branches off the
+E1–E17 somatic core. They were integrated as a single coherent line. Decisions
+made at integration:
+
+| Concern | Resolution |
+|---|---|
+| `quota` appeared in two branches (standalone + a quota+webhooks bundle) | Kept the standalone (`crates/quota`, E18); the bundle's identical copy was dropped |
+| `webhooks` appeared in two branches (a 2-file bundle + a 6-module crate) | Kept the richer 6-module `crates/webhooks` (E29); the bundle was dropped |
+| `metrics` appeared in three branches | Kept the aggregator (`crates/metrics`, E19), required by `alerts`; the bundled duplicate was dropped; the live scrape endpoint was split out as `crates/metrics-endpoint` (E21) |
+| The quota+webhooks bundle branch | Fully redundant against E18 + E29 → dropped entirely |
+| Duplicate epic number `E18` (quota vs metrics) | Metrics renumbered to **E19**; the wave now occupies a clean **E18–E30** |
+
+Final crate ↔ epic map: E18 `quota`, E19 `metrics`, E20 `config`,
+E21 `metrics-endpoint`, E22 `sessions`, E23 `consent`, E24 `feedback`,
+E25 `analytics`, E26 `tool-cache`, E27 `knowledge-graph`, E28 `alerts`,
+E29 `webhooks`, E30 `diagnostics`.
+
+---
+
 ## Stage 9 — Multi-Tenancy & Workspace Management
 
 ### Epic E31 — Multi-Tenant Workspace Management ✅

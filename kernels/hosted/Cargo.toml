@@ -22,4 +22,16 @@ actuators = { path = "../../crates/actuators" }
 praxis = { path = "../../crates/praxis" }
 serde_json = { workspace = true }
 users = { path = "../../crates/users" }
+quota = { path = "../../crates/quota" }
+config = { path = "../../crates/config" }
+sessions = { path = "../../crates/sessions" }
+consent = { path = "../../crates/consent" }
+feedback = { path = "../../crates/feedback" }
+analytics = { path = "../../crates/analytics" }
+tool-cache = { path = "../../crates/tool-cache" }
+knowledge-graph = { path = "../../crates/knowledge-graph" }
+metrics = { path = "../../crates/metrics" }
+alerts = { path = "../../crates/alerts", package = "anima-alerts" }
+webhooks = { path = "../../crates/webhooks" }
+diagnostics = { path = "../../crates/diagnostics" }
 workspace = { path = "../../crates/workspace" }

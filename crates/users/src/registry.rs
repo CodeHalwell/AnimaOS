@@ -177,6 +177,17 @@ impl UserRegistry {
         self.users.get_mut(user_id)
     }
 
+    /// Removes a user and returns the removed [`UserRecord`].
+    ///
+    /// Returns [`RegistryError::NotFound`] when no such user exists.
+    pub fn remove(&mut self, user_id: &str) -> Result<UserRecord, RegistryError> {
+        self.users
+            .remove(user_id)
+            .ok_or_else(|| RegistryError::NotFound {
+                user_id: user_id.to_owned(),
+            })
+    }
+
     /// Updates the trust tier for an existing user.
     ///
     /// Returns `(old_tier, new_tier)` on success.

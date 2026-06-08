@@ -1,0 +1,11 @@
+[package]
+name = "quota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-user token and request rate limiting for AnimaOS — Epic E18."
+
+[dependencies]
+users = { path = "../users" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
