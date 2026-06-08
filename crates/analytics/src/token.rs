@@ -39,12 +39,12 @@ impl TokenStats {
         if samples.is_empty() {
             return None;
         }
+        samples.sort_unstable();
         let total: u64 = samples.iter().sum();
         let count = samples.len();
         let mean = total as f64 / count as f64;
-        let min = *samples.iter().min().unwrap();
-        let max = *samples.iter().max().unwrap();
-        samples.sort_unstable();
+        let min = samples[0];
+        let max = samples[count - 1];
         let p50 = samples[count / 2];
         let p95 = samples[(count * 95 / 100).min(count - 1)];
         let p99 = samples[(count * 99 / 100).min(count - 1)];

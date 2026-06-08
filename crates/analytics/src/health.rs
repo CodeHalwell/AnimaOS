@@ -138,6 +138,8 @@ pub fn compute_health_report(
         .saturating_sub(latency_report.cortex_faults);
     let veto_rate = if completions > 0 {
         (defence_vetoes as f64 / completions as f64).clamp(0.0, 1.0)
+    } else if defence_vetoes > 0 {
+        1.0
     } else {
         0.0
     };
@@ -175,11 +177,18 @@ pub fn compute_health_report(
             latency_report.fault_rate_pct
         ));
     }
-    if defence_vetoes > 0 && completions > 0 && veto_rate > 0.10 {
-        recommendations.push(format!(
-            "{} defence vetoes across {} completions ({:.1}%) — review cortex policy or tool access scope",
-            defence_vetoes, completions, veto_rate * 100.0
-        ));
+    if defence_vetoes > 0 {
+        if completions == 0 {
+            recommendations.push(format!(
+                "{} defence vetoes with 0 completions — review cortex policy or tool access scope",
+                defence_vetoes
+            ));
+        } else if veto_rate > 0.10 {
+            recommendations.push(format!(
+                "{} defence vetoes across {} completions ({:.1}%) — review cortex policy or tool access scope",
+                defence_vetoes, completions, veto_rate * 100.0
+            ));
+        }
     }
     if gate_report.route_modulations > 0 && gate_report.invocations > 0 {
         let mod_rate =

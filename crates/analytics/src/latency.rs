@@ -35,12 +35,12 @@ impl Percentiles {
         if samples.is_empty() {
             return None;
         }
+        samples.sort_unstable();
         let sum: u64 = samples.iter().sum();
         let count = samples.len();
         let mean_ms = sum as f64 / count as f64;
-        let min_ms = *samples.iter().min().unwrap();
-        let max_ms = *samples.iter().max().unwrap();
-        samples.sort_unstable();
+        let min_ms = samples[0];
+        let max_ms = samples[count - 1];
         let p50_ms = samples[count / 2];
         let p95_ms = samples[(count * 95 / 100).min(count - 1)];
         let p99_ms = samples[(count * 99 / 100).min(count - 1)];
