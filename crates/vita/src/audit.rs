@@ -22,7 +22,7 @@
 //! variable: if set, [`AuditLog::from_env`] opens
 //! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
 use std::io::Write;
 #[cfg(feature = "std")]
@@ -229,7 +229,7 @@ pub fn verify_audit_chain(
 ///
 /// Note: `GateDecision` contains `f32` fields (urgency, novelty, scores, …);
 /// therefore the enum derives `PartialEq` only (not `Eq`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuditEntry {
     /// A new task was pulled from the agenda and dispatched.
     TaskStarted {
@@ -1213,6 +1213,49 @@ pub enum AuditEntry {
         /// Number of audit entries analysed to produce the report.
         audit_entries_analysed: u64,
     },
+}
+
+// ── JSONL read-back utilities ─────────────────────────────────────────────────
+
+/// Deserialize all `AuditEntry` records from a JSONL file.
+///
+/// Lines that are empty or fail to deserialize are silently skipped so that a
+/// truncated or partially-written last line never prevents the rest of the log
+/// from being read.
+#[cfg(feature = "std")]
+pub fn load_entries_from_file(
+    path: impl AsRef<std::path::Path>,
+) -> std::io::Result<Vec<AuditEntry>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let mut entries = Vec::new();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+/// Load all persisted `AuditEntry` records for `agent_id` from
+/// `$ANIMA_AUDIT_DIR/<agent_id>.jsonl`.  Returns an empty `Vec` when the
+/// environment variable is unset, the file does not exist yet, or the file
+/// cannot be read.
+#[cfg(feature = "std")]
+pub fn load_entries_from_env(agent_id: &str) -> Vec<AuditEntry> {
+    if let Ok(dir) = std::env::var("ANIMA_AUDIT_DIR") {
+        let path = std::path::PathBuf::from(&dir).join(format!("{agent_id}.jsonl"));
+        match load_entries_from_file(&path) {
+            Ok(entries) => return entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("anima-audit: failed to load {}: {e}", path.display()),
+        }
+    }
+    Vec::new()
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

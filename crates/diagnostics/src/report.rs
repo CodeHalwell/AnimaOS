@@ -169,6 +169,7 @@ mod tests {
             last_financial_budget: 0.80,
             last_thermal_load: 0.40,
             total_audit_entries: 5000,
+            has_interoceptive_snapshot: true,
             ..Default::default()
         };
         let checks = all_checks();

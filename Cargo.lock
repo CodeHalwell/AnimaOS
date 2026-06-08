@@ -563,9 +563,6 @@ dependencies = [
 name = "diagnostics"
 version = "0.1.0"
 dependencies = [
- "interoception",
- "memory",
- "scheduler",
  "serde",
  "serde_json",
  "vita",

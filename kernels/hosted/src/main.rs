@@ -2450,10 +2450,9 @@ fn cmd_diagnose(args: &[String]) {
 
     const AGENT_ID: &str = "anima";
 
-    // Load the durable audit log if ANIMA_AUDIT_DIR is set; otherwise the
-    // from_env log starts empty (no ANIMA_AUDIT_DIR configured).
-    let loaded_log = vita::AuditLog::from_env(AGENT_ID);
-    let log_entries = loaded_log.entries().to_vec();
+    // Read the durable audit history from disk so the snapshot reflects the
+    // full persisted log, not just entries accumulated in this process.
+    let log_entries = vita::audit::load_entries_from_env(AGENT_ID);
 
     let snapshot = AuditSnapshot::from_audit_log(&log_entries);
     let checks = all_checks();
@@ -2470,8 +2469,9 @@ fn cmd_diagnose(args: &[String]) {
         print!("{}", report.render_text());
     }
 
-    // Emit a DiagnosticRun audit entry so health trend is visible in the log.
-    let mut audit = vita::AuditLog::new();
+    // Append a DiagnosticRun entry to the durable log so health trends are
+    // visible during forensic replay.
+    let mut audit = vita::AuditLog::from_env(AGENT_ID);
     audit.push(AuditEntry::DiagnosticRun {
         agent_id: AGENT_ID.to_string(),
         overall_status: format!("{:?}", report.overall_status),

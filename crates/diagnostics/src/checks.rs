@@ -187,20 +187,19 @@ impl DiagnosticCheck for MemoryPressureCheck {
             "critical_events": critical_events,
         });
 
-        if fill < 0.75 && critical_events == 0 {
-            CheckResult::healthy(
+        if fill >= 0.90 || critical_events > 5 {
+            CheckResult::critical(
                 self.check_id(),
                 self.display_name(),
                 format!(
-                    "L1 context is {:.0}% full ({}/{} tokens, {} critical events).",
-                    fill * 100.0,
-                    snapshot.last_l1_tokens,
-                    snapshot.last_l1_max_context,
-                    critical_events
+                    "L1 context is {:.0}% full with {} critical pressure events — eviction is aggressive.",
+                    fill * 100.0, critical_events
                 ),
+                "Urgent: reduce task size or token budget immediately. Review the L3 archive capacity \
+                 and demotion pipeline. The agent may be losing important context.",
             )
             .with_detail(detail)
-        } else if fill < 0.90 || (1..=5).contains(&critical_events) {
+        } else if fill >= 0.75 || critical_events > 0 {
             CheckResult::degraded(
                 self.check_id(),
                 self.display_name(),
@@ -214,15 +213,16 @@ impl DiagnosticCheck for MemoryPressureCheck {
             )
             .with_detail(detail)
         } else {
-            CheckResult::critical(
+            CheckResult::healthy(
                 self.check_id(),
                 self.display_name(),
                 format!(
-                    "L1 context is {:.0}% full with {} critical pressure events — eviction is aggressive.",
-                    fill * 100.0, critical_events
+                    "L1 context is {:.0}% full ({}/{} tokens, {} critical events).",
+                    fill * 100.0,
+                    snapshot.last_l1_tokens,
+                    snapshot.last_l1_max_context,
+                    critical_events
                 ),
-                "Urgent: reduce task size or token budget immediately. Review the L3 archive capacity \
-                 and demotion pipeline. The agent may be losing important context.",
             )
             .with_detail(detail)
         }
@@ -248,14 +248,11 @@ impl DiagnosticCheck for FinancialBudgetCheck {
         "Financial Budget"
     }
     fn run(&self, snapshot: &AuditSnapshot) -> CheckResult {
-        // If no interoceptive snapshot has been recorded, the budget field
-        // defaults to 0.0 (worst case). Distinguish "unknown" from "exhausted"
-        // by checking total entries.
-        if snapshot.total_audit_entries == 0 {
+        if !snapshot.has_interoceptive_snapshot {
             return CheckResult::unknown(
                 self.check_id(),
                 self.display_name(),
-                "No audit data available — financial budget is unknown.",
+                "No interoceptive snapshot recorded — financial budget is unknown.",
             );
         }
 
@@ -312,11 +309,11 @@ impl DiagnosticCheck for ThermalLoadCheck {
         "Thermal Load"
     }
     fn run(&self, snapshot: &AuditSnapshot) -> CheckResult {
-        if snapshot.total_audit_entries == 0 {
+        if !snapshot.has_interoceptive_snapshot {
             return CheckResult::unknown(
                 self.check_id(),
                 self.display_name(),
-                "No interoceptive data — thermal load is unknown.",
+                "No interoceptive snapshot recorded — thermal load is unknown.",
             );
         }
 
@@ -831,6 +828,7 @@ mod tests {
         let snap = AuditSnapshot {
             last_financial_budget: 0.75,
             total_audit_entries: 1,
+            has_interoceptive_snapshot: true,
             ..Default::default()
         };
         let result = FinancialBudgetCheck.run(&snap);
@@ -842,10 +840,22 @@ mod tests {
         let snap = AuditSnapshot {
             last_financial_budget: 0.05,
             total_audit_entries: 1,
+            has_interoceptive_snapshot: true,
             ..Default::default()
         };
         let result = FinancialBudgetCheck.run(&snap);
         assert_eq!(result.status, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn financial_budget_check_unknown_without_interoceptive_snapshot() {
+        let snap = AuditSnapshot {
+            total_audit_entries: 10,
+            tasks_dispatched: 5,
+            ..Default::default()
+        };
+        let result = FinancialBudgetCheck.run(&snap);
+        assert_eq!(result.status, HealthStatus::Unknown);
     }
 
     // ── ThermalLoadCheck ──────────────────────────────────────────────────────
@@ -855,6 +865,7 @@ mod tests {
         let snap = AuditSnapshot {
             last_thermal_load: 0.50,
             total_audit_entries: 1,
+            has_interoceptive_snapshot: true,
             ..Default::default()
         };
         let result = ThermalLoadCheck.run(&snap);
@@ -866,10 +877,22 @@ mod tests {
         let snap = AuditSnapshot {
             last_thermal_load: 0.90,
             total_audit_entries: 1,
+            has_interoceptive_snapshot: true,
             ..Default::default()
         };
         let result = ThermalLoadCheck.run(&snap);
         assert_eq!(result.status, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn thermal_load_check_unknown_without_interoceptive_snapshot() {
+        let snap = AuditSnapshot {
+            total_audit_entries: 10,
+            tasks_dispatched: 5,
+            ..Default::default()
+        };
+        let result = ThermalLoadCheck.run(&snap);
+        assert_eq!(result.status, HealthStatus::Unknown);
     }
 
     // ── DefenceVetoCheck ──────────────────────────────────────────────────────

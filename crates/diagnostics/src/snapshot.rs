@@ -23,9 +23,9 @@ pub struct AuditSnapshot {
     pub defence_vetoes: u64,
     /// Attention-demand escalations (repeated vetoes crossing the threshold).
     pub attention_escalations: u64,
-    /// Sleep cycles completed without error.
+    /// Sleep phases completed without error.
     pub sleep_cycles_ok: u64,
-    /// Sleep cycles with at least one phase failure.
+    /// Sleep phases that reported a failure.
     pub sleep_cycles_failed: u64,
     /// Count of Critical memory pressure events (L1 context window).
     pub memory_pressure_critical_events: u64,
@@ -51,6 +51,9 @@ pub struct AuditSnapshot {
     pub last_memory_pressure: f32,
     /// Total entries in the audit log at snapshot time.
     pub total_audit_entries: u64,
+    /// `true` once at least one `InteroceptiveSnapshot` entry has been seen.
+    /// Used to distinguish "no data yet" (Unknown) from a real zero reading.
+    pub has_interoceptive_snapshot: bool,
 }
 
 impl AuditSnapshot {
@@ -124,6 +127,7 @@ impl AuditSnapshot {
                     snap.last_financial_budget = *financial_budget;
                     snap.last_thermal_load = *thermal_load;
                     snap.last_memory_pressure = *memory_pressure;
+                    snap.has_interoceptive_snapshot = true;
                 }
                 _ => {}
             }
