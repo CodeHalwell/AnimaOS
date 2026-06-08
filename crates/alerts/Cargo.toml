@@ -3,6 +3,7 @@ name = "anima-alerts"
 version = "0.1.0"
 edition = "2021"
 description = "E28 — Alert rules and threshold monitoring for AnimaOS"
+license.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
