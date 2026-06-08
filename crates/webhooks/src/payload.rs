@@ -1,19 +1,20 @@
-//! Webhook payload envelope and HMAC-SHA256 signature computation.
+//! Webhook payload envelope and HMAC-SHA256 signature helpers.
 //!
-//! Every outbound delivery wraps the event data in a `WebhookPayload`
-//! and — when the endpoint has a secret configured — adds a `signature`
-//! field for the receiver to verify.
+//! Signatures are computed over the exact JSON bytes that are transmitted and
+//! delivered exclusively via the `X-Anima-Signature` HTTP header — matching the
+//! industry-standard pattern used by GitHub, Stripe, and others.  Receivers can
+//! simply hash the raw request body; no JSON parsing is required.
 
 use serde::{Deserialize, Serialize};
 
 /// The outbound webhook payload envelope.
 ///
-/// Serialises to JSON for delivery.  The `signature` field is `None` when
-/// the endpoint has no secret configured, and `Some("sha256=<hex>")` when
-/// it does.
+/// Serialises to compact JSON for HTTP delivery.  The signature is **not**
+/// embedded here; it is computed over `to_json()` and sent as the
+/// `X-Anima-Signature: sha256=<hex>` HTTP header.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebhookPayload {
-    /// Unique delivery identifier (UUID-like hex string).
+    /// Unique delivery identifier.
     pub delivery_id: String,
     /// Agent that emitted the event.
     pub agent_id: String,
@@ -23,14 +24,10 @@ pub struct WebhookPayload {
     pub timestamp_ns: u64,
     /// Event-specific data as a freeform JSON object.
     pub data: serde_json::Value,
-    /// HMAC-SHA256 over the JSON-serialised payload body, formatted as
-    /// `"sha256=<64-char-lowercase-hex>"`.  `None` when unsigned.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
 }
 
 impl WebhookPayload {
-    /// Construct an unsigned payload.
+    /// Construct a payload.
     pub fn new(
         delivery_id: impl Into<String>,
         agent_id: impl Into<String>,
@@ -44,85 +41,66 @@ impl WebhookPayload {
             event_kind: event_kind.into(),
             timestamp_ns,
             data,
-            signature: None,
         }
     }
 
-    /// Sign the payload body (all fields except `signature`) with the given
-    /// secret and attach the resulting `sha256=<hex>` signature.
-    ///
-    /// The body is the JSON serialisation of a copy of `self` with
-    /// `signature = None`, ensuring the signature covers a deterministic byte
-    /// sequence regardless of field ordering in the final envelope.
-    pub fn sign(&mut self, secret: &str) {
-        let body = {
-            let mut copy = self.clone();
-            copy.signature = None;
-            serde_json::to_string(&copy).unwrap_or_default()
-        };
-        let mac = hmac_sha256(secret.as_bytes(), body.as_bytes());
-        self.signature = Some(format!("sha256={}", to_hex(&mac)));
-    }
-
-    /// Verify that the payload's `signature` field matches the recomputed MAC
-    /// using `secret`.  Returns `true` when the signature is valid, `false`
-    /// when it is absent, malformed, or does not match.
-    pub fn verify(&self, secret: &str) -> bool {
-        let Some(sig) = &self.signature else {
-            return false;
-        };
-        let hex = sig.strip_prefix("sha256=").unwrap_or("");
-        let Some(recorded) = from_hex(hex) else {
-            return false;
-        };
-        let body = {
-            let mut copy = self.clone();
-            copy.signature = None;
-            serde_json::to_string(&copy).unwrap_or_default()
-        };
-        let expected = hmac_sha256(secret.as_bytes(), body.as_bytes());
-        expected == recorded
-    }
-
-    /// Serialise to a JSON string for HTTP delivery.
+    /// Serialise to a compact JSON string for HTTP delivery.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+
+    /// Compute an HMAC-SHA256 signature over `body_json` using `secret`.
+    ///
+    /// Returns a `"sha256=<64-lowercase-hex>"` string suitable for the
+    /// `X-Anima-Signature` HTTP header.  Call this on the result of
+    /// `to_json()` *after* serialisation so the signature covers the exact
+    /// bytes the receiver will see.
+    pub fn sign(body_json: &str, secret: &str) -> String {
+        let mac = hmac_sha256(secret.as_bytes(), body_json.as_bytes());
+        format!("sha256={}", to_hex(&mac))
+    }
+
+    /// Verify an `X-Anima-Signature` header value.
+    ///
+    /// Returns `true` when `signature` is `"sha256=<hex>"` and the HMAC of
+    /// `body_json` under `secret` matches.
+    pub fn verify_signature(body_json: &str, secret: &str, signature: &str) -> bool {
+        let expected = Self::sign(body_json, secret);
+        expected == signature
+    }
 }
 
-// ── HMAC-SHA256 (no external `hmac` crate — mirrors vita::audit) ─────────────
+// ── Real HMAC-SHA256 (mirrors the implementation in crates/constitution) ───────
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    // Pure-Rust HMAC-SHA256 built from the same sha2 primitives used in vita.
-    // We don't have sha2 as a dep here, so we use a simple FNV-based approach
-    // for the fixture/test tier, and document that production delivery layers
-    // should use a proper HMAC implementation.
-    //
-    // For our purposes (signature format tests and replay verification in CI)
-    // this provides the same interface contract as production HMAC-SHA256.
-    // A real HTTP client layer would replace this with ring/hmac or sha2/hmac.
+    const BLOCK: usize = 64;
 
-    // FNV-1a based HMAC-like construction — deterministic for the same inputs.
-    // NOT cryptographically equivalent to HMAC-SHA256; serves the fixture/CI tier.
-    let mut outer = DefaultHasher::new();
-    key.hash(&mut outer);
-    data.hash(&mut outer);
-    let h1 = outer.finish();
+    let mut block_key = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let d = Sha256::digest(key);
+        block_key[..32].copy_from_slice(&d);
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
 
-    let mut inner = DefaultHasher::new();
-    h1.hash(&mut inner);
-    key.hash(&mut inner);
-    let h2 = inner.finish();
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= block_key[i];
+        opad[i] ^= block_key[i];
+    }
 
-    let mut result = [0u8; 32];
-    result[..8].copy_from_slice(&h1.to_le_bytes());
-    result[8..16].copy_from_slice(&h2.to_le_bytes());
-    result[16..24].copy_from_slice(&h1.wrapping_add(h2).to_le_bytes());
-    result[24..32].copy_from_slice(&h1.wrapping_mul(h2 | 1).to_le_bytes());
-    result
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
 }
 
 fn to_hex(bytes: &[u8; 32]) -> String {
@@ -133,20 +111,6 @@ fn to_hex(bytes: &[u8; 32]) -> String {
         s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
-}
-
-fn from_hex(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    let bytes = s.as_bytes();
-    for (i, slot) in out.iter_mut().enumerate() {
-        let hi = (bytes[2 * i] as char).to_digit(16)?;
-        let lo = (bytes[2 * i + 1] as char).to_digit(16)?;
-        *slot = (hi * 16 + lo) as u8;
-    }
-    Some(out)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -166,68 +130,69 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_payload_has_no_signature() {
-        let p = make_payload("task_completed");
-        assert!(p.signature.is_none());
-    }
-
-    #[test]
-    fn signed_payload_has_sha256_prefix() {
-        let mut p = make_payload("task_completed");
-        p.sign("secret");
-        assert!(p.signature.as_deref().unwrap().starts_with("sha256="));
+    fn sign_has_sha256_prefix() {
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "secret");
+        assert!(sig.starts_with("sha256="));
+        assert_eq!(sig.len(), 7 + 64); // "sha256=" + 64 hex chars
     }
 
     #[test]
     fn sign_and_verify_round_trip() {
-        let mut p = make_payload("task_completed");
-        p.sign("my-secret");
-        assert!(p.verify("my-secret"));
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "my-secret");
+        assert!(WebhookPayload::verify_signature(&body, "my-secret", &sig));
     }
 
     #[test]
     fn verify_fails_with_wrong_secret() {
-        let mut p = make_payload("task_completed");
-        p.sign("correct-secret");
-        assert!(!p.verify("wrong-secret"));
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "correct");
+        assert!(!WebhookPayload::verify_signature(&body, "wrong", &sig));
     }
 
     #[test]
-    fn verify_fails_on_unsigned_payload() {
-        let p = make_payload("task_completed");
-        assert!(!p.verify("any-secret"));
+    fn verify_fails_on_tampered_body() {
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "secret");
+        let tampered = body.replace("42", "999");
+        assert!(!WebhookPayload::verify_signature(&tampered, "secret", &sig));
     }
 
     #[test]
-    fn verify_fails_on_tampered_data() {
-        let mut p = make_payload("task_completed");
-        p.sign("secret");
-        p.data = serde_json::json!({ "task_id": 999 }); // tamper
-        assert!(!p.verify("secret"));
+    fn verify_fails_for_malformed_signature() {
+        let body = make_payload("alert_fired").to_json();
+        assert!(!WebhookPayload::verify_signature(
+            &body,
+            "secret",
+            "not-a-sig"
+        ));
+        assert!(!WebhookPayload::verify_signature(
+            &body,
+            "secret",
+            "sha256=badhex"
+        ));
     }
 
     #[test]
     fn signing_is_deterministic_for_same_inputs() {
-        let mut p1 = make_payload("alert_fired");
-        let mut p2 = make_payload("alert_fired");
-        p1.sign("key");
-        p2.sign("key");
-        assert_eq!(p1.signature, p2.signature);
+        let body = make_payload("alert_fired").to_json();
+        let sig1 = WebhookPayload::sign(&body, "key");
+        let sig2 = WebhookPayload::sign(&body, "key");
+        assert_eq!(sig1, sig2);
     }
 
     #[test]
     fn payload_round_trips_through_json() {
-        let mut p = make_payload("sleep_entered");
-        p.sign("s3cr3t");
+        let p = make_payload("sleep_entered");
         let json = p.to_json();
         let restored: WebhookPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(p, restored);
     }
 
     #[test]
-    fn signature_field_omitted_when_none_in_json() {
+    fn payload_json_contains_no_signature_field() {
         let p = make_payload("wake_entered");
-        let json = p.to_json();
-        assert!(!json.contains("signature"));
+        assert!(!p.to_json().contains("signature"));
     }
 }

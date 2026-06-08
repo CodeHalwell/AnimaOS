@@ -58,7 +58,7 @@ impl WebhookRegistry {
         let store = if path.exists() {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| RegistryError::Io(e.to_string()))?;
-            serde_json::from_str(&raw).unwrap_or_default()
+            serde_json::from_str(&raw).map_err(|e| RegistryError::Io(e.to_string()))?
         } else {
             Store::default()
         };
@@ -71,7 +71,9 @@ impl WebhookRegistry {
     /// Default path for an agent's webhook registry:
     /// `~/.anima/<agent_id>/webhook_endpoints.json`.
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home)
             .join(".anima")
             .join(agent_id)

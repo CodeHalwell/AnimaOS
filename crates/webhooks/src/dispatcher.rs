@@ -78,9 +78,11 @@ impl CumulativeStats {
 /// Configuration for dispatch behaviour.
 #[derive(Debug, Clone)]
 pub struct DispatchConfig {
-    /// Maximum number of delivery attempts (1 = no retries).
+    /// Maximum number of delivery attempts (1 = no retries).  Zero is treated
+    /// as one to prevent an empty retry loop and stats underflow.
     pub max_attempts: u32,
     /// Base back-off delay in milliseconds between retries (doubles each attempt).
+    /// Set to `0` in tests to skip sleeping.
     pub base_backoff_ms: u64,
 }
 
@@ -100,16 +102,19 @@ impl Default for DispatchConfig {
 pub trait WebhookSender: Send + Sync {
     /// Attempt to deliver `payload_json` to `url`.
     ///
+    /// `signature` is the pre-computed `X-Anima-Signature` header value
+    /// (`"sha256=<hex>"`), or `None` when the endpoint has no secret.
+    ///
     /// Returns `Accepted` on 2xx, `Rejected` on 4xx/5xx, `NetworkError` on I/O
     /// failure.  Implementations must be synchronous.
-    fn send(&self, url: &str, payload_json: &str) -> DeliveryOutcome;
+    fn send(&self, url: &str, payload_json: &str, signature: Option<&str>) -> DeliveryOutcome;
 }
 
 /// Fixture sender that always succeeds — used in CI and hermetic tests.
 pub struct FixtureSender;
 
 impl WebhookSender for FixtureSender {
-    fn send(&self, _url: &str, _payload_json: &str) -> DeliveryOutcome {
+    fn send(&self, _url: &str, _payload_json: &str, _signature: Option<&str>) -> DeliveryOutcome {
         DeliveryOutcome::Accepted
     }
 }
@@ -124,7 +129,7 @@ pub struct AlwaysFailSender {
 }
 
 impl WebhookSender for AlwaysFailSender {
-    fn send(&self, _url: &str, _payload_json: &str) -> DeliveryOutcome {
+    fn send(&self, _url: &str, _payload_json: &str, _signature: Option<&str>) -> DeliveryOutcome {
         DeliveryOutcome::Rejected {
             status: self.status,
             error: self.error.clone(),
@@ -161,9 +166,9 @@ impl WebhookDispatcher {
 
     /// Dispatch `payload` to `endpoint`, retrying up to `config.max_attempts` times.
     ///
-    /// When the endpoint has a `secret`, the payload is signed before the first
-    /// attempt (the signature covers the full payload body, which is immutable
-    /// across retries).
+    /// When the endpoint has a `secret`, the signature is computed over the
+    /// serialised JSON body and passed as the `X-Anima-Signature` header value.
+    /// The signature is stable across retries because the body does not change.
     ///
     /// Returns `DispatchStats` for this dispatch operation and updates the
     /// cumulative statistics.
@@ -172,29 +177,32 @@ impl WebhookDispatcher {
         endpoint: &WebhookEndpoint,
         payload: &mut WebhookPayload,
     ) -> DispatchStats {
-        // Sign before the first attempt (signature is stable across retries).
-        if let Some(secret) = &endpoint.secret {
-            payload.sign(secret);
-        }
         let json = payload.to_json();
 
+        // Compute signature over the exact bytes that will be transmitted.
+        let signature: Option<String> = endpoint
+            .secret
+            .as_ref()
+            .map(|s| WebhookPayload::sign(&json, s));
+
+        let max_attempts = self.config.max_attempts.max(1);
         let mut attempts = 0u32;
         let mut last_outcome = DeliveryOutcome::NetworkError {
             error: "no attempt made".to_string(),
         };
 
-        for attempt in 0..self.config.max_attempts {
+        for attempt in 0..max_attempts {
             attempts += 1;
 
             // Exponential back-off starting from the second attempt.
             if attempt > 0 {
                 let delay_ms = self.config.base_backoff_ms * (1u64 << (attempt.saturating_sub(1)));
-                // In fixture mode `std::thread::sleep` is fine; a real
-                // implementation would use async sleep.
-                let _ = delay_ms; // not calling sleep in tests — purely documented
+                if delay_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
             }
 
-            last_outcome = self.sender.send(&endpoint.url, &json);
+            last_outcome = self.sender.send(&endpoint.url, &json, signature.as_deref());
             if last_outcome.is_accepted() {
                 break;
             }
@@ -271,13 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn fixture_dispatcher_signs_payload_when_secret_present() {
+    fn fixture_dispatcher_with_secret_succeeds() {
         let mut d = WebhookDispatcher::fixture();
-        let mut p = payload("task_completed");
-        assert!(p.signature.is_none());
-        d.dispatch(&ep_with_secret("wh-signed"), &mut p);
-        assert!(p.signature.is_some());
-        assert!(p.verify("s3cr3t"));
+        let stats = d.dispatch(&ep_with_secret("wh-signed"), &mut payload("task_completed"));
+        assert!(stats.success);
+        assert_eq!(stats.attempts, 1);
     }
 
     #[test]
@@ -295,6 +301,22 @@ mod tests {
         assert!(!stats.success);
         assert_eq!(stats.attempts, 3);
         assert_eq!(stats.final_status, Some(503));
+    }
+
+    #[test]
+    fn max_attempts_zero_treated_as_one() {
+        let sender = AlwaysFailSender {
+            status: 500,
+            error: "err".to_string(),
+        };
+        let config = DispatchConfig {
+            max_attempts: 0,
+            base_backoff_ms: 0,
+        };
+        let mut d = WebhookDispatcher::with_sender(sender, config);
+        let stats = d.dispatch(&ep("wh-zero"), &mut payload("event"));
+        assert_eq!(stats.attempts, 1);
+        assert_eq!(d.stats().retries, 0); // no underflow
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub fn new_delivery_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    format!("dlv-{:08x}{:08x}", ts & 0xFFFF_FFFF, n & 0xFFFF_FFFF)
+    format!("dlv-{:016x}{:08x}", ts, n & 0xFFFF_FFFF)
 }
 
 /// Generate a unique endpoint ID.
@@ -137,7 +137,10 @@ mod tests {
             );
             let stats = dispatcher.dispatch(ep, &mut payload);
             assert!(stats.success);
-            assert!(payload.verify("signing-key"));
+            // Verify the signature computed by the dispatcher matches the body.
+            let body = payload.to_json();
+            let sig = WebhookPayload::sign(&body, "signing-key");
+            assert!(WebhookPayload::verify_signature(&body, "signing-key", &sig));
         }
 
         assert_eq!(dispatcher.stats().successful, 1);

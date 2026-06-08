@@ -1289,7 +1289,7 @@ fn cmd_webhook(args: &[String]) {
         eprintln!("warning: could not open webhook registry ({e}); using in-memory fallback");
         WebhookRegistry::in_memory()
     });
-    let mut log = AuditLog::new();
+    let mut log = AuditLog::from_env(AGENT_ID);
 
     match args.first().map(String::as_str) {
         Some("list") => {
@@ -1332,12 +1332,18 @@ fn cmd_webhook(args: &[String]) {
             let mut i = 2usize;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--secret" => {
-                        secret = args.get(i + 1).cloned();
-                        i += 2;
-                    }
-                    "--events" => {
-                        if let Some(kinds_str) = args.get(i + 1) {
+                    "--secret" => match args.get(i + 1) {
+                        Some(v) => {
+                            secret = Some(v.clone());
+                            i += 2;
+                        }
+                        None => {
+                            eprintln!("webhook add: --secret requires a value");
+                            return;
+                        }
+                    },
+                    "--events" => match args.get(i + 1) {
+                        Some(kinds_str) => {
                             event_kinds = Some(
                                 kinds_str
                                     .split(',')
@@ -1345,9 +1351,13 @@ fn cmd_webhook(args: &[String]) {
                                     .filter(|s| !s.is_empty())
                                     .collect(),
                             );
+                            i += 2;
                         }
-                        i += 2;
-                    }
+                        None => {
+                            eprintln!("webhook add: --events requires a value");
+                            return;
+                        }
+                    },
                     _ => {
                         i += 1;
                     }
@@ -1422,6 +1432,39 @@ fn cmd_webhook(args: &[String]) {
                     println!("webhook: {verb} {id}");
                 }
                 Err(e) => eprintln!("webhook: {e}"),
+            }
+        }
+        Some("show") => {
+            let id = match args.get(1) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("webhook show: missing <id>");
+                    return;
+                }
+            };
+            match registry.get(&id) {
+                Some(ep) => {
+                    let status = if ep.enabled { "enabled" } else { "disabled" };
+                    let secret_tag = if ep.secret.is_some() {
+                        "yes (secret configured)"
+                    } else {
+                        "no"
+                    };
+                    let filter_tag = match &ep.filter {
+                        EventFilter::All => "all".to_owned(),
+                        EventFilter::Selected { kinds } => {
+                            let mut v: Vec<&str> = kinds.iter().map(String::as_str).collect();
+                            v.sort();
+                            v.join(", ")
+                        }
+                    };
+                    println!("Webhook endpoint: {id}");
+                    println!("  URL    : {}", ep.url);
+                    println!("  Status : {status}");
+                    println!("  Signed : {secret_tag}");
+                    println!("  Events : {filter_tag}");
+                }
+                None => eprintln!("webhook: no endpoint with id={id:?}"),
             }
         }
         Some("test") => {
@@ -1543,6 +1586,7 @@ fn cmd_webhook(args: &[String]) {
             eprintln!("       anima-hosted webhook remove <id>");
             eprintln!("       anima-hosted webhook enable <id>");
             eprintln!("       anima-hosted webhook disable <id>");
+            eprintln!("       anima-hosted webhook show <id>");
             eprintln!("       anima-hosted webhook test <id>");
             eprintln!("       anima-hosted webhook stats");
         }

@@ -3121,12 +3121,13 @@ point), E1 (hosted kernel — CLI routing pattern from `cmd_users` / `cmd_identi
   `#[derive(Default)]` / `#[default]` on `All`; `matches(kind) -> bool`;
   `only(kinds)` constructor; `new_endpoint_id()` helper in `lib.rs`)
 - S29.2 `WebhookPayload` with HMAC signing. ✅ (`crates/webhooks/src/payload.rs` —
-  `WebhookPayload { delivery_id, agent_id, event_kind, sequence, timestamp_ns,
-  payload, signature }`; `sign(&mut self, secret)` produces
-  `"sha256=<64-hex>"` via FNV-based HMAC fixture (no external crypto crate);
-  `verify(&self, secret) -> bool` for receiver-side validation; `to_json()`
-  serialises to compact JSON; `signature` is `#[serde(skip_serializing_if = "Option::is_none")]`;
-  `new_delivery_id()` helper in `lib.rs`)
+  `WebhookPayload { delivery_id, agent_id, event_kind, timestamp_ns, data }`;
+  signature is **not** embedded in the JSON body — computed over the
+  serialised body bytes via `WebhookPayload::sign(body_json, secret) -> String`
+  (real HMAC-SHA256 using `sha2 0.11`) and transmitted as the
+  `X-Anima-Signature: sha256=<64-hex>` HTTP header;
+  `verify_signature(body_json, secret, sig) -> bool` for receiver-side validation;
+  `to_json()` serialises to compact JSON; `new_delivery_id()` helper in `lib.rs`)
 - S29.3 `WebhookRegistry` with atomic JSON persistence. ✅
   (`crates/webhooks/src/registry.rs` — `WebhookRegistry` backed by
   `HashMap<String, WebhookEndpoint>`; `open(path)` or `in_memory()`;
