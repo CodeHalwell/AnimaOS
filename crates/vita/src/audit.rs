@@ -1192,6 +1192,27 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E30 — Agent Self-Diagnostic System ───────────────────────────────────
+    /// A diagnostic run was completed (E30, S30.5).
+    ///
+    /// Written by the `anima diagnose` CLI command after all checks have been
+    /// evaluated.  Carries the aggregate outcome so that recurring health trends
+    /// are visible in the audit log without replaying the full check detail.
+    DiagnosticRun {
+        /// Agent identifier.
+        agent_id: String,
+        /// Aggregate health status: `"Healthy"`, `"Degraded"`, `"Critical"`, or `"Unknown"`.
+        overall_status: String,
+        /// Number of checks that returned `Healthy`.
+        healthy_count: usize,
+        /// Number of checks that returned `Degraded`.
+        degraded_count: usize,
+        /// Number of checks that returned `Critical`.
+        critical_count: usize,
+        /// Number of audit entries analysed to produce the report.
+        audit_entries_analysed: u64,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

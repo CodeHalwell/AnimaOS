@@ -901,6 +901,27 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E30 — Agent Self-Diagnostic System ───────────────────────────
+            AuditEntry::DiagnosticRun {
+                agent_id,
+                overall_status,
+                healthy_count,
+                degraded_count,
+                critical_count,
+                audit_entries_analysed,
+            } => {
+                let icon = match overall_status.as_str() {
+                    "Healthy" => "✅",
+                    "Degraded" => "⚠️ ",
+                    "Critical" => "🚨",
+                    _ => "❓",
+                };
+                println!(
+                    "  {icon}  diagnostic_run agent={agent_id} status={overall_status} \
+                     healthy={healthy_count} degraded={degraded_count} critical={critical_count} \
+                     entries_analysed={audit_entries_analysed}"
+                );
+            }
         }
     }
 }
@@ -2407,6 +2428,60 @@ fn cmd_snapshot(args: &[String]) {
     }
 }
 
+// ── `anima diagnose` subcommand (E30 S30.5) ──────────────────────────────────
+
+/// Run the full suite of diagnostic checks and print the resulting report.
+///
+/// Satisfies E30 exit criterion 1: "`anima diagnose` prints a structured
+/// health report with per-subsystem status and remediation hints."
+///
+/// ```text
+/// cargo run --bin anima-hosted -- diagnose [--json] [--quiet]
+/// ```
+///
+/// Flags:
+/// - `--json`   emit the full report as a single JSON object (default: text).
+/// - `--quiet`  print only the overall status line (useful for scripting).
+fn cmd_diagnose(args: &[String]) {
+    use diagnostics::{checks::all_checks, AuditSnapshot, DiagnosticReport};
+
+    let emit_json = args.iter().any(|a| a == "--json");
+    let quiet = args.iter().any(|a| a == "--quiet");
+
+    const AGENT_ID: &str = "anima";
+
+    // Load the durable audit log if ANIMA_AUDIT_DIR is set; otherwise the
+    // from_env log starts empty (no ANIMA_AUDIT_DIR configured).
+    let loaded_log = vita::AuditLog::from_env(AGENT_ID);
+    let log_entries = loaded_log.entries().to_vec();
+
+    let snapshot = AuditSnapshot::from_audit_log(&log_entries);
+    let checks = all_checks();
+    let report = DiagnosticReport::run(&snapshot, &checks);
+
+    if emit_json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("diagnose: JSON serialisation error: {e}"),
+        }
+    } else if quiet {
+        println!("{:?}", report.overall_status);
+    } else {
+        print!("{}", report.render_text());
+    }
+
+    // Emit a DiagnosticRun audit entry so health trend is visible in the log.
+    let mut audit = vita::AuditLog::new();
+    audit.push(AuditEntry::DiagnosticRun {
+        agent_id: AGENT_ID.to_string(),
+        overall_status: format!("{:?}", report.overall_status),
+        healthy_count: report.healthy_count,
+        degraded_count: report.degraded_count,
+        critical_count: report.critical_count,
+        audit_entries_analysed: report.audit_entries_analysed,
+    });
+}
+
 // ── `anima replay` subcommand (E15 S15.3) ────────────────────────────────────
 
 /// Replay past gate decisions from the audit log.
@@ -2545,6 +2620,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("replay") {
         cmd_replay(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("diagnose") {
+        cmd_diagnose(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("users") {

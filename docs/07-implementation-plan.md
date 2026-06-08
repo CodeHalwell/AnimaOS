@@ -3098,3 +3098,69 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+### Epic E30 — Agent Self-Diagnostic System ✅
+
+**Scope.** A stateless health-check framework that aggregates observable
+state from all AnimaOS subsystems into actionable `DiagnosticReport`s.
+All checks operate on an `AuditSnapshot` derived from the existing durable
+audit log — no new instrumentation is required and no hot-path cost is added.
+
+**Dependencies.** `vita::audit::AuditEntry` (all stages) — the audit log
+is the sole data source.
+
+**Stories.**
+- S30.1 `DiagnosticCheck` trait, `CheckResult`, `HealthStatus`. ✅
+  (`crates/diagnostics/src/check.rs` — `HealthStatus` (Healthy/Degraded/
+  Critical/Unknown); `CheckResult` with remediation hints and structured
+  JSON detail; `DiagnosticCheck` object-safe trait; `worst()` aggregator)
+- S30.2 `AuditSnapshot` — point-in-time view derived from the audit log. ✅
+  (`crates/diagnostics/src/snapshot.rs` — O(n) fold over `&[AuditEntry]`;
+  tracks task failures, cortex faults, defence vetoes, sleep cycle outcomes,
+  L1 fill fraction, interoceptive signals; computed rate helpers)
+- S30.3 11 built-in checks for all major subsystems. ✅
+  (`crates/diagnostics/src/checks.rs` — `TaskFailureRateCheck`,
+  `CortexFaultRateCheck`, `MemoryPressureCheck`, `FinancialBudgetCheck`,
+  `ThermalLoadCheck`, `DefenceVetoCheck`, `SleepCycleHealthCheck`,
+  `KvControllerHealthCheck`, `AgentDelegationCheck`,
+  `ConsolidationHealthCheck`, `RouterModulationCheck`;
+  `all_checks()` returns all 11; each has calibrated Healthy/Degraded/
+  Critical thresholds and operator-facing remediation guidance)
+- S30.4 `DiagnosticReport` aggregator with text and JSON rendering. ✅
+  (`crates/diagnostics/src/report.rs` — `DiagnosticReport::run()` folds
+  check results; `render_text()` ANSI-icon summary; `serde::Serialize` for
+  `--json` output; `actionable_items()` filters to Degraded/Critical)
+- S30.5 `anima diagnose` CLI + `AuditEntry::DiagnosticRun` audit integration. ✅
+  (`kernels/hosted/src/main.rs` — `cmd_diagnose()` supports `--json` and
+  `--quiet` flags; loads audit log from `ANIMA_AUDIT_DIR` if configured;
+  emits `AuditEntry::DiagnosticRun` with aggregate counts; `print_audit`
+  renders with emoji prefix; `diagnose` dispatch added to `main()`)
+
+**New crate: `crates/diagnostics`.**
+Dependencies: `vita`, `memory`, `interoception`, `scheduler`, `serde`,
+`serde_json`. `#![forbid(unsafe_code)]`. Added to workspace root `Cargo.toml`
+and `kernels/hosted/Cargo.toml`.
+
+**New `vita::audit::AuditEntry` variant (E30).**
+`DiagnosticRun { agent_id, overall_status, healthy_count, degraded_count,
+critical_count, audit_entries_analysed }` — allows health trends to be
+tracked in the audit log over time without replaying full check detail.
+
+**Exit criteria.**
+1. `anima diagnose` prints a human-readable health report covering all 11
+   subsystems, with per-check status icons and remediation hints for any
+   Degraded or Critical item. ✅
+   (`cmd_diagnose()` in `kernels/hosted/src/main.rs`)
+2. `anima diagnose --json` emits a machine-readable JSON report suitable
+   for scripted health monitoring. ✅ (`serde::Serialize` on `DiagnosticReport`)
+3. Each check returns `Unknown` (not `Critical`) when the relevant subsystem
+   has no audit data yet — no false alarms on a fresh agent. ✅
+   (all checks gate on `snapshot.tasks_dispatched == 0` / `total_audit_entries == 0` etc.)
+4. A healthy agent snapshot produces `overall_status = Healthy` with zero
+   degraded or critical checks. ✅ (`healthy_snapshot_shows_all_healthy` test)
+5. `cargo test --workspace` green; 41 new diagnostics tests + all prior
+   tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅

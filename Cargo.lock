@@ -560,6 +560,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagnostics"
+version = "0.1.0"
+dependencies = [
+ "interoception",
+ "memory",
+ "scheduler",
+ "serde",
+ "serde_json",
+ "vita",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -866,6 +878,7 @@ version = "0.1.0"
 dependencies = [
  "actuators",
  "console",
+ "diagnostics",
  "interoception",
  "lifecycle",
  "llm-backends",
