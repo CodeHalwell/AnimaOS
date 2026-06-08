@@ -867,6 +867,7 @@ dependencies = [
  "actuators",
  "console",
  "interoception",
+ "knowledge-graph",
  "lifecycle",
  "llm-backends",
  "memory",
@@ -1165,6 +1166,15 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "knowledge-graph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -1192,6 +1192,41 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E27 — Knowledge Graph ─────────────────────────────────────────────────
+    /// A new entity was added to the knowledge graph.
+    KnowledgeEntityAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Stable entity id.
+        entity_id: String,
+        /// Entity kind label (e.g. "person", "technology").
+        kind: String,
+        /// Human-readable display name.
+        display_name: String,
+    },
+
+    /// A directed relation was added between two entities.
+    KnowledgeRelationAdded {
+        /// Agent identifier.
+        agent_id: String,
+        /// Source entity id.
+        from_entity: String,
+        /// Target entity id.
+        to_entity: String,
+        /// Relation kind label (e.g. "works_at", "depends_on").
+        kind: String,
+    },
+
+    /// The knowledge graph was queried.
+    KnowledgeGraphQueried {
+        /// Agent identifier.
+        agent_id: String,
+        /// Type of query performed (e.g. "neighbors", "by_kind", "by_attribute").
+        query_type: String,
+        /// Number of entities returned.
+        result_count: usize,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

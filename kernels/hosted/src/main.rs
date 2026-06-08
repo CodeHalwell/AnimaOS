@@ -85,6 +85,7 @@ use memory::VirtualContextManager;
 use scheduler::Task;
 use senses::{HumanGuidance, SensoryBridge};
 // E11: skill crate referenced inside cmd_skills via use statements
+use knowledge_graph::{Entity, EntityKind, KnowledgeGraph, Relation, RelationKind};
 use vita::gate::Gate;
 use vita::{
     record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
@@ -900,6 +901,35 @@ fn print_audit(manager: &LifecycleManager) {
             }
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
+            }
+            AuditEntry::KnowledgeEntityAdded {
+                agent_id,
+                entity_id,
+                kind,
+                display_name,
+            } => {
+                println!(
+                    "  🔷 knowledge_entity_added agent={agent_id} id={entity_id} kind={kind} name={display_name}"
+                );
+            }
+            AuditEntry::KnowledgeRelationAdded {
+                agent_id,
+                from_entity,
+                to_entity,
+                kind,
+            } => {
+                println!(
+                    "  🔗 knowledge_relation_added agent={agent_id} {from_entity} --[{kind}]--> {to_entity}"
+                );
+            }
+            AuditEntry::KnowledgeGraphQueried {
+                agent_id,
+                query_type,
+                result_count,
+            } => {
+                println!(
+                    "  🔍 knowledge_graph_queried agent={agent_id} type={query_type} results={result_count}"
+                );
             }
         }
     }
@@ -2506,6 +2536,377 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+// ── `anima graph` subcommand (E27) ───────────────────────────────────────────
+
+/// Implements the `anima graph` CLI subcommand for knowledge-graph management.
+///
+/// ```text
+/// anima-hosted graph entity add <id> <kind> [--name <display_name>]
+/// anima-hosted graph entity show <id>
+/// anima-hosted graph entity list [--kind <kind>]
+/// anima-hosted graph entity remove <id>
+/// anima-hosted graph relation add <from_id> <to_id> <kind>
+/// anima-hosted graph relation list
+/// anima-hosted graph query neighbors <id> [--depth N]
+/// anima-hosted graph query by-kind <kind>
+/// anima-hosted graph query by-attr <key> <value>
+/// ```
+fn cmd_graph(args: &[String]) {
+    const AGENT_ID: &str = "anima";
+    let path = KnowledgeGraph::default_path(AGENT_ID);
+    let mut g = KnowledgeGraph::open(&path).unwrap_or_else(|e| {
+        eprintln!("warning: could not load knowledge graph ({e}); using in-memory graph");
+        KnowledgeGraph::in_memory()
+    });
+    let mut log = AuditLog::new();
+
+    match args.first().map(String::as_str) {
+        // ── entity sub-commands ───────────────────────────────────────────────
+        Some("entity") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
+                        );
+                        return;
+                    }
+                };
+                let kind_str = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
+                        );
+                        return;
+                    }
+                };
+                let kind: EntityKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown entity kind '{kind_str}'");
+                        eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
+                        return;
+                    }
+                };
+                // Optional --name flag.
+                let display_name = args
+                    .windows(2)
+                    .find(|w| w[0] == "--name")
+                    .map(|w| w[1].as_str())
+                    .unwrap_or(id);
+                let entity = Entity::new(id, kind.clone(), display_name);
+                match g.add_entity(entity) {
+                    Ok(()) => {
+                        log.push(AuditEntry::KnowledgeEntityAdded {
+                            agent_id: AGENT_ID.to_string(),
+                            entity_id: id.to_string(),
+                            kind: kind.to_string(),
+                            display_name: display_name.to_string(),
+                        });
+                        g.flush()
+                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        println!("entity '{id}' ({kind}) added to knowledge graph");
+                    }
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            Some("show") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph entity show <id>");
+                        return;
+                    }
+                };
+                match g.get_entity(id) {
+                    Some(e) => {
+                        println!("id:           {}", e.id);
+                        println!("kind:         {}", e.kind);
+                        println!("display_name: {}", e.display_name);
+                        if e.attributes.is_empty() {
+                            println!("attributes:   (none)");
+                        } else {
+                            println!("attributes:");
+                            let mut attrs: Vec<_> = e.attributes.iter().collect();
+                            attrs.sort_by_key(|(k, _)| k.as_str());
+                            for (k, v) in attrs {
+                                println!("  {k} = {v}");
+                            }
+                        }
+                        let rels = g.relations_for(id);
+                        if rels.is_empty() {
+                            println!("relations:    (none)");
+                        } else {
+                            println!("relations:");
+                            for r in rels {
+                                println!(
+                                    "  {} --[{}]--> {} (weight={:.2})",
+                                    r.from, r.kind, r.to, r.weight
+                                );
+                            }
+                        }
+                    }
+                    None => eprintln!("error: entity '{id}' not found"),
+                }
+            }
+            Some("list") => {
+                let kind_filter: Option<EntityKind> = args
+                    .windows(2)
+                    .find(|w| w[0] == "--kind")
+                    .and_then(|w| w[1].parse().ok());
+
+                let entities = g.all_entities();
+                let filtered: Vec<_> = if let Some(ref kind) = kind_filter {
+                    entities.into_iter().filter(|e| &e.kind == kind).collect()
+                } else {
+                    entities
+                };
+                if filtered.is_empty() {
+                    println!("(no entities)");
+                } else {
+                    println!("{:<24} {:<16} display_name", "id", "kind");
+                    println!("{}", "-".repeat(64));
+                    for e in filtered {
+                        println!("{:<24} {:<16} {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            Some("remove") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph entity remove <id>");
+                        return;
+                    }
+                };
+                if g.remove_entity(id) {
+                    g.flush()
+                        .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                    println!("entity '{id}' removed (including all connected relations)");
+                } else {
+                    eprintln!("error: entity '{id}' not found");
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph entity add|show|list|remove ...");
+            }
+        },
+
+        // ── relation sub-commands ─────────────────────────────────────────────
+        Some("relation") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let from = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let to = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let kind_str = match args.get(4) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!(
+                            "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
+                        );
+                        return;
+                    }
+                };
+                let kind: RelationKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown relation kind '{kind_str}'");
+                        eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
+                        return;
+                    }
+                };
+                match g.add_relation(Relation::new(from, to, kind.clone())) {
+                    Ok(()) => {
+                        log.push(AuditEntry::KnowledgeRelationAdded {
+                            agent_id: AGENT_ID.to_string(),
+                            from_entity: from.to_string(),
+                            to_entity: to.to_string(),
+                            kind: kind.to_string(),
+                        });
+                        g.flush()
+                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        println!("relation {from} --[{kind}]--> {to} added");
+                    }
+                    Err(e) => eprintln!("error: {e}"),
+                }
+            }
+            Some("list") => {
+                let rels = g.all_relations();
+                if rels.is_empty() {
+                    println!("(no relations)");
+                } else {
+                    println!("{:<20} {:<20} {:<16} weight", "from", "to", "kind");
+                    println!("{}", "-".repeat(72));
+                    for r in rels {
+                        println!("{:<20} {:<20} {:<16} {:.2}", r.from, r.to, r.kind, r.weight);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph relation add|list ...");
+            }
+        },
+
+        // ── query sub-commands ────────────────────────────────────────────────
+        Some("query") => match args.get(1).map(String::as_str) {
+            Some("neighbors") => {
+                let id = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query neighbors <id> [--depth N]");
+                        return;
+                    }
+                };
+                let depth: usize = args
+                    .windows(2)
+                    .find(|w| w[0] == "--depth")
+                    .and_then(|w| w[1].parse().ok())
+                    .unwrap_or(1);
+                let neighbors = g.find_neighbors(id, depth);
+                let count = neighbors.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: "neighbors".to_string(),
+                    result_count: count,
+                });
+                if neighbors.is_empty() {
+                    println!("(no neighbors found for '{id}' at depth {depth})");
+                } else {
+                    println!("neighbors of '{id}' at depth ≤ {depth}:");
+                    for e in neighbors {
+                        println!("  {} ({}) — {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            Some("by-kind") => {
+                let kind_str = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-kind <kind>");
+                        return;
+                    }
+                };
+                let kind: EntityKind = match kind_str.parse() {
+                    Ok(k) => k,
+                    Err(()) => {
+                        eprintln!("error: unknown entity kind '{kind_str}'");
+                        return;
+                    }
+                };
+                let results = g.find_by_kind(&kind);
+                let count = results.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: format!("by_kind:{kind_str}"),
+                    result_count: count,
+                });
+                if results.is_empty() {
+                    println!("(no entities of kind '{kind_str}')");
+                } else {
+                    for e in results {
+                        println!("{} — {}", e.id, e.display_name);
+                    }
+                }
+            }
+            Some("by-attr") => {
+                let key = match args.get(2) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        return;
+                    }
+                };
+                let value = match args.get(3) {
+                    Some(v) => v.as_str(),
+                    None => {
+                        eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        return;
+                    }
+                };
+                let results = g.find_by_attribute(key, value);
+                let count = results.len();
+                log.push(AuditEntry::KnowledgeGraphQueried {
+                    agent_id: AGENT_ID.to_string(),
+                    query_type: format!("by_attr:{key}={value}"),
+                    result_count: count,
+                });
+                if results.is_empty() {
+                    println!("(no entities with {key}={value})");
+                } else {
+                    for e in results {
+                        println!("{} ({}) — {}", e.id, e.kind, e.display_name);
+                    }
+                }
+            }
+            _ => {
+                eprintln!("usage: anima-hosted graph query neighbors|by-kind|by-attr ...");
+            }
+        },
+
+        _ => {
+            eprintln!("anima-hosted graph entity add <id> <kind> [--name <name>]");
+            eprintln!("anima-hosted graph entity show <id>");
+            eprintln!("anima-hosted graph entity list [--kind <kind>]");
+            eprintln!("anima-hosted graph entity remove <id>");
+            eprintln!("anima-hosted graph relation add <from_id> <to_id> <kind>");
+            eprintln!("anima-hosted graph relation list");
+            eprintln!("anima-hosted graph query neighbors <id> [--depth N]");
+            eprintln!("anima-hosted graph query by-kind <kind>");
+            eprintln!("anima-hosted graph query by-attr <key> <value>");
+        }
+    }
+
+    // Print any audit entries generated.
+    if !log.is_empty() {
+        println!();
+        for entry in log.entries() {
+            match entry {
+                AuditEntry::KnowledgeEntityAdded {
+                    agent_id,
+                    entity_id,
+                    kind,
+                    display_name,
+                } => {
+                    println!("audit: 🔷 entity_added agent={agent_id} id={entity_id} kind={kind} name={display_name}");
+                }
+                AuditEntry::KnowledgeRelationAdded {
+                    agent_id,
+                    from_entity,
+                    to_entity,
+                    kind,
+                } => {
+                    println!("audit: 🔗 relation_added agent={agent_id} {from_entity} --[{kind}]--> {to_entity}");
+                }
+                AuditEntry::KnowledgeGraphQueried {
+                    agent_id,
+                    query_type,
+                    result_count,
+                } => {
+                    println!("audit: 🔍 graph_queried agent={agent_id} type={query_type} results={result_count}");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn main() {
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2549,6 +2950,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("graph") {
+        cmd_graph(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

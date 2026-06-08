@@ -3098,3 +3098,77 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Knowledge Graph & Entity Tracking
+
+### Epic E27 — Knowledge Graph & Entity Tracking ✅
+
+**Scope.** A structured entity and relationship graph that adds a *structural
+layer* on top of E14's document-level knowledge corpus.  Where the corpus stores
+and retrieves unstructured documents by embedding similarity, E27 lets the agent
+model *who and what exist* and *how they connect*: named entities with typed
+attributes, directed relationships with salience weights, BFS neighbour
+traversal, and attribute/kind-filtered queries.  The new `crates/knowledge-graph`
+crate is a zero-dependency library (only `serde` / `serde_json`) so it composes
+cleanly with the comms layer (E10), multi-agent pool (E16), and future
+identity-extraction cortex tools.
+
+**Dependencies.** E14 (knowledge corpus — complements rather than replaces),
+E5.5 (atomic-write pattern), E17 (audit log extension pattern).
+
+**Stories.**
+- S27.1 `Entity` and `EntityKind`. ✅ (`crates/knowledge-graph/src/entity.rs` —
+  `EntityKind` (Person / Place / Project / Concept / Technology / Organization /
+  Custom); `Entity { id, kind, display_name, attributes: HashMap, created_at_ns }`;
+  `set_attribute` / `get_attribute`; `FromStr` + `Display` on `EntityKind` with
+  `org` alias; JSON serde; 8 unit tests)
+- S27.2 `Relation` and `RelationKind`. ✅ (`crates/knowledge-graph/src/relation.rs` —
+  `RelationKind` (WorksAt / RelatedTo / PartOf / CreatedBy / DependsOn /
+  Collaborates / IsA / Custom); `Relation { from, to, kind, weight, created_at_ns }`;
+  `Relation::new` (weight 1.0) and `Relation::with_weight` (clamps to \[0, 1\]);
+  hyphenated-alias parsing; JSON serde; 7 unit tests)
+- S27.3 `KnowledgeGraph` mutation and query API. ✅
+  (`crates/knowledge-graph/src/graph.rs` — `add_entity` / `remove_entity` (cascade
+  to relations) / `get_entity` / `get_entity_mut`; `add_relation` / `remove_relation`
+  (duplicate detection); BFS `find_neighbors(id, max_depth)` traversing both forward
+  and backward adjacency; `find_by_kind` / `find_by_attribute`; `all_entities`
+  (sorted) / `all_relations` / `relations_for`; entity count / relation count /
+  `is_empty`; `GraphError` enum)
+- S27.4 Atomic JSON persistence. ✅ (`KnowledgeGraph::open(path)` /
+  `KnowledgeGraph::in_memory()`; `flush()` write-to-`.tmp`-then-rename;
+  `default_path(agent_id)` → `~/.anima/<id>/knowledge_graph.json`;
+  24 graph-module unit tests including persistence round-trip)
+- S27.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — three new `AuditEntry`
+  variants: `KnowledgeEntityAdded { agent_id, entity_id, kind, display_name }`,
+  `KnowledgeRelationAdded { agent_id, from_entity, to_entity, kind }`,
+  `KnowledgeGraphQueried { agent_id, query_type, result_count }`;
+  `print_audit` arms with 🔷 / 🔗 / 🔍 prefixes)
+- S27.6 `anima graph` CLI. ✅ (`kernels/hosted/src/main.rs` — `cmd_graph()`:
+  `graph entity add|show|list|remove`, `graph relation add|list`,
+  `graph query neighbors|by-kind|by-attr`; dispatched from `main()`;
+  every mutating command emits an audit entry; `--depth` and `--kind` flags)
+
+**New crate: `crates/knowledge-graph`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `KnowledgeGraph` entity and relation CRUD covered by 39 unit tests; all
+   pass under `cargo test -p knowledge-graph`. ✅
+2. BFS neighbour traversal at depth 1 returns only direct neighbours; at
+   depth 2 includes both direct and two-hop neighbours; undirected (both
+   forward and backward edges traversed). ✅
+   (`find_neighbors_depth_1_returns_direct_neighbors`,
+   `find_neighbors_depth_2_reaches_two_hops`,
+   `find_neighbors_backward_edge_traversed_undirected`)
+3. Persistence round-trip: entities and relations survive a process restart
+   (write → reload → assert). ✅ (`graph_persistence_round_trip`)
+4. All three `AuditEntry` variants emitted by CLI commands and displayed in
+   `print_audit` with structured field output. ✅
+5. `cargo test --workspace` green; 39 new knowledge-graph tests + all prior
+   workspace tests pass. ✅
+6. `cargo clippy --workspace -- -D warnings` clean. ✅
+7. `cargo fmt --check` clean. ✅

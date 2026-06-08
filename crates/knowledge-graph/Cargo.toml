@@ -1,0 +1,13 @@
+[package]
+name = "knowledge-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Structured entity and relationship graph for AnimaOS — Epic E27."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
