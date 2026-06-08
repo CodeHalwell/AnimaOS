@@ -4086,3 +4086,93 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
    all prior tests pass. ✅
 6. `cargo clippy --workspace -- -D warnings` clean. ✅
 7. `cargo fmt --all --check` clean. ✅
+
+---
+
+## E32 — Scheduled Job and Cron Engine ✅
+
+**Goal.** Provide a first-class cron / one-shot job scheduler so agents can
+execute recurring tasks (digest generation, memory consolidation sweeps, policy
+re-evaluations) at wall-clock times or intervals without external cron daemons.
+
+**Stories.**
+- S32.1 `ScheduledJob` data model. ✅ (`crates/jobs/src/job.rs` — `JobStatus`
+  enum (Active/Paused/Completed/Failed) with `Display` + `FromStr`; `RetryPolicy
+  { max_attempts: 3, retry_delay_secs: 60 }` with sane defaults; `LastRun {
+  fired_at_ns, success, duration_ms, error, attempt }`; `ScheduledJob` struct
+  with `job_id`, `description`, `workspace_id`, `payload`, `schedule`, `status`,
+  `retry_policy`, `created_at_ns`, `consecutive_failures`, `last_run`;
+  `make_job_id(description, now_ns)` → `"job-<slug>-<hex>"`)
+- S32.2 Cron schedule evaluation. ✅ (`crates/jobs/src/schedule.rs` —
+  `JobSchedule` enum: `Immediate`, `Once { at_ns: u64 }`, `Cron { expression:
+  String }`; `is_cron_due(expression, now_ns, last_fired_ns)` evaluates
+  5-field cron (minute hour day-of-month month day-of-week); `field_matches`
+  supports `*`, `N`, `*/N` step syntax; `decompose_unix_secs` uses Howard
+  Hinnant's `civil_from_days` algorithm for Gregorian calendar decomposition;
+  at-most-one-firing-per-minute guard via `last_fired_ns`)
+- S32.3 Persistent job registry. ✅ (`crates/jobs/src/registry.rs` —
+  `JobRegistry` backed by `HashMap<String, ScheduledJob>` with optional
+  `PathBuf`; `open(path)` / `in_memory()` constructors; `add()`, `remove()`,
+  `get()`, `get_mut()`, `iter()`, `len()`, `is_empty()`, `flush()`; `flush()`
+  writes atomically via `.tmp` rename pattern; `default_path(agent_id)` →
+  `~/.anima/<agent_id>/jobs.json`)
+- S32.4 Stateless job runner. ✅ (`crates/jobs/src/runner.rs` — `RunResult {
+  job_id, success, duration_ms, error, attempt }` with `success()` / `failure()`
+  constructors; `due_job_ids(registry, now_ns)` → sorted `Vec<String>` of active
+  jobs due to fire; `record_run_result(registry, job_id, result, now_ns)` updates
+  `LastRun`, `consecutive_failures`, transitions one-shot jobs to `Completed` on
+  success and any job to `Failed` after `max_attempts` failures; `JobRunner {
+  agent_id }` wrapper with `poll()`)
+- S32.5 Audit trail. ✅ (`crates/vita/src/audit.rs` — four new `AuditEntry`
+  variants: `JobScheduled { agent_id, job_id, description, schedule_type,
+  workspace_id }`, `JobFired { agent_id, job_id, attempt }`, `JobCompleted {
+  agent_id, job_id, success, duration_ms }`, `JobCancelled { agent_id, job_id,
+  reason }`; `kernels/hosted/src/main.rs` — `print_audit` arms for all four new
+  variants with 📋 / 🔥 / ✅❌ / 🗑️ prefixes)
+- S32.6 `anima jobs` CLI. ✅ (`kernels/hosted/src/main.rs` — `cmd_jobs()`
+  implements `jobs list`, `jobs show <id>`, `jobs add --description <desc>
+  [--cron <expr>|--at <ns>] [--workspace <id>] [--payload <json>]`, `jobs remove
+  <id> [<reason>]`, `jobs run <id>`, `jobs poll`; dispatched via `anima-hosted
+  jobs …`; `print_jobs_audit()` helper; `flag_value()` helper for `--flag value`
+  parsing)
+
+**New crate: `crates/jobs`.**
+`Cargo.toml` dependencies: `serde` (workspace), `serde_json` (workspace).
+Dev-dependency: `tempfile = "3"`.  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Exit criteria.**
+1. `JobStatus` ordering and `FromStr` / `Display` round-trips covered by unit
+   tests. ✅ (`job_status_display`, `job_status_from_str_round_trips`,
+   `job_status_from_str_rejects_unknown`, `is_active_only_for_active_status`)
+2. `RetryPolicy` defaults are `max_attempts = 3`, `retry_delay_secs = 60`. ✅
+   (`retry_policy_defaults`)
+3. `make_job_id` produces a stable, slug-based identifier. ✅
+   (`make_job_id_produces_deterministic_prefix`,
+   `make_job_id_normalises_description_to_slug`)
+4. Cron `field_matches` supports `*`, exact `N`, and `*/N` step syntax. ✅
+   (`field_matches_wildcard`, `field_matches_exact_value`,
+   `field_matches_step_zero`, `field_matches_rejects_zero_step`)
+5. `decompose_unix_secs` correctly maps `2024-01-15 09:30:00 UTC` to
+   minute=30, hour=9, day=15, month=1, weekday=1 (Monday). ✅
+   (`decompose_known_timestamp`)
+6. `is_cron_due` fires at most once per minute (guarded by `last_fired_ns`). ✅
+   (`cron_not_due_when_fired_in_same_minute`, `cron_due_when_fired_in_prior_minute`)
+7. `JobRegistry` CRUD, persistence, and error paths tested. ✅
+   (`empty_registry_is_empty`, `add_inserts_job`,
+   `add_rejects_duplicate_job_id`, `get_returns_none_for_missing_job`,
+   `get_returns_job_after_add`, `remove_extracts_job`,
+   `remove_returns_none_for_missing`, `get_mut_allows_mutation`,
+   `iter_returns_all_jobs`, `len_reflects_count`, `flush_and_reload_round_trip`,
+   `open_creates_empty_registry_when_file_absent`, `in_memory_flush_is_no_op`,
+   `multiple_jobs_survive_round_trip`)
+8. `record_run_result` transitions one-shot jobs to `Completed`, cron jobs stay
+   `Active`, and `Failed` after `max_attempts` failures. ✅
+   (`record_run_result_completes_immediate_job_on_success`,
+   `record_run_result_completes_once_job_on_success`,
+   `record_run_result_does_not_complete_cron_job_on_success`,
+   `record_run_result_fails_job_after_max_retries`,
+   `record_run_result_resets_failures_on_success`)
+9. `cargo test --workspace` green; 61 new jobs tests + all prior tests pass. ✅
+10. `cargo clippy --workspace -- -D warnings` clean. ✅
+11. `cargo fmt --check` clean. ✅

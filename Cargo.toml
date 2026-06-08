@@ -34,6 +34,7 @@ members = [
   "crates/webhooks",
   "crates/diagnostics",
   "crates/workspace",
+  "crates/jobs",
   "kernels/hosted",
   "llm-backends",
 ]
