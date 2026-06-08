@@ -28,7 +28,7 @@ libm = ["dep:libm"]
 
 [dependencies]
 # scc: concurrent hash-map — only needed for the L2 ARC cache (std builds).
-scc = { version = "3.7.1", optional = true }
+scc = { version = "3.7.2", optional = true }
 
 # libm: software float math (exp, sqrt, etc.) for no_std builds.
 # In std builds the compiler resolves f32::exp()/sqrt() via libc's libm.
