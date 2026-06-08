@@ -877,6 +877,7 @@ dependencies = [
  "skills",
  "users",
  "vita",
+ "workspace",
 ]
 
 [[package]]
@@ -2929,6 +2930,15 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser 0.248.0",
+]
+
+[[package]]
+name = "workspace"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
