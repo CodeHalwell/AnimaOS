@@ -932,6 +932,7 @@ dependencies = [
  "diagnostics",
  "feedback",
  "interoception",
+ "jobs",
  "knowledge-graph",
  "lifecycle",
  "llm-backends",
@@ -1215,6 +1216,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52f5385394064fa2c886205dba02598013ce83d3e92d33dbdc0c52fe0e7bf4fc"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "jobs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
