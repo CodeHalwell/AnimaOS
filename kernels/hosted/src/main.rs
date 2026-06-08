@@ -901,6 +901,22 @@ fn print_audit(manager: &LifecycleManager) {
             AuditEntry::ConsolidationFailed { agent_id, error } => {
                 println!("  ✗  consolidation_failed agent={agent_id} error={error}");
             }
+            // ── E26 — Tool Response Caching ─────────────────────────────────
+            AuditEntry::ToolCacheHit {
+                agent_id,
+                tool_id,
+                hit_age_ms,
+            } => {
+                println!(
+                    "  💾 tool_cache_hit agent={agent_id} tool={tool_id} age={hit_age_ms}ms"
+                );
+            }
+            AuditEntry::ToolCacheMiss { agent_id, tool_id } => {
+                println!("  🔍 tool_cache_miss agent={agent_id} tool={tool_id}");
+            }
+            AuditEntry::ToolCacheEvicted { agent_id, count } => {
+                println!("  🗑  tool_cache_evicted agent={agent_id} count={count}");
+            }
         }
     }
 }
@@ -1024,6 +1040,70 @@ fn print_user_audit(log: &AuditLog) {
         }
     }
     println!("---");
+}
+
+/// Implements the `anima cache` subcommands for the tool response cache (E26).
+///
+/// ```text
+/// anima-hosted cache stats          -- print hit/miss/eviction statistics
+/// anima-hosted cache clear          -- flush all cached entries
+/// anima-hosted cache warm <tool> <payload>  -- pre-populate one entry
+/// ```
+fn cmd_cache(args: &[String]) {
+    use praxis::ToolRegistry;
+    use tool_cache::CachedToolRegistry;
+
+    let registry = ToolRegistry::new();
+    let cached = CachedToolRegistry::with_defaults(registry);
+
+    let sub = args.first().map(String::as_str).unwrap_or("stats");
+    match sub {
+        "stats" => {
+            let s = cached.stats();
+            println!("=== Tool Cache Statistics ===");
+            println!("  entries : {}", s.current_entries);
+            println!("  hits    : {}", s.hits);
+            println!("  misses  : {}", s.misses);
+            println!("  hit_rate: {:.1}%", s.hit_rate() * 100.0);
+            println!("  ttl_evictions     : {}", s.ttl_evictions);
+            println!("  capacity_evictions: {}", s.capacity_evictions);
+        }
+        "clear" => {
+            cached.clear_cache();
+            println!("tool cache cleared");
+        }
+        "warm" => {
+            // anima cache warm <tool_id> <payload_utf8>
+            let tool_id = match args.get(1) {
+                Some(t) => t.as_str(),
+                None => {
+                    eprintln!("usage: anima cache warm <tool_id> <payload>");
+                    return;
+                }
+            };
+            let payload = args.get(2).map(|s| s.as_bytes()).unwrap_or(b"");
+            use praxis::{Bus, ToolEnvelope};
+            let env = ToolEnvelope::new(Bus::Mcp, tool_id, payload.to_vec(), 0);
+            match cached.dispatch(&env) {
+                Ok(resp) => {
+                    let s = cached.stats();
+                    println!(
+                        "cache warm: tool={tool_id} payload={} response_bytes={} entries={}",
+                        args.get(2).map(String::as_str).unwrap_or(""),
+                        resp.len(),
+                        s.current_entries
+                    );
+                }
+                Err(e) => {
+                    eprintln!("cache warm failed for {tool_id}: {e:?}");
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown cache subcommand: {other}");
+            eprintln!("usage: anima cache [stats|clear|warm]");
+        }
+    }
 }
 
 /// Implements the `anima users` subcommands for managing per-user profiles.
@@ -2549,6 +2629,10 @@ fn main() {
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("cache") {
+        cmd_cache(&args[1..]);
         return;
     }
     if args.first().map(String::as_str) == Some("doctor") {

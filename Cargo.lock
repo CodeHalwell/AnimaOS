@@ -875,6 +875,7 @@ dependencies = [
  "senses",
  "serde_json",
  "skills",
+ "tool-cache",
  "users",
  "vita",
 ]
@@ -2095,6 +2096,13 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+
+[[package]]
+name = "tool-cache"
+version = "0.1.0"
+dependencies = [
+ "praxis",
+]
 
 [[package]]
 name = "tower"

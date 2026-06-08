@@ -1192,6 +1192,42 @@ pub enum AuditEntry {
         /// Error description from the tuner.
         error: String,
     },
+
+    // ── E26 — Tool Response Caching ───────────────────────────────────────────
+    /// A cached tool response was returned without invoking the tool (E26).
+    ///
+    /// Emitted by callers using [`tool_cache::CachedToolRegistry::dispatch_with_outcome`]
+    /// when the outcome is [`tool_cache::CacheOutcome::Hit`].
+    ToolCacheHit {
+        /// Agent identifier.
+        agent_id: String,
+        /// Tool whose response was served from cache.
+        tool_id: String,
+        /// Age of the cached entry at the time of the hit (milliseconds).
+        hit_age_ms: u64,
+    },
+
+    /// The tool cache was queried but no valid entry was found (E26).
+    ///
+    /// Emitted when the outcome is [`tool_cache::CacheOutcome::Miss`]; the tool
+    /// was invoked normally after this event.
+    ToolCacheMiss {
+        /// Agent identifier.
+        agent_id: String,
+        /// Tool that was invoked following the miss.
+        tool_id: String,
+    },
+
+    /// Expired tool-cache entries were removed (E26).
+    ///
+    /// Emitted after a call to [`tool_cache::ToolCache::evict_expired`] that
+    /// removed at least one entry.
+    ToolCacheEvicted {
+        /// Agent identifier.
+        agent_id: String,
+        /// Number of entries removed.
+        count: usize,
+    },
 }
 
 // ── AuditLog ──────────────────────────────────────────────────────────────────

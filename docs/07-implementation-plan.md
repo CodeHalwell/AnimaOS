@@ -3098,3 +3098,75 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 6. `cargo test --workspace` green; 36 new users tests + all prior tests pass. ✅
 7. `cargo clippy --workspace -- -D warnings` clean. ✅
 8. `cargo fmt --check` clean. ✅
+
+---
+
+## Stage 9 — Performance and Operational Efficiency
+
+Operational reliability, performance observability, and API infrastructure
+for production deployments of AnimaOS.
+
+### Epic E26 — Tool Response Caching with TTL and Deduplication ✅
+
+**Scope.** A transparent caching layer for the `praxis` tool dispatch path
+that reduces redundant computation and LLM-side API cost. Idempotent tool
+calls are served from an in-process store keyed on `(tool_id, payload_hash)`;
+non-idempotent tools are bypassed via a configurable list. TTL expiry prevents
+stale responses; capacity eviction (oldest-first) bounds memory usage.
+
+**Dependencies.** E2.3 (`ToolRegistry`, `ToolDriver`, `ToolEnvelope`), EX.2
+(audit log for cache hit/miss/eviction events).
+
+**New crate: `crates/tool-cache`.**
+`Cargo.toml` dependencies: `praxis` (workspace).  `#![forbid(unsafe_code)]`.
+Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
+
+**Stories.**
+- S26.1 `CacheConfig`: `default_ttl_ms`, `max_entries`, `bypass_tools`,
+  `tool_ttl_overrides` (per-tool TTL override map). ✅
+  (`crates/tool-cache/src/lib.rs` — `Default` sets 60 s TTL, 1 024 entries,
+  `"clock"` bypassed; `CacheConfig::with_ttl` convenience constructor)
+- S26.2 `ToolCache`: thread-safe `Arc<Mutex<HashMap>>` store with `get`,
+  `insert`, `evict_expired`, `clear`, `stats`, `len`. ✅
+  (FNV-1a hash of payload bytes as cache key; lazy TTL eviction on read;
+  eager sweep via `evict_expired`; `Clone` shares the same underlying store)
+- S26.3 Capacity eviction: oldest-insertion-time entry displaced when
+  `max_entries` is reached and a new key is inserted. ✅
+  (`capacity_limit_evicts_oldest_entry` test)
+- S26.4 `CacheStats`: `hits`, `misses`, `ttl_evictions`, `capacity_evictions`,
+  `current_entries`; `hit_rate()` and `total_lookups()` helpers. ✅
+- S26.5 `CacheOutcome`: `Hit { age_ms }`, `Miss`, `Bypassed` — returned by
+  `CachedToolRegistry::dispatch_with_outcome` for upstream audit integration. ✅
+- S26.6 `CachedToolRegistry`: wraps `ToolRegistry` with `ToolCache`; provides
+  `dispatch` (discards outcome) and `dispatch_with_outcome` (returns
+  `CacheOutcome`); failed invocations are never cached. ✅
+- S26.7 Audit integration: three new `AuditEntry` variants added to
+  `crates/vita/src/audit.rs` — `ToolCacheHit { agent_id, tool_id, hit_age_ms }`,
+  `ToolCacheMiss { agent_id, tool_id }`, `ToolCacheEvicted { agent_id, count }`;
+  `print_audit` arms in `kernels/hosted/src/main.rs` with `💾 / 🔍 / 🗑` prefixes. ✅
+- S26.8 `anima cache` CLI subcommand (`stats`, `clear`, `warm`). ✅
+  (`cmd_cache()` in `kernels/hosted/src/main.rs`)
+
+**Exit criteria.**
+1. Cache hit on the second identical dispatch; miss on the first. ✅
+   (`second_dispatch_of_same_call_is_a_cache_hit`,
+   `cached_response_matches_original`)
+2. Bypassed tools are never cached; the `clock` tool is bypassed by default. ✅
+   (`bypassed_tool_is_never_cached`,
+   `bypassed_tool_always_returns_live_result`,
+   `dispatch_with_outcome_reports_bypassed_for_clock`)
+3. Expired entries are evicted lazily on read and eagerly via `evict_expired`. ✅
+   (`expired_entry_is_evicted_on_read`,
+   `evict_expired_removes_only_expired_entries`)
+4. Capacity limit displaces the oldest entry; counter incremented. ✅
+   (`capacity_limit_evicts_oldest_entry`)
+5. Failed invocations are not cached; error is returned to the caller. ✅
+   (`failed_dispatch_is_not_cached`)
+6. Concurrent readers and writers produce no panics. ✅
+   (`concurrent_reads_do_not_panic` — 8 threads × 50 dispatches)
+7. `CacheOutcome` discriminates `Hit`, `Miss`, and `Bypassed` for audit callers. ✅
+   (`dispatch_with_outcome_returns_hit_on_second_call`,
+   `dispatch_with_outcome_reports_bypassed_for_clock`)
+8. `cargo test --workspace` green; 28 new cache tests + all prior tests pass. ✅
+9. `cargo clippy --workspace -- -D warnings` clean. ✅
+10. `cargo fmt --check` clean. ✅
