@@ -34,6 +34,7 @@
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use scheduler::backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
@@ -44,20 +45,85 @@ use scheduler::backend::{
 /// Maximum frame body accepted from the worker (guards against corrupt length fields).
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024; // 16 MiB
 
-fn read_frame(r: &mut impl Read) -> std::io::Result<serde_json::Value> {
-    let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_FRAME_LEN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("worker frame too large: {len} bytes (max {MAX_FRAME_LEN})"),
-        ));
+/// Overall deadline for the worker to connect to the listener after spawning.
+/// A worker that hangs without exiting (e.g. stuck loading a model) is detected
+/// here rather than pinning the calling task forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Per-read timeout on the connected stream so the cancellation check between
+/// frames can fire even when the worker stalls mid-stream.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Outcome of a non-blocking frame read.
+enum FrameRead {
+    /// A complete frame was decoded.
+    Frame(serde_json::Value),
+    /// No complete frame is available yet and the read timed out — the caller
+    /// should re-check cancellation and retry. Any bytes already received are
+    /// retained in the reader's buffer.
+    Timeout,
+    /// The peer closed the connection cleanly.
+    Eof,
+}
+
+/// Incremental, timeout-tolerant frame reader.
+///
+/// Using `read_exact` directly with a socket read timeout is unsafe: a timeout
+/// mid-header or mid-body consumes bytes that are then lost on retry, which
+/// desyncs the length-prefix framing. This reader accumulates whatever bytes
+/// arrive into an internal buffer and only decodes a frame once the full
+/// `4-byte length + body` is present, so a timeout never discards progress.
+struct FrameReader {
+    buf: Vec<u8>,
+}
+
+impl FrameReader {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
     }
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body)?;
-    serde_json::from_slice(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+
+    /// Removes and returns one complete frame from the buffer, if present.
+    fn take_frame(&mut self) -> std::io::Result<Option<serde_json::Value>> {
+        if self.buf.len() < 4 {
+            return Ok(None);
+        }
+        let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        if len > MAX_FRAME_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("worker frame too large: {len} bytes (max {MAX_FRAME_LEN})"),
+            ));
+        }
+        if self.buf.len() < 4 + len {
+            return Ok(None);
+        }
+        let body = self.buf[4..4 + len].to_vec();
+        self.buf.drain(0..4 + len);
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    fn read_frame(&mut self, r: &mut impl Read) -> std::io::Result<FrameRead> {
+        loop {
+            if let Some(frame) = self.take_frame()? {
+                return Ok(FrameRead::Frame(frame));
+            }
+            let mut chunk = [0u8; 8192];
+            match r.read(&mut chunk) {
+                Ok(0) => return Ok(FrameRead::Eof),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return Ok(FrameRead::Timeout);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 fn write_frame(w: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
@@ -198,10 +264,13 @@ impl HfTransformersBackend {
 
         // Non-blocking accept with child-exit detection: if the Python worker
         // crashes before connecting (bad environment, missing deps, etc.) the
-        // loop returns an error instead of hanging forever.
+        // loop returns an error instead of hanging forever.  An overall connect
+        // deadline also bounds the wait so a worker that hangs *without* exiting
+        // (e.g. wedged loading a model) is detected too.
         listener
             .set_nonblocking(true)
             .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
+        let connect_deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
         let (mut stream, _addr) = loop {
             match listener.accept() {
                 Ok(res) => break res,
@@ -213,7 +282,18 @@ impl HfTransformersBackend {
                                 "transformers worker exited before connecting (status: {status})"
                             )));
                         }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Ok(None) => {
+                            if std::time::Instant::now() >= connect_deadline {
+                                child.kill().ok();
+                                child.wait().ok();
+                                std::fs::remove_file(&socket_path).ok();
+                                return Err(LlmBackendError::Provider(format!(
+                                    "transformers worker did not connect within {:?}",
+                                    CONNECT_TIMEOUT
+                                )));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(50))
+                        }
                         Err(e) => {
                             child.kill().ok();
                             std::fs::remove_file(&socket_path).ok();
@@ -231,6 +311,13 @@ impl HfTransformersBackend {
         stream
             .set_nonblocking(false)
             .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
+        // Read timeout so the cancellation check between frames can fire even if
+        // the worker stalls mid-stream (a blocked read would otherwise pin the
+        // task forever).  A timed-out read surfaces as WouldBlock/TimedOut, which
+        // we treat as "retry after re-checking cancellation".
+        stream
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
 
         let request = serde_json::json!({
             "type": "infer",
@@ -240,6 +327,7 @@ impl HfTransformersBackend {
         write_frame(&mut stream, &request).map_err(|e| LlmBackendError::Provider(e.to_string()))?;
 
         let mut completions = Vec::new();
+        let mut reader = FrameReader::new();
         loop {
             if cancel.is_cancelled() {
                 child.kill().ok();
@@ -247,8 +335,8 @@ impl HfTransformersBackend {
                 std::fs::remove_file(&socket_path).ok();
                 return Err(LlmBackendError::Cancelled);
             }
-            match read_frame(&mut stream) {
-                Ok(frame) => {
+            match reader.read_frame(&mut stream) {
+                Ok(FrameRead::Frame(frame)) => {
                     let frame_type = frame.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     match frame_type {
                         "token" => {
@@ -273,10 +361,15 @@ impl HfTransformersBackend {
                         _ => {}
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Clean EOF: the worker closed after streaming.
+                Ok(FrameRead::Eof) => {
                     completions.push(StreamingCompletion::Done);
                     break;
                 }
+                // Read timed out: no full frame yet but the stream is still
+                // alive and partial bytes are preserved. Loop back so the
+                // cancellation check above can fire.
+                Ok(FrameRead::Timeout) => continue,
                 Err(e) => {
                     child.kill().ok();
                     child.wait().ok();

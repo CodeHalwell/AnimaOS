@@ -399,16 +399,41 @@ impl PlaywrightDriver {
     }
 }
 
+/// Re-screen a post-redirect / final resolved URL through the egress guard,
+/// failing closed (returning `Err`) when the guard denies it.
+///
+/// The live driver follows redirects inside the worker, so the URL that
+/// actually got fetched may differ from the one `screen_url` vetted up front.
+/// Running the final URL back through the guard closes the SSRF gap where a
+/// public origin issues a `30x` redirect to a loopback / link-local / metadata
+/// address.
+#[cfg(feature = "live")]
+fn screen_redirect_target(guard: &EgressGuard, final_url: &str) -> Result<(), String> {
+    if let EgressVerdict::Deny(reason) = guard.check_url(final_url) {
+        return Err(format!(
+            "egress-blocked (post-redirect): {}",
+            reason.description()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "live")]
 impl BrowserDriver for PlaywrightDriver {
     fn navigate(&self, url: &str) -> Result<PageState, String> {
         let result = self.run_command("navigate", url, None)?;
+        let final_url = result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(url)
+            .to_string();
+        // Re-screen the *post-redirect* URL: the worker follows 30x redirects, so
+        // a public origin can redirect to `http://169.254.169.254/` or
+        // `localhost` and slip past the initial `screen_url` check. Fail closed
+        // if the resolved URL is denied by the egress guard.
+        screen_redirect_target(&self.egress_guard, &final_url)?;
         Ok(PageState {
-            url: result
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or(url)
-                .to_string(),
+            url: final_url,
             title: result
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -706,6 +731,29 @@ mod tests {
     use super::*;
 
     const EXAMPLE_URL: &str = "https://example.com/page";
+
+    // ── Post-redirect re-screening (live driver, S7.2) ─────────────────────────
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn redirect_target_rescreen_blocks_metadata_and_localhost() {
+        let guard = EgressGuard::default();
+        // A public origin redirecting to internal targets must be rejected when
+        // the final URL is re-screened.
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://169.254.169.254/",
+            "https://localhost/admin",
+            "https://127.0.0.1/",
+            "https://[::ffff:169.254.169.254]/",
+        ] {
+            let res = screen_redirect_target(&guard, bad);
+            assert!(res.is_err(), "expected {bad} to be blocked post-redirect");
+            assert!(res.unwrap_err().contains("egress-blocked (post-redirect)"));
+        }
+        // A benign public final URL still passes.
+        assert!(screen_redirect_target(&guard, "https://example.com/landing").is_ok());
+    }
 
     fn sample_driver() -> MockBrowserDriver {
         MockBrowserDriver::new().with_page(

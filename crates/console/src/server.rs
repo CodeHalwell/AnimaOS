@@ -341,16 +341,23 @@ impl ConsoleServer {
         };
         if let Some(h) = auth_header {
             if let Some(tok) = h.strip_prefix("Bearer ") {
-                if tok == expected {
+                // Constant-time compare so a network attacker can't recover the
+                // token byte-by-byte from response-timing differences.
+                if constant_time_str_eq(tok, expected) {
                     return true;
                 }
             }
         }
-        // EventSource can't set headers — accept ?token= as well.
+        // EventSource can't set request headers, so we also accept the token as a
+        // `?token=` query parameter. This is a deliberate trade-off: query
+        // strings are more prone to leaking into proxy/access logs than headers,
+        // but it is the only way browser EventSource clients can authenticate.
+        // The lockout limiter (per-IP) and constant-time comparison mitigate the
+        // brute-force / timing risk this introduces.
         query
             .split('&')
             .filter_map(|kv| kv.split_once('='))
-            .any(|(k, v)| k == "token" && v == expected)
+            .any(|(k, v)| k == "token" && constant_time_str_eq(v, expected))
     }
 
     /// Stream the live event feed as Server-Sent Events. Blocks this
@@ -522,6 +529,24 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Constant-time string equality for secret comparison.
+///
+/// Folds an XOR accumulator over the bytes so the running time depends only on
+/// the input length, not on where the first differing byte appears — denying a
+/// network attacker a timing oracle for recovering the bearer token. Differing
+/// lengths return `false` without a content short-circuit.
+fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn write_sse(out: &mut TcpStream, event: &OperatorEvent) -> std::io::Result<()> {
@@ -783,6 +808,44 @@ mod tests {
             "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         );
         assert!(resp.contains("200 OK"));
+    }
+
+    #[test]
+    fn token_accepted_as_query_param_for_eventsource() {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("t"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: Some("sekret".into()),
+            },
+        );
+        let (addr, _h) = server.spawn().unwrap();
+
+        // EventSource can't set headers; the ?token= query param must authorise.
+        let resp = http_request(
+            addr,
+            "GET /?token=sekret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+
+        // A wrong query token is still rejected.
+        let resp = http_request(
+            addr,
+            "GET /?token=nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("401"), "resp: {resp}");
+    }
+
+    #[test]
+    fn constant_time_str_eq_matches_naive_equality() {
+        assert!(constant_time_str_eq("sekret", "sekret"));
+        assert!(!constant_time_str_eq("sekret", "sekreT"));
+        assert!(!constant_time_str_eq("sekret", "sekre")); // length mismatch
+        assert!(!constant_time_str_eq("", "x"));
+        assert!(constant_time_str_eq("", ""));
     }
 
     #[test]

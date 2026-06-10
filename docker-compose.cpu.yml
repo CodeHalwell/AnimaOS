@@ -40,7 +40,8 @@ services:
   hosted:
     environment:
       ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
-      # Match the workhorse model pulled above.
-      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M}
+      # Default to the workhorse model pulled above so the two can't drift; an
+      # explicit ANIMA_OLLAMA_MODEL still wins.
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-${ANIMA_WORKHORSE_MODEL:-hf.co/bartowski/Phi-3.5-mini-instruct-GGUF:Q4_K_M}}
       # Reduce context window to keep RAM usage manageable on CPU hosts.
       ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-4096}

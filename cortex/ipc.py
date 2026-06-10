@@ -54,13 +54,26 @@ _LENGTH_PREFIX_SIZE = 4
 
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
-def _recv_exactly(sock: socket.socket, n: int) -> bytes | None:
-    """Read exactly *n* bytes from *sock*, returning ``None`` on EOF."""
+def _recv_exactly(
+    sock: socket.socket, n: int, *, at_boundary: bool = False
+) -> bytes | None:
+    """Read exactly *n* bytes from *sock*.
+
+    Returns ``None`` only on a *clean* EOF at a message boundary (i.e. the peer
+    closed before any bytes of the next frame arrived, with ``at_boundary``
+    set). A short read after some bytes have arrived — or any EOF mid-body — is
+    a truncated frame and raises ``ConnectionError`` rather than masquerading
+    as an orderly close (L1).
+    """
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
-            return None
+            if at_boundary and not buf:
+                return None
+            raise ConnectionError(
+                f"truncated IPC frame: expected {n} bytes, got {len(buf)} before EOF"
+            )
         buf.extend(chunk)
     return bytes(buf)
 
@@ -73,7 +86,7 @@ def recv_message(sock: socket.socket) -> dict[str, Any] | None:
     Returns ``None`` when the peer has closed the connection.
     Raises ``ValueError`` for malformed JSON or length overflow.
     """
-    header = _recv_exactly(sock, _LENGTH_PREFIX_SIZE)
+    header = _recv_exactly(sock, _LENGTH_PREFIX_SIZE, at_boundary=True)
     if header is None:
         return None
 
@@ -81,9 +94,8 @@ def recv_message(sock: socket.socket) -> dict[str, Any] | None:
     if length > 64 * 1024 * 1024:  # sanity cap: 64 MiB
         raise ValueError(f"IPC message too large: {length} bytes")
 
+    # A short/absent body here is a truncated frame, not a clean close.
     body = _recv_exactly(sock, length)
-    if body is None:
-        return None
 
     return json.loads(body.decode("utf-8"))
 

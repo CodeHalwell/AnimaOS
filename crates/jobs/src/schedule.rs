@@ -9,13 +9,22 @@
 //!
 //! # Cron syntax
 //!
-//! Supports three per-field forms:
+//! Supports the following per-field forms (standard cron semantics):
 //! - `*` — any value (wildcard).
 //! - `N` — exact numeric value.
+//! - `A-B` — inclusive range (e.g. `1-5` = 1,2,3,4,5).
+//! - `A,B,C` — list of values and/or ranges (e.g. `1,3,5` or `0,9-17`).
 //! - `*/N` — every N steps from zero (e.g. `*/15` in the minute field = 0, 15, 30, 45).
+//! - `A-B/N` — every N steps across a range (e.g. `0-30/10` = 0, 10, 20, 30).
 //!
 //! Field order: **minute hour day-of-month month day-of-week**
 //! (0–59, 0–23, 1–31, 1–12, 0–6 where 0 = Sunday).
+//!
+//! # Time zone
+//!
+//! Cron expressions are evaluated in **UTC**. There is no time-zone support;
+//! `09:00` in a cron expression means 09:00 UTC regardless of the host's local
+//! time zone.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,8 +42,10 @@ pub enum JobSchedule {
         at_ns: u64,
     },
     /// Fire whenever the cron expression matches the current wall-clock minute.
+    ///
+    /// Cron expressions are evaluated in **UTC** (no time-zone support).
     Cron {
-        /// 5-field cron string, e.g. `"0 9 * * 1-5"`.
+        /// 5-field cron string, e.g. `"0 9 * * 1-5"` (09:00 UTC, Mon–Fri).
         expression: String,
     },
 }
@@ -66,6 +77,9 @@ impl JobSchedule {
 
 /// Returns `true` when `expression` matches `now_ns` and the job has not
 /// already fired during the current minute (guarded by `last_fired_ns`).
+///
+/// A malformed expression always returns `false` (defensive fallback);
+/// expressions should be rejected at creation time via [`validate_cron`].
 pub fn is_cron_due(expression: &str, now_ns: u64, last_fired_ns: u64) -> bool {
     let secs = now_ns / 1_000_000_000;
     let (minute, hour, day, month, weekday) = decompose_unix_secs(secs);
@@ -90,19 +104,160 @@ pub fn is_cron_due(expression: &str, now_ns: u64, last_fired_ns: u64) -> bool {
     last_fired_ns < current_minute_start_ns
 }
 
-/// Returns `true` when `field` (one of `*`, `N`, or `*/N`) matches `value`.
+/// Validates a 5-field cron expression, returning a human-readable error
+/// describing the first problem found.
+///
+/// This is intended to be called at job-creation time so a malformed
+/// expression is rejected loudly instead of being persisted and silently
+/// never firing. The accepted per-field forms are documented on the
+/// [module](crate::schedule); each field must consist of `*`, `N`, `A-B`,
+/// `A,B,C`, `*/N`, or `A-B/N` combinations.
+///
+/// Numeric field values are bounds-checked against their standard domains so
+/// a typo like `0 25 * * *` (hour 25) is rejected at creation rather than
+/// silently never firing. Structurally invalid fields (non-numeric, zero
+/// step, reversed range) are rejected too.
+pub fn validate_cron(expression: &str) -> Result<(), String> {
+    let parts: Vec<&str> = expression.split_whitespace().collect();
+    if parts.len() != 5 {
+        return Err(format!(
+            "cron expression must have exactly 5 fields, found {}: {expression:?}",
+            parts.len()
+        ));
+    }
+    // (label, inclusive min, inclusive max) per standard cron field.
+    let fields = [
+        ("minute", 0, 59),
+        ("hour", 0, 23),
+        ("day-of-month", 1, 31),
+        ("month", 1, 12),
+        ("day-of-week", 0, 6),
+    ];
+    for (field, (label, min, max)) in parts.iter().zip(fields) {
+        validate_field(field, min, max)
+            .map_err(|e| format!("invalid {label} field {field:?}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Validates a single cron field against the `[min, max]` domain.
+fn validate_field(field: &str, min: u64, max: u64) -> Result<(), String> {
+    if field.is_empty() {
+        return Err("empty field".to_owned());
+    }
+    // A field is a comma-separated list of items; each item is `*`, `N`,
+    // `A-B`, `*/N`, or `A-B/N`.
+    for item in field.split(',') {
+        validate_item(item, min, max)?;
+    }
+    Ok(())
+}
+
+/// Validates a single comma-separated item within a cron field.
+fn validate_item(item: &str, min: u64, max: u64) -> Result<(), String> {
+    if item.is_empty() {
+        return Err("empty list element".to_owned());
+    }
+
+    // Split an optional `/N` step suffix.
+    let (base, step) = match item.split_once('/') {
+        Some((base, step_str)) => {
+            match step_str.parse::<u64>() {
+                Ok(n) if n > 0 => {}
+                _ => return Err(format!("step must be a positive integer in {item:?}")),
+            }
+            (base, true)
+        }
+        None => (item, false),
+    };
+
+    if base == "*" {
+        return Ok(());
+    }
+
+    let in_bounds = |n: u64| -> Result<u64, String> {
+        if n < min || n > max {
+            Err(format!("value {n} is out of bounds ({min}-{max})"))
+        } else {
+            Ok(n)
+        }
+    };
+
+    // The base is either a single value `N` or a range `A-B`.
+    match base.split_once('-') {
+        Some((a, b)) => {
+            let a: u64 = a
+                .parse()
+                .map_err(|_| format!("range start {a:?} is not a number"))?;
+            let b: u64 = b
+                .parse()
+                .map_err(|_| format!("range end {b:?} is not a number"))?;
+            if a > b {
+                return Err(format!("range start {a} is greater than end {b}"));
+            }
+            in_bounds(a)?;
+            in_bounds(b)?;
+            Ok(())
+        }
+        None => {
+            if step {
+                // `N/M` without a range is not valid cron; require `*` or a range.
+                return Err(format!(
+                    "step requires `*` or a range before `/` in {item:?}"
+                ));
+            }
+            let n = base
+                .parse::<u64>()
+                .map_err(|_| format!("{base:?} is not a number"))?;
+            in_bounds(n)?;
+            Ok(())
+        }
+    }
+}
+
+/// Returns `true` when `field` matches `value`.
+///
+/// Supports `*`, `N`, `A-B`, `A,B,C` (lists of values/ranges), `*/N`, and
+/// `A-B/N`. Returns `false` for any structurally invalid field.
 fn field_matches(field: &str, value: u64) -> bool {
-    if field == "*" {
-        return true;
-    }
-    if let Some(step_str) = field.strip_prefix("*/") {
-        let n: u64 = match step_str.parse() {
-            Ok(n) if n > 0 => n,
+    field.split(',').any(|item| item_matches(item, value))
+}
+
+/// Returns `true` when a single comma-separated `item` matches `value`.
+fn item_matches(item: &str, value: u64) -> bool {
+    // Split optional `/N` step.
+    let (base, step) = match item.split_once('/') {
+        Some((base, step_str)) => match step_str.parse::<u64>() {
+            Ok(n) if n > 0 => (base, Some(n)),
             _ => return false,
+        },
+        None => (item, None),
+    };
+
+    // Determine the inclusive [lo, hi] range the base covers.
+    let (lo, hi) = if base == "*" {
+        // Unbounded wildcard: anchor stepping at zero.
+        (0, u64::MAX)
+    } else if let Some((a, b)) = base.split_once('-') {
+        match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(a), Ok(b)) if a <= b => (a, b),
+            _ => return false,
+        }
+    } else {
+        // Single value: a bare `N` (no step) matches exactly; `N/M` is invalid.
+        return match base.parse::<u64>() {
+            Ok(n) => step.is_none() && n == value,
+            Err(_) => false,
         };
-        return value.is_multiple_of(n);
+    };
+
+    if value < lo || value > hi {
+        return false;
     }
-    field.parse::<u64>() == Ok(value)
+    match step {
+        Some(n) => (value - lo).is_multiple_of(n),
+        None => true,
+    }
 }
 
 /// Decomposes a Unix seconds timestamp into `(minute, hour, day, month, weekday)`.
@@ -298,6 +453,108 @@ mod tests {
     #[test]
     fn field_matches_rejects_zero_step() {
         assert!(!field_matches("*/0", 0));
+    }
+
+    #[test]
+    fn field_matches_range() {
+        // "1-5" matches 1,2,3,4,5 but not 0 or 6.
+        assert!(!field_matches("1-5", 0));
+        for v in 1..=5 {
+            assert!(field_matches("1-5", v), "expected {v} to match 1-5");
+        }
+        assert!(!field_matches("1-5", 6));
+    }
+
+    #[test]
+    fn field_matches_list() {
+        // "1,3,5" matches exactly those values.
+        assert!(field_matches("1,3,5", 1));
+        assert!(field_matches("1,3,5", 3));
+        assert!(field_matches("1,3,5", 5));
+        assert!(!field_matches("1,3,5", 2));
+        assert!(!field_matches("1,3,5", 4));
+    }
+
+    #[test]
+    fn field_matches_list_of_ranges_and_values() {
+        // "0,9-17" matches 0 and 9..=17.
+        assert!(field_matches("0,9-17", 0));
+        assert!(field_matches("0,9-17", 9));
+        assert!(field_matches("0,9-17", 17));
+        assert!(!field_matches("0,9-17", 8));
+        assert!(!field_matches("0,9-17", 18));
+        assert!(!field_matches("0,9-17", 1));
+    }
+
+    #[test]
+    fn field_matches_step_over_range() {
+        // "0-30/10" matches 0,10,20,30.
+        for v in [0, 10, 20, 30] {
+            assert!(field_matches("0-30/10", v), "expected {v} to match 0-30/10");
+        }
+        assert!(!field_matches("0-30/10", 5));
+        assert!(!field_matches("0-30/10", 40)); // outside the range
+    }
+
+    #[test]
+    fn field_matches_rejects_reversed_range() {
+        assert!(!field_matches("5-1", 3));
+    }
+
+    #[test]
+    fn cron_weekday_range_matches_documented_example() {
+        // "0 9 * * 1-5" — 09:00 UTC Mon–Fri. T_09_30 is Monday (weekday 1).
+        // Use a 09:00 timestamp to match the minute=0 field.
+        // 2024-01-15 09:00:00 UTC = 1705309200.
+        let nine_am = 1_705_309_200_u64 * 1_000_000_000;
+        let s = JobSchedule::Cron {
+            expression: "0 9 * * 1-5".to_owned(),
+        };
+        assert!(
+            s.is_due(nine_am, 0),
+            "Monday 09:00 should match 0 9 * * 1-5"
+        );
+    }
+
+    #[test]
+    fn cron_minute_list_matches() {
+        // "0,30 9 * * *" should match minute 30.
+        let s = JobSchedule::Cron {
+            expression: "0,30 9 * * *".to_owned(),
+        };
+        assert!(s.is_due(T_2024_01_15_09_30, 0));
+    }
+
+    #[test]
+    fn validate_cron_accepts_valid_expressions() {
+        for expr in [
+            "* * * * *",
+            "30 9 * * *",
+            "0 9 * * 1-5",
+            "0,30 9 * * *",
+            "*/15 * * * *",
+            "0-30/10 * * * *",
+            "0 9-17 * * 1,3,5",
+        ] {
+            assert!(validate_cron(expr).is_ok(), "expected {expr:?} to validate");
+        }
+    }
+
+    #[test]
+    fn validate_cron_rejects_wrong_field_count() {
+        assert!(validate_cron("* * * *").is_err());
+        assert!(validate_cron("* * * * * *").is_err());
+        assert!(validate_cron("").is_err());
+    }
+
+    #[test]
+    fn validate_cron_rejects_malformed_fields() {
+        assert!(validate_cron("not-a-cron word here now").is_err());
+        assert!(validate_cron("60 abc * * *").is_err());
+        assert!(validate_cron("*/0 * * * *").is_err()); // zero step
+        assert!(validate_cron("5-1 * * * *").is_err()); // reversed range
+        assert!(validate_cron("1,,3 * * * *").is_err()); // empty list element
+        assert!(validate_cron("5/2 * * * *").is_err()); // step without range/wildcard
     }
 
     #[test]

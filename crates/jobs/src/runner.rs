@@ -8,7 +8,7 @@
 //! and "how should I update the registry after a run?"
 
 use crate::{
-    job::{JobStatus, LastRun},
+    job::{JobStatus, LastRun, ScheduledJob},
     registry::JobRegistry,
     schedule::JobSchedule,
 };
@@ -68,10 +68,7 @@ pub fn due_job_ids(registry: &JobRegistry, now_ns: u64) -> Vec<String> {
     let mut ids: Vec<String> = registry
         .iter()
         .filter(|(_, job)| job.is_active())
-        .filter(|(_, job)| {
-            let last_fired = job.last_run.as_ref().map_or(0, |r| r.fired_at_ns);
-            job.schedule.is_due(now_ns, last_fired)
-        })
+        .filter(|(_, job)| job_is_due(job, now_ns))
         .map(|(id, _)| id.to_owned())
         .collect();
     // Deterministic order for consistent audit entries.
@@ -79,15 +76,53 @@ pub fn due_job_ids(registry: &JobRegistry, now_ns: u64) -> Vec<String> {
     ids
 }
 
+/// Determines whether an active `job` is due to fire at `now_ns`.
+///
+/// For recurring (cron) jobs this delegates straight to
+/// [`JobSchedule::is_due`].  For one-shot jobs ([`JobSchedule::Immediate`] /
+/// [`JobSchedule::Once`]) it additionally handles the retry case: a one-shot
+/// job that has only ever *failed* and still has retry budget remains due once
+/// `retry_delay_secs` has elapsed since the last attempt, rather than being
+/// permanently retired after its first failure.
+fn job_is_due(job: &ScheduledJob, now_ns: u64) -> bool {
+    match &job.last_run {
+        // Never fired: defer entirely to the schedule.
+        None => {
+            let last_fired = 0;
+            job.schedule.is_due(now_ns, last_fired)
+        }
+        // A prior successful run on a one-shot job is terminal (the status will
+        // already be Completed, so this is mostly defensive).
+        Some(last) if last.success && is_one_shot(&job.schedule) => false,
+        // A prior *failed* run on a one-shot job: eligible to retry once the
+        // configured delay has elapsed, provided retry budget remains. (Budget
+        // exhaustion flips the status to Failed in `record_run_result`, so such
+        // jobs are filtered out earlier by `is_active`.)
+        Some(last) if !last.success && is_one_shot(&job.schedule) => {
+            let delay_ns = job
+                .retry_policy
+                .retry_delay_secs
+                .saturating_mul(1_000_000_000);
+            now_ns >= last.fired_at_ns.saturating_add(delay_ns)
+        }
+        // Recurring jobs: defer to the schedule using the last firing time.
+        Some(last) => job.schedule.is_due(now_ns, last.fired_at_ns),
+    }
+}
+
 // ── record_run_result ─────────────────────────────────────────────────────────
 
 /// Updates a job in the registry to reflect the outcome of an execution.
 ///
 /// Transitions:
-/// - Success on a one-shot job → [`JobStatus::Completed`].
+/// - Success on a one-shot job → [`JobStatus::Completed`] (terminal).
 /// - Success on a recurring job → `consecutive_failures` reset to 0.
 /// - Failure → `consecutive_failures` incremented; if it reaches
-///   `retry_policy.max_attempts` → [`JobStatus::Failed`].
+///   `retry_policy.max_attempts` → [`JobStatus::Failed`] (terminal). Otherwise
+///   the job stays [`JobStatus::Active`] and remains retry-eligible. For
+///   one-shot jobs this means a failure does *not* retire the job: it stays due
+///   (after `retry_policy.retry_delay_secs`) until it either succeeds or
+///   exhausts its retry budget. See [`due_job_ids`].
 pub fn record_run_result(
     registry: &mut JobRegistry,
     job_id: &str,
@@ -341,19 +376,82 @@ mod tests {
     }
 
     #[test]
-    fn record_run_result_fails_job_after_max_retries() {
+    fn one_shot_job_reaches_failed_after_max_attempts_via_real_cycle() {
+        // Drive a one-shot job through the real is_due → run → record cycle and
+        // assert it reaches Failed exactly after `max_attempts` failures, rather
+        // than becoming an un-retryable zombie after the first failure.
         let mut reg = JobRegistry::in_memory();
         let job = immediate_job("doomed");
         let id = job.job_id.clone();
-        assert_eq!(reg.add(job), Ok(())); // max_attempts = 3
+        let max = job.retry_policy.max_attempts; // 3
+        let delay_ns = job.retry_policy.retry_delay_secs * 1_000_000_000;
+        reg.add(job).unwrap();
 
-        for attempt in 1..=3 {
-            let result = RunResult::failure(&id, 1, attempt, "error");
-            record_run_result(&mut reg, &id, &result, NOW + attempt as u64);
+        let mut now = NOW;
+        for expected_attempt in 1..=max {
+            // The job must be due on each attempt while budget remains.
+            let due = due_job_ids(&reg, now);
+            assert_eq!(
+                due,
+                vec![id.clone()],
+                "job should be due on attempt {expected_attempt}"
+            );
+
+            let result = RunResult::failure(&id, 1, expected_attempt, "boom");
+            record_run_result(&mut reg, &id, &result, now);
+
+            if expected_attempt < max {
+                // Still has budget → Active, but not due until retry delay elapses.
+                assert_eq!(reg.get(&id).unwrap().status, JobStatus::Active);
+                assert!(
+                    due_job_ids(&reg, now).is_empty(),
+                    "must not be immediately re-due within retry delay"
+                );
+                // Advance past the retry delay for the next iteration.
+                now += delay_ns + 1;
+            }
         }
 
+        // Budget exhausted → Failed and no longer due.
         assert_eq!(reg.get(&id).unwrap().status, JobStatus::Failed);
-        assert_eq!(reg.get(&id).unwrap().consecutive_failures, 3);
+        assert_eq!(reg.get(&id).unwrap().consecutive_failures, max);
+        assert!(due_job_ids(&reg, now + delay_ns * 10).is_empty());
+    }
+
+    #[test]
+    fn one_shot_retry_eligibility_respects_retry_delay() {
+        let mut reg = JobRegistry::in_memory();
+        let job = immediate_job("retry-delay");
+        let id = job.job_id.clone();
+        let delay_ns = job.retry_policy.retry_delay_secs * 1_000_000_000;
+        reg.add(job).unwrap();
+
+        // First attempt fails.
+        assert_eq!(due_job_ids(&reg, NOW), vec![id.clone()]);
+        record_run_result(&mut reg, &id, &RunResult::failure(&id, 1, 1, "boom"), NOW);
+
+        // Within the retry delay window: not due.
+        assert!(due_job_ids(&reg, NOW).is_empty());
+        assert!(due_job_ids(&reg, NOW + delay_ns - 1).is_empty());
+
+        // At exactly the retry delay boundary: due again.
+        assert_eq!(due_job_ids(&reg, NOW + delay_ns), vec![id.clone()]);
+        assert_eq!(reg.get(&id).unwrap().status, JobStatus::Active);
+    }
+
+    #[test]
+    fn one_shot_job_not_due_after_success() {
+        let mut reg = JobRegistry::in_memory();
+        let job = immediate_job("done-once");
+        let id = job.job_id.clone();
+        reg.add(job).unwrap();
+
+        assert_eq!(due_job_ids(&reg, NOW), vec![id.clone()]);
+        record_run_result(&mut reg, &id, &RunResult::success(&id, 1, 1), NOW);
+
+        assert_eq!(reg.get(&id).unwrap().status, JobStatus::Completed);
+        // Completed jobs are inactive and excluded.
+        assert!(due_job_ids(&reg, NOW + 1_000_000_000_000).is_empty());
     }
 
     #[test]

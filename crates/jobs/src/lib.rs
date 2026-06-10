@@ -29,7 +29,7 @@
 //! | Module | Contents |
 //! |---|---|
 //! | [`job`] | [`job::ScheduledJob`], [`job::JobStatus`], [`job::RetryPolicy`], [`job::LastRun`], [`job::make_job_id`] |
-//! | [`schedule`] | [`schedule::JobSchedule`], [`schedule::is_cron_due`] |
+//! | [`schedule`] | [`schedule::JobSchedule`], [`schedule::is_cron_due`], [`schedule::validate_cron`] |
 //! | [`registry`] | [`registry::JobRegistry`], [`registry::JobRegistryError`] |
 //! | [`runner`] | [`runner::JobRunner`], [`runner::RunResult`], [`runner::due_job_ids`], [`runner::record_run_result`] |
 
@@ -42,4 +42,4 @@ pub mod schedule;
 pub use job::{make_job_id, JobStatus, LastRun, RetryPolicy, ScheduledJob};
 pub use registry::{JobRegistry, JobRegistryError};
 pub use runner::{due_job_ids, record_run_result, JobRunner, RunResult};
-pub use schedule::JobSchedule;
+pub use schedule::{validate_cron, JobSchedule};

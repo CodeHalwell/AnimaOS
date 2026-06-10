@@ -213,20 +213,34 @@ impl ToolRegistry {
     /// - [`ToolInvocationError::ExecutionFailed`] — tool failed internally.
     /// - A synthetic `ExecutionFailed("unknown tool: …")` when the tool is not registered.
     pub fn dispatch(&self, envelope: &ToolEnvelope) -> Result<Vec<u8>, ToolInvocationError> {
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries.get_mut(&envelope.tool_id).ok_or_else(|| {
-            ToolInvocationError::ExecutionFailed(format!("unknown tool: {}", envelope.tool_id))
-        })?;
+        // Extract the driver handle and check breaker health under the lock,
+        // then release it before calling `invoke()`.  Holding the registry-wide
+        // mutex across `invoke()` would serialise all dispatch and deadlock on
+        // re-entrant calls (std `Mutex` is non-reentrant).
+        let driver = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries.get_mut(&envelope.tool_id).ok_or_else(|| {
+                ToolInvocationError::ExecutionFailed(format!("unknown tool: {}", envelope.tool_id))
+            })?;
 
-        // Check circuit breaker health.
-        entry.breaker.verify_pathway_health()?;
+            // Check circuit breaker health.
+            entry.breaker.verify_pathway_health()?;
 
-        // Invoke the tool.
-        let result = entry.driver.invoke(&envelope.payload);
-        match &result {
-            Ok(_) => entry.breaker.record_success(),
-            Err(ToolInvocationError::BreakerOpen) => {} // already open
-            Err(_) => entry.breaker.record_failure(DEFAULT_OPEN_THRESHOLD),
+            Arc::clone(&entry.driver)
+        };
+
+        // Invoke the tool with the lock released.
+        let result = driver.invoke(&envelope.payload);
+
+        // Re-acquire the lock to record the outcome in the breaker.  The entry
+        // may have been removed/replaced concurrently; if so we simply skip the
+        // bookkeeping rather than panic.
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(&envelope.tool_id) {
+            match &result {
+                Ok(_) => entry.breaker.record_success(),
+                Err(ToolInvocationError::BreakerOpen) => {} // already open
+                Err(_) => entry.breaker.record_failure(DEFAULT_OPEN_THRESHOLD),
+            }
         }
         result
     }

@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use scheduler::backend::{
@@ -58,6 +59,10 @@ pub struct OpenAiCompatibleBackend {
     config: ProviderConfig,
     mode: BackendMode,
     agent: ureq::Agent,
+    /// Cached `&'static str` for [`LlmBackend::id`].  Leaked at most once per
+    /// backend instance (on first `id()` call) to satisfy the `&'static str`
+    /// contract without re-leaking on every dispatch.
+    id_cache: OnceLock<&'static str>,
 }
 
 impl OpenAiCompatibleBackend {
@@ -75,6 +80,7 @@ impl OpenAiCompatibleBackend {
             config,
             mode: BackendMode::Fixture(fixtures.into_iter().collect()),
             agent,
+            id_cache: OnceLock::new(),
         }
     }
 
@@ -90,6 +96,7 @@ impl OpenAiCompatibleBackend {
             config,
             mode: BackendMode::Live,
             agent,
+            id_cache: OnceLock::new(),
         }
     }
 
@@ -417,10 +424,11 @@ impl OpenAiCompatibleBackend {
 
 impl LlmBackend for OpenAiCompatibleBackend {
     fn id(&self) -> &'static str {
-        // We leak the string once per backend construction so we satisfy the
-        // `&'static str` contract without storing a literal in the struct.
-        // This is safe: we only do it once per backend instance.
-        Box::leak(self.config.id.clone().into_boxed_str())
+        // Leak the id string at most once per backend instance to satisfy the
+        // `&'static str` contract.  Subsequent calls return the cached pointer
+        // without leaking, so `id()` is safe on the hot dispatch path.
+        self.id_cache
+            .get_or_init(|| Box::leak(self.config.id.clone().into_boxed_str()))
     }
 
     fn model_id(&self) -> &str {

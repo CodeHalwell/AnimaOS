@@ -64,10 +64,67 @@ impl WebhookPayload {
     ///
     /// Returns `true` when `signature` is `"sha256=<hex>"` and the HMAC of
     /// `body_json` under `secret` matches.
+    ///
+    /// The comparison runs in constant time over the raw HMAC bytes to avoid
+    /// leaking how many leading bytes of a forged signature were correct (a
+    /// timing oracle that would otherwise let an attacker recover a valid
+    /// signature byte-by-byte).
     pub fn verify_signature(body_json: &str, secret: &str, signature: &str) -> bool {
-        let expected = Self::sign(body_json, secret);
-        expected == signature
+        let expected = hmac_sha256(secret.as_bytes(), body_json.as_bytes());
+        // Parse the candidate `"sha256=<hex>"` into raw bytes; a malformed header
+        // (wrong prefix, bad hex, wrong length) simply fails to parse and is
+        // rejected without any content comparison.
+        let candidate = match parse_sha256_hex(signature) {
+            Some(bytes) => bytes,
+            None => return false,
+        };
+        constant_time_eq(&expected, &candidate)
     }
+}
+
+/// Parse a `"sha256=<64-hex>"` header value into its 32 raw HMAC bytes.
+///
+/// Returns `None` for any malformed input (missing prefix, wrong length, or
+/// non-hex characters).
+fn parse_sha256_hex(signature: &str) -> Option<[u8; 32]> {
+    let hex = signature.strip_prefix("sha256=")?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    let bytes = hex.as_bytes();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let hi = hex_val(bytes[i * 2])?;
+        let lo = hex_val(bytes[i * 2 + 1])?;
+        *slot = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// Decode a single ASCII hex digit (0-9, a-f, A-F) to its nibble value.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Constant-time byte-slice equality.
+///
+/// Folds an XOR accumulator over both slices so the running time depends only on
+/// the input length, never on where (or whether) the first differing byte
+/// occurs.  Differing lengths return `false` without a short-circuit on content.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ── Real HMAC-SHA256 (mirrors the implementation in crates/constitution) ───────
@@ -194,5 +251,56 @@ mod tests {
     fn payload_json_contains_no_signature_field() {
         let p = make_payload("wake_entered");
         assert!(!p.to_json().contains("signature"));
+    }
+
+    // ── Constant-time signature verification (timing-oracle hardening) ─────────
+
+    #[test]
+    fn verify_accepts_correct_and_rejects_wrong_signature() {
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "shared-secret");
+        // Correct signature is accepted.
+        assert!(WebhookPayload::verify_signature(
+            &body,
+            "shared-secret",
+            &sig
+        ));
+
+        // A signature that differs only in its last byte must be rejected. (This
+        // is the case a short-circuiting compare would have leaked timing on.)
+        let mut wrong = sig.clone().into_bytes();
+        let last = wrong.last_mut().unwrap();
+        *last = if *last == b'0' { b'1' } else { b'0' };
+        let wrong = String::from_utf8(wrong).unwrap();
+        assert!(!WebhookPayload::verify_signature(
+            &body,
+            "shared-secret",
+            &wrong
+        ));
+    }
+
+    #[test]
+    fn verify_accepts_uppercase_hex_signature() {
+        let body = make_payload("task_completed").to_json();
+        let sig = WebhookPayload::sign(&body, "key").to_uppercase();
+        // The hex payload is case-insensitive; only the "sha256=" prefix differs.
+        let sig = sig.replacen("SHA256=", "sha256=", 1);
+        assert!(WebhookPayload::verify_signature(&body, "key", &sig));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_naive_equality() {
+        assert!(constant_time_eq(b"abcd", b"abcd"));
+        assert!(!constant_time_eq(b"abcd", b"abce"));
+        assert!(!constant_time_eq(b"abcd", b"abc")); // length mismatch
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn parse_sha256_hex_rejects_malformed() {
+        assert!(parse_sha256_hex("no-prefix").is_none());
+        assert!(parse_sha256_hex("sha256=short").is_none());
+        assert!(parse_sha256_hex(&format!("sha256={}", "z".repeat(64))).is_none());
+        assert!(parse_sha256_hex(&format!("sha256={}", "a".repeat(64))).is_some());
     }
 }

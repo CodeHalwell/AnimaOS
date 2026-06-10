@@ -257,9 +257,14 @@ impl WorkspaceRegistry {
 
     /// Updates the quota for a workspace.
     ///
-    /// Returns [`WorkspaceError::NotFound`] when the workspace does not exist.
+    /// `actor` is the user requesting the change; they must hold a managing role
+    /// ([`WorkspaceRole::Admin`] or higher) in the workspace.
+    ///
+    /// Returns [`WorkspaceError::NotFound`] when the workspace does not exist and
+    /// [`WorkspaceError::InsufficientRole`] when `actor` lacks authority.
     pub fn set_quota(
         &mut self,
+        actor: &str,
         workspace_id: &str,
         quota: WorkspaceQuota,
     ) -> Result<(), WorkspaceError> {
@@ -269,6 +274,7 @@ impl WorkspaceRegistry {
                 .ok_or_else(|| WorkspaceError::NotFound {
                     workspace_id: workspace_id.to_owned(),
                 })?;
+        authorize_manage(rec, actor)?;
         rec.quota = quota;
         Ok(())
     }
@@ -277,13 +283,17 @@ impl WorkspaceRegistry {
 
     /// Adds a user to a workspace with the given role.
     ///
-    /// Returns [`WorkspaceError::DuplicateOwner`] when `role` is `Owner` (a
-    /// workspace has exactly one owner: the creator).  Returns
-    /// [`WorkspaceError::MemberAlreadyExists`] when the user is already a member,
-    /// and [`WorkspaceError::QuotaExceeded`] when the workspace member quota would
-    /// be exceeded.
+    /// `actor` is the user requesting the change; they must hold a managing role
+    /// ([`WorkspaceRole::Admin`] or higher) in the workspace.
+    ///
+    /// Returns [`WorkspaceError::InsufficientRole`] when `actor` lacks authority,
+    /// [`WorkspaceError::DuplicateOwner`] when `role` is `Owner` (a workspace has
+    /// exactly one owner: the creator), [`WorkspaceError::MemberAlreadyExists`]
+    /// when the user is already a member, and [`WorkspaceError::QuotaExceeded`]
+    /// when the workspace member quota would be exceeded.
     pub fn add_member(
         &mut self,
+        actor: &str,
         workspace_id: &str,
         user_id: impl Into<String>,
         role: WorkspaceRole,
@@ -302,6 +312,20 @@ impl WorkspaceRegistry {
                 .ok_or_else(|| WorkspaceError::NotFound {
                     workspace_id: workspace_id.to_owned(),
                 })?;
+
+        authorize_manage(rec, actor)?;
+
+        // An actor may only grant a role strictly below their own. This keeps
+        // Admins to managing membership "up to Member level" (the role
+        // contract in `membership.rs`): an Admin cannot mint another Admin, so
+        // delegating Admin to a user does not let them escalate the workspace.
+        let actor_role = rec.member_role(actor).unwrap_or(WorkspaceRole::Guest);
+        if role >= actor_role {
+            return Err(WorkspaceError::InsufficientRole {
+                required: WorkspaceRole::Owner,
+                actual: actor_role,
+            });
+        }
 
         // Duplicate check before quota so a re-add of an existing member
         // never returns QuotaExceeded.
@@ -328,10 +352,16 @@ impl WorkspaceRegistry {
 
     /// Removes a user from a workspace.
     ///
+    /// `actor` is the user requesting the change; they must hold a managing role
+    /// ([`WorkspaceRole::Admin`] or higher) in the workspace.  A member may always
+    /// remove themselves (leave the workspace), even without a managing role.
+    ///
     /// The owner (the user with [`WorkspaceRole::Owner`]) cannot be removed.
-    /// Returns [`WorkspaceError::MemberNotFound`] when the user is not a member.
+    /// Returns [`WorkspaceError::InsufficientRole`] when `actor` lacks authority
+    /// and [`WorkspaceError::MemberNotFound`] when the user is not a member.
     pub fn remove_member(
         &mut self,
+        actor: &str,
         workspace_id: &str,
         user_id: &str,
     ) -> Result<WorkspaceRole, WorkspaceError> {
@@ -341,6 +371,11 @@ impl WorkspaceRegistry {
                 .ok_or_else(|| WorkspaceError::NotFound {
                     workspace_id: workspace_id.to_owned(),
                 })?;
+
+        // A user may always remove themselves; otherwise a managing role is required.
+        if actor != user_id {
+            authorize_manage(rec, actor)?;
+        }
 
         let pos = rec
             .members
@@ -357,6 +392,18 @@ impl WorkspaceRegistry {
                 workspace_id: workspace_id.to_owned(),
                 user_id: user_id.to_owned(),
             });
+        }
+        // Symmetric with add_member: removing a peer (or higher) managing role
+        // requires outranking it, so one Admin cannot evict another. Does not
+        // apply to self-removal, which returned above.
+        if actor != user_id {
+            let actor_role = rec.member_role(actor).unwrap_or(WorkspaceRole::Guest);
+            if removed_role >= actor_role {
+                return Err(WorkspaceError::InsufficientRole {
+                    required: WorkspaceRole::Owner,
+                    actual: actor_role,
+                });
+            }
         }
         rec.members.remove(pos);
         Ok(removed_role)
@@ -415,6 +462,25 @@ impl WorkspaceRegistry {
     }
 }
 
+// ── authorization helper ──────────────────────────────────────────────────────
+
+/// Verifies that `actor` holds a managing role ([`WorkspaceRole::Admin`] or
+/// higher) in `rec`, returning [`WorkspaceError::InsufficientRole`] otherwise.
+///
+/// A non-member actor is treated as the lowest role ([`WorkspaceRole::Guest`])
+/// so the same error path covers both "not a member" and "role too low".
+fn authorize_manage(rec: &WorkspaceRecord, actor: &str) -> Result<(), WorkspaceError> {
+    let role = rec.member_role(actor).unwrap_or(WorkspaceRole::Guest);
+    if role.can_manage() {
+        Ok(())
+    } else {
+        Err(WorkspaceError::InsufficientRole {
+            required: WorkspaceRole::Admin,
+            actual: role,
+        })
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -469,7 +535,7 @@ mod tests {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("ws", "u:1"), 0).unwrap();
         let new_quota = WorkspaceQuota::new(5, 100, 512, 10);
-        reg.set_quota("ws", new_quota.clone()).unwrap();
+        reg.set_quota("u:1", "ws", new_quota.clone()).unwrap();
         assert_eq!(reg.get("ws").unwrap().quota, new_quota);
     }
 
@@ -477,7 +543,7 @@ mod tests {
     fn set_quota_returns_error_for_missing_workspace() {
         let mut reg = WorkspaceRegistry::in_memory();
         let err = reg
-            .set_quota("ghost", WorkspaceQuota::default())
+            .set_quota("u:1", "ghost", WorkspaceQuota::default())
             .unwrap_err();
         assert_eq!(
             err,
@@ -493,7 +559,7 @@ mod tests {
     fn add_member_increases_count() {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        reg.add_member("acme", "u:2", WorkspaceRole::Member, 100)
+        reg.add_member("u:1", "acme", "u:2", WorkspaceRole::Member, 100)
             .unwrap();
         assert_eq!(reg.get("acme").unwrap().member_count(), 2);
         assert_eq!(reg.member_role("acme", "u:2"), Some(WorkspaceRole::Member));
@@ -503,10 +569,10 @@ mod tests {
     fn add_member_rejects_duplicate() {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        reg.add_member("acme", "u:2", WorkspaceRole::Member, 0)
+        reg.add_member("u:1", "acme", "u:2", WorkspaceRole::Member, 0)
             .unwrap();
         let err = reg
-            .add_member("acme", "u:2", WorkspaceRole::Admin, 0)
+            .add_member("u:1", "acme", "u:2", WorkspaceRole::Admin, 0)
             .unwrap_err();
         assert_eq!(
             err,
@@ -523,12 +589,13 @@ mod tests {
         reg.create(make_profile("tiny", "u:1"), 0).unwrap();
         // Set quota to only allow 1 member (already at capacity with the owner).
         reg.set_quota(
+            "u:1",
             "tiny",
             WorkspaceQuota::new(1, u64::MAX, u64::MAX, usize::MAX),
         )
         .unwrap();
         let err = reg
-            .add_member("tiny", "u:2", WorkspaceRole::Member, 0)
+            .add_member("u:1", "tiny", "u:2", WorkspaceRole::Member, 0)
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::QuotaExceeded { .. }));
     }
@@ -537,9 +604,9 @@ mod tests {
     fn remove_member_reduces_count() {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        reg.add_member("acme", "u:2", WorkspaceRole::Member, 0)
+        reg.add_member("u:1", "acme", "u:2", WorkspaceRole::Member, 0)
             .unwrap();
-        reg.remove_member("acme", "u:2").unwrap();
+        reg.remove_member("u:1", "acme", "u:2").unwrap();
         assert_eq!(reg.get("acme").unwrap().member_count(), 1);
         assert!(reg.member_role("acme", "u:2").is_none());
     }
@@ -548,7 +615,7 @@ mod tests {
     fn remove_member_returns_error_for_non_member() {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        let err = reg.remove_member("acme", "u:99").unwrap_err();
+        let err = reg.remove_member("u:1", "acme", "u:99").unwrap_err();
         assert_eq!(
             err,
             WorkspaceError::MemberNotFound {
@@ -585,7 +652,7 @@ mod tests {
 
         let mut reg = WorkspaceRegistry::open(&path).unwrap();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        reg.add_member("acme", "u:2", WorkspaceRole::Admin, 100)
+        reg.add_member("u:1", "acme", "u:2", WorkspaceRole::Admin, 100)
             .unwrap();
         reg.flush().unwrap();
 
@@ -615,7 +682,7 @@ mod tests {
     fn remove_member_rejects_owner_removal() {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
-        let err = reg.remove_member("acme", "u:1").unwrap_err();
+        let err = reg.remove_member("u:1", "acme", "u:1").unwrap_err();
         assert_eq!(
             err,
             WorkspaceError::CannotRemoveOwner {
@@ -630,7 +697,7 @@ mod tests {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("acme", "u:1"), 0).unwrap();
         let err = reg
-            .add_member("acme", "u:2", WorkspaceRole::Owner, 0)
+            .add_member("u:1", "acme", "u:2", WorkspaceRole::Owner, 0)
             .unwrap_err();
         assert_eq!(
             err,
@@ -645,15 +712,151 @@ mod tests {
         let mut reg = WorkspaceRegistry::in_memory();
         reg.create(make_profile("tiny", "u:1"), 0).unwrap();
         reg.set_quota(
+            "u:1",
             "tiny",
             WorkspaceQuota::new(1, u64::MAX, u64::MAX, usize::MAX),
         )
         .unwrap();
         // u:1 is already a member; should get MemberAlreadyExists, not QuotaExceeded.
         let err = reg
-            .add_member("tiny", "u:1", WorkspaceRole::Member, 0)
+            .add_member("u:1", "tiny", "u:1", WorkspaceRole::Member, 0)
             .unwrap_err();
         assert!(matches!(err, WorkspaceError::MemberAlreadyExists { .. }));
+    }
+
+    // ── authorization (caller role enforcement) ──────────────────────────────
+
+    #[test]
+    fn non_admin_cannot_add_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        // Add a plain member who will then attempt a privileged change.
+        reg.add_member("owner", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        let err = reg
+            .add_member("member-1", "acme", "member-2", WorkspaceRole::Member, 0)
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        // The unauthorized add must not have taken effect.
+        assert!(reg.member_role("acme", "member-2").is_none());
+    }
+
+    #[test]
+    fn non_member_cannot_add_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        let err = reg
+            .add_member("stranger", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+    }
+
+    #[test]
+    fn admin_can_add_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "admin-1", WorkspaceRole::Admin, 0)
+            .unwrap();
+        // The admin may now add members on their own authority.
+        reg.add_member("admin-1", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        assert_eq!(
+            reg.member_role("acme", "member-1"),
+            Some(WorkspaceRole::Member)
+        );
+    }
+
+    #[test]
+    fn non_admin_cannot_remove_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        reg.add_member("owner", "acme", "member-2", WorkspaceRole::Member, 0)
+            .unwrap();
+        let err = reg
+            .remove_member("member-1", "acme", "member-2")
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        // member-2 must still be present.
+        assert_eq!(
+            reg.member_role("acme", "member-2"),
+            Some(WorkspaceRole::Member)
+        );
+    }
+
+    #[test]
+    fn admin_can_remove_member() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        reg.remove_member("owner", "acme", "member-1").unwrap();
+        assert!(reg.member_role("acme", "member-1").is_none());
+    }
+
+    #[test]
+    fn member_may_remove_self_without_managing_role() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        // Self-removal (leaving) is permitted even without a managing role.
+        reg.remove_member("member-1", "acme", "member-1").unwrap();
+        assert!(reg.member_role("acme", "member-1").is_none());
+    }
+
+    #[test]
+    fn non_admin_cannot_set_quota() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "member-1", WorkspaceRole::Member, 0)
+            .unwrap();
+        let err = reg
+            .set_quota("member-1", "acme", WorkspaceQuota::new(99, 99, 99, 99))
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+    }
+
+    #[test]
+    fn admin_can_set_quota() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        let q = WorkspaceQuota::new(7, 7, 7, 7);
+        reg.set_quota("owner", "acme", q.clone()).unwrap();
+        assert_eq!(reg.get("acme").unwrap().quota, q);
+    }
+
+    #[test]
+    fn admin_cannot_grant_admin_role() {
+        // An Admin may manage membership only up to Member level: delegating
+        // Admin must require the Owner, so a delegated admin cannot mint peers.
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "admin-1", WorkspaceRole::Admin, 0)
+            .unwrap();
+        let err = reg
+            .add_member("admin-1", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        assert!(reg.member_role("acme", "admin-2").is_none());
+        // The owner, who outranks Admin, still may.
+        reg.add_member("owner", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn admin_cannot_remove_peer_admin() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "admin-1", WorkspaceRole::Admin, 0)
+            .unwrap();
+        reg.add_member("owner", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap();
+        let err = reg.remove_member("admin-1", "acme", "admin-2").unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        // The owner outranks both and may remove either.
+        reg.remove_member("owner", "acme", "admin-2").unwrap();
     }
 
     #[test]

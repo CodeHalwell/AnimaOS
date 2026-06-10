@@ -104,6 +104,12 @@ impl CacheConfig {
 /// A single cached tool response.
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
+    /// The exact request payload that produced this response.
+    ///
+    /// Stored verbatim so a [`get`](ToolCacheInner::get) lookup can confirm an
+    /// *exact* payload match rather than trusting the FNV-1a hash alone — an
+    /// FNV-1a collision must never return a different payload's response.
+    pub payload: Vec<u8>,
     /// The cached response bytes (owned copy).
     pub response: Vec<u8>,
     /// Unix timestamp (ms) when this entry expires.
@@ -207,9 +213,18 @@ impl ToolCacheInner {
                 self.stats.current_entries = self.entries.len();
                 None
             }
-            Some(e) => {
+            // Hash match AND exact payload match: a genuine hit. Comparing the
+            // stored payload guards against FNV-1a collisions returning a
+            // different request's cached response.
+            Some(e) if e.payload == payload => {
                 self.stats.hits += 1;
                 Some(e.clone())
+            }
+            // Hash collided with a different payload: treat as a miss. The caller
+            // will re-invoke the tool and `insert` overwrites this bucket.
+            Some(_) => {
+                self.stats.misses += 1;
+                None
             }
             None => {
                 self.stats.misses += 1;
@@ -243,6 +258,7 @@ impl ToolCacheInner {
         self.entries.insert(
             key,
             CacheEntry {
+                payload: payload.to_vec(),
                 response,
                 expires_at_ms: now + ttl,
                 inserted_at_ms: now,
@@ -482,6 +498,7 @@ mod tests {
     #[test]
     fn cache_entry_is_expired_when_now_at_or_past_expiry() {
         let entry = CacheEntry {
+            payload: vec![],
             response: vec![1, 2, 3],
             expires_at_ms: 1_000,
             inserted_at_ms: 0,
@@ -494,6 +511,7 @@ mod tests {
     #[test]
     fn cache_entry_age_saturates_at_zero_for_future_insertion() {
         let entry = CacheEntry {
+            payload: vec![],
             response: vec![],
             expires_at_ms: 2_000,
             inserted_at_ms: 500,
@@ -550,6 +568,75 @@ mod tests {
     }
 
     #[test]
+    fn hash_collision_does_not_return_wrong_payload_response() {
+        // Simulate two distinct payloads that land in the same FNV-1a bucket by
+        // inserting an entry whose stored payload differs from the query payload
+        // but shares its cache key. A naïve hash-only cache would return this as
+        // a hit; the payload comparison must treat it as a miss instead.
+        let cache = ToolCache::with_defaults();
+
+        let stored_payload = b"payload-A".to_vec();
+        let colliding_payload = b"payload-B".to_vec();
+
+        {
+            let mut inner = cache.inner.lock().unwrap();
+            let now = now_ms();
+            // Key is derived from `colliding_payload` (forcing the "collision"),
+            // but the entry records `stored_payload` as the real request.
+            inner.entries.insert(
+                make_key("echo", &colliding_payload),
+                CacheEntry {
+                    payload: stored_payload.clone(),
+                    response: b"response-for-A".to_vec(),
+                    expires_at_ms: now + 60_000,
+                    inserted_at_ms: now,
+                },
+            );
+        }
+
+        // Looking up the colliding payload must NOT return A's response.
+        assert!(
+            cache.get("echo", &colliding_payload).is_none(),
+            "a hash collision must be treated as a miss, not a false hit"
+        );
+        let s = cache.stats();
+        assert_eq!(s.hits, 0, "collision must not count as a hit");
+        assert_eq!(s.misses, 1);
+    }
+
+    #[test]
+    fn collision_miss_is_overwritten_by_correct_payload() {
+        // After a colliding miss, inserting the correct payload+response under the
+        // same key replaces the stale entry, and a subsequent lookup hits.
+        let cache = ToolCache::with_defaults();
+        let colliding_payload = b"payload-B".to_vec();
+
+        {
+            let mut inner = cache.inner.lock().unwrap();
+            let now = now_ms();
+            inner.entries.insert(
+                make_key("echo", &colliding_payload),
+                CacheEntry {
+                    payload: b"payload-A".to_vec(),
+                    response: b"response-for-A".to_vec(),
+                    expires_at_ms: now + 60_000,
+                    inserted_at_ms: now,
+                },
+            );
+        }
+
+        // Miss (collision), then store B's real response.
+        assert!(cache.get("echo", &colliding_payload).is_none());
+        cache.insert("echo", &colliding_payload, b"response-for-B".to_vec());
+
+        let entry = cache
+            .get("echo", &colliding_payload)
+            .expect("B should now hit");
+        assert_eq!(entry.response, b"response-for-B");
+        assert_eq!(entry.payload, colliding_payload);
+    }
+
+    #[test]
     fn expired_entry_is_evicted_on_read() {
         let cfg = CacheConfig::with_ttl(0); // TTL = 0 ms → expires immediately
         let cache = ToolCache::new(cfg);
@@ -601,6 +688,7 @@ mod tests {
             inner.entries.insert(
                 make_key("echo", b"stale"),
                 CacheEntry {
+                    payload: b"stale".to_vec(),
                     response: b"old".to_vec(),
                     expires_at_ms: now.saturating_sub(1), // already expired
                     inserted_at_ms: now.saturating_sub(100),

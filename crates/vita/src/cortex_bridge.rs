@@ -283,6 +283,23 @@ impl<F: Fn(&str, &str) -> Result<String, String> + Send + Sync> ToolDispatcher f
 
 // ── IPC wire helpers ──────────────────────────────────────────────────────────
 
+/// Maximum IPC frame body accepted from the cortex subprocess.
+///
+/// Matches the cap used by the HF transformers worker bridge
+/// (`llm-backends/src/hf_transformers.rs`).  Guards against a corrupt or hostile
+/// length prefix (up to 4 GiB) triggering a huge allocation before any body is
+/// read.
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Overall deadline for the cortex subprocess to connect after spawning.  A
+/// child that hangs without exiting (e.g. wedged importing a heavy module) is
+/// detected here rather than pinning vita forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Per-read timeout on the connected stream so a wedged cortex cannot pin vita
+/// forever between frames.
+const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Read exactly `n` bytes from `stream`, returning `None` on clean EOF.
 fn read_exact_bytes(stream: &mut UnixStream, n: usize) -> io::Result<Option<Vec<u8>>> {
     let mut buf = vec![0u8; n];
@@ -311,6 +328,13 @@ fn recv_ipc(stream: &mut UnixStream) -> Result<Option<serde_json::Value>, Cortex
         Some(h) => h,
     };
     let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    if length > MAX_FRAME_LEN {
+        // Reject the frame *before* allocating so a corrupt/hostile length
+        // prefix cannot trigger a multi-gigabyte allocation.
+        return Err(CortexError::IpcError(format!(
+            "cortex frame too large: {length} bytes (max {MAX_FRAME_LEN})"
+        )));
+    }
     let body = read_exact_bytes(stream, length)
         .map_err(|e| CortexError::IpcError(e.to_string()))?
         .ok_or(CortexError::UnexpectedEof)?;
@@ -329,6 +353,18 @@ fn send_ipc(stream: &mut UnixStream, msg: &serde_json::Value) -> Result<(), Cort
         .write_all(&len_bytes)
         .and_then(|_| stream.write_all(&body))
         .map_err(|e| CortexError::IpcError(e.to_string()))
+}
+
+/// Drain whatever is currently buffered on the child's captured stderr (best
+/// effort, non-fatal).  Used to enrich error messages when the cortex exits or
+/// hangs before connecting.
+fn drain_stderr(child: &mut Child) -> String {
+    let Some(mut err) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    let _ = err.read_to_string(&mut buf);
+    buf.trim().to_string()
 }
 
 // ── Python cortex bridge ──────────────────────────────────────────────────────
@@ -383,7 +419,10 @@ impl PythonCortexBridge {
             ])
             .current_dir(&self.workspace_root)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Capture stderr so a child that crashes before connecting can have
+            // its diagnostics surfaced in the returned error instead of being
+            // discarded.
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| CortexError::SpawnFailed(e.to_string()))
     }
@@ -401,25 +440,87 @@ impl CortexBackend for PythonCortexBridge {
         let socket_path_str = socket_path.to_string_lossy().to_string();
 
         // Create the server socket before spawning so the child can connect
-        // immediately.
+        // immediately.  Non-blocking so the accept loop can poll the child's
+        // liveness and enforce an overall connect deadline.
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| CortexError::IpcError(format!("bind UDS: {e}")))?;
         listener
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .map_err(|e| CortexError::IpcError(e.to_string()))?;
 
         let start = Instant::now();
 
-        let child = self.spawn_python(&socket_path_str)?;
+        let mut child = self.spawn_python(&socket_path_str)?;
+
+        // Non-blocking accept with child-exit detection and an overall connect
+        // deadline.  Mirrors the pattern used in the HF transformers bridge: if
+        // the child crashes before connecting we surface its stderr in the
+        // error; if it hangs without exiting the deadline bounds the wait so a
+        // dead/wedged cortex can never pin vita forever.
+        let connect_deadline = Instant::now() + CONNECT_TIMEOUT;
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(res) => break res,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let stderr = drain_stderr(&mut child);
+                        let _ = child.wait();
+                        let _ = std::fs::remove_file(&socket_path);
+                        let detail = if stderr.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {stderr}")
+                        };
+                        return Err(CortexError::SpawnFailed(format!(
+                            "cortex exited before connecting (status: {status}){detail}"
+                        )));
+                    }
+                    Ok(None) => {
+                        if Instant::now() >= connect_deadline {
+                            let _ = child.kill();
+                            let stderr = drain_stderr(&mut child);
+                            let _ = child.wait();
+                            let _ = std::fs::remove_file(&socket_path);
+                            let detail = if stderr.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {stderr}")
+                            };
+                            return Err(CortexError::IpcError(format!(
+                                "cortex did not connect within {CONNECT_TIMEOUT:?}{detail}"
+                            )));
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = std::fs::remove_file(&socket_path);
+                        return Err(CortexError::IpcError(e.to_string()));
+                    }
+                },
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&socket_path);
+                    return Err(CortexError::IpcError(format!("accept UDS: {e}")));
+                }
+            }
+        };
+
+        // Connected: switch the stream to blocking with a read timeout so a
+        // wedged cortex cannot pin the post-connect message loop forever.
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| CortexError::IpcError(e.to_string()))?;
+        stream
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .map_err(|e| CortexError::IpcError(e.to_string()))?;
+
         // Wrap in a guard so the process is killed and reaped on any error path
         // (IPC errors, panics, early returns).  Call into_inner() on the success
         // and veto paths to consume the guard and do an explicit wait() instead.
         let guard = ChildGuard::new(child, socket_path.clone());
-
-        // Accept the cortex connection (blocking).
-        let (mut stream, _) = listener
-            .accept()
-            .map_err(|e| CortexError::IpcError(format!("accept UDS: {e}")))?;
 
         // Send InvokeRequest.
         let req_val = serde_json::json!({
@@ -1078,7 +1179,12 @@ pub fn archive_episode(
     // The source_key in Provenance carries the episode key (e.g. "episode:<task_id>").
     let episode_key = format!("episode:{task_id}");
     let prov = Provenance::now(SourceTier::Episode, &episode_key);
-    let _ = l3.demote(item, prov);
+    if let Err(e) = l3.demote(item, prov) {
+        // Don't silently drop the episode: a full archive (or any demote error)
+        // is operationally significant, so surface it instead of swallowing the
+        // Result.  The signature is intentionally unchanged.
+        eprintln!("anima-vita: L3 demote failed for {episode_key}: {e} (episode not archived)");
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
