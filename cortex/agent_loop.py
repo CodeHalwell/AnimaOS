@@ -38,6 +38,7 @@ live LLM API key.
 
 from __future__ import annotations
 
+import json
 import socket
 import time
 import uuid
@@ -72,6 +73,9 @@ class AgentLoop:
     """Plan / Act / Observe / Revise loop over an IPC socket."""
 
     MAX_TOOL_CALLS: int = 10
+    # Liveness backstop: if vita does not reply to a ToolCall within this many
+    # seconds the invocation is aborted rather than blocking forever (M2).
+    TOOL_REPLY_TIMEOUT_S: float = 120.0
 
     def __init__(
         self,
@@ -131,8 +135,13 @@ class AgentLoop:
         """Generate the initial action plan."""
         if self._backend == "mock":
             return self._mock_plan(state)
-        # Real LLM path (future): send LlmRequest, parse structured plan.
-        return self._mock_plan(state)
+        # Real LLM backends are not yet implemented. Fail loudly rather than
+        # silently impersonating success by running the mock plan, which would
+        # archive a fake episode to L3 as if real deliberation occurred (M3).
+        raise NotImplementedError(
+            f"backend {self._backend!r} is not implemented; only 'mock' is "
+            "currently supported"
+        )
 
     def _mock_plan(self, state: AgentState) -> list[Step]:
         """Deterministic two-step plan for hermetic testing.
@@ -153,7 +162,10 @@ class AgentLoop:
         if "echo" in tool_names:
             steps.append(Step(
                 tool_name="echo",
-                args=f'{{"payload":"{state.description[:80]}"}}',
+                # Build the args with json.dumps so a task description
+                # containing quotes/backslashes/control chars cannot break out
+                # of the JSON string or inject extra keys (H1).
+                args=json.dumps({"payload": state.description[:80]}),
                 description="Echo task description to confirm tool round-trip",
             ))
 
@@ -179,9 +191,28 @@ class AgentLoop:
         })
         state.tool_calls_made += 1
 
-        # Wait for the matching ToolResponse (or a fatal message).
+        # Wait for the matching ToolResponse, bounding the wait with a deadline
+        # so a stalled or silent vita cannot wedge the cortex forever (M2). A
+        # Shutdown/Cancel/CortexError control message aborts the invocation.
+        deadline = time.monotonic() + self.TOOL_REPLY_TIMEOUT_S
         while True:
-            msg = recv_message(self._sock)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"timed out waiting for ToolResponse to {call_id!r} after "
+                    f"{self.TOOL_REPLY_TIMEOUT_S:.0f}s"
+                )
+            self._sock.settimeout(remaining)
+            try:
+                msg = recv_message(self._sock)
+            except (socket.timeout, TimeoutError) as exc:
+                raise TimeoutError(
+                    f"timed out waiting for ToolResponse to {call_id!r} after "
+                    f"{self.TOOL_REPLY_TIMEOUT_S:.0f}s"
+                ) from exc
+            finally:
+                self._sock.settimeout(None)
+
             if msg is None:
                 raise RuntimeError("vita closed the IPC socket unexpectedly")
             msg_type = msg.get("type", "")
@@ -189,7 +220,11 @@ class AgentLoop:
                 if msg.get("error"):
                     return f"[error: {msg['error']}]"
                 return msg.get("result", "")
-            # Ignore unexpected messages (future protocol extensions).
+            if msg_type in ("Shutdown", "Cancel", "CortexError"):
+                raise RuntimeError(
+                    f"invocation aborted by vita control message: {msg_type}"
+                )
+            # Ignore other unexpected messages (future protocol extensions).
 
     def _observe(self, state: AgentState, step: Step, result: str) -> None:
         """Record the tool result as an observation."""

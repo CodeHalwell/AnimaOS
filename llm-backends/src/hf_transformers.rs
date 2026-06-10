@@ -34,6 +34,7 @@
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use scheduler::backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
@@ -43,6 +44,15 @@ use scheduler::backend::{
 
 /// Maximum frame body accepted from the worker (guards against corrupt length fields).
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Overall deadline for the worker to connect to the listener after spawning.
+/// A worker that hangs without exiting (e.g. stuck loading a model) is detected
+/// here rather than pinning the calling task forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Per-read timeout on the connected stream so the cancellation check between
+/// frames can fire even when the worker stalls mid-stream.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn read_frame(r: &mut impl Read) -> std::io::Result<serde_json::Value> {
     let mut len_buf = [0u8; 4];
@@ -198,10 +208,13 @@ impl HfTransformersBackend {
 
         // Non-blocking accept with child-exit detection: if the Python worker
         // crashes before connecting (bad environment, missing deps, etc.) the
-        // loop returns an error instead of hanging forever.
+        // loop returns an error instead of hanging forever.  An overall connect
+        // deadline also bounds the wait so a worker that hangs *without* exiting
+        // (e.g. wedged loading a model) is detected too.
         listener
             .set_nonblocking(true)
             .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
+        let connect_deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
         let (mut stream, _addr) = loop {
             match listener.accept() {
                 Ok(res) => break res,
@@ -213,7 +226,18 @@ impl HfTransformersBackend {
                                 "transformers worker exited before connecting (status: {status})"
                             )));
                         }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Ok(None) => {
+                            if std::time::Instant::now() >= connect_deadline {
+                                child.kill().ok();
+                                child.wait().ok();
+                                std::fs::remove_file(&socket_path).ok();
+                                return Err(LlmBackendError::Provider(format!(
+                                    "transformers worker did not connect within {:?}",
+                                    CONNECT_TIMEOUT
+                                )));
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(50))
+                        }
                         Err(e) => {
                             child.kill().ok();
                             std::fs::remove_file(&socket_path).ok();
@@ -230,6 +254,13 @@ impl HfTransformersBackend {
         };
         stream
             .set_nonblocking(false)
+            .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
+        // Read timeout so the cancellation check between frames can fire even if
+        // the worker stalls mid-stream (a blocked read would otherwise pin the
+        // task forever).  A timed-out read surfaces as WouldBlock/TimedOut, which
+        // we treat as "retry after re-checking cancellation".
+        stream
+            .set_read_timeout(Some(READ_TIMEOUT))
             .map_err(|e| LlmBackendError::Provider(e.to_string()))?;
 
         let request = serde_json::json!({
@@ -276,6 +307,14 @@ impl HfTransformersBackend {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     completions.push(StreamingCompletion::Done);
                     break;
+                }
+                // Read timed out: no data yet but the stream is still alive.
+                // Loop back so the cancellation check above can fire.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
                 }
                 Err(e) => {
                     child.kill().ok();

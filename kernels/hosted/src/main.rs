@@ -4679,8 +4679,15 @@ fn cmd_workspace(args: &[String]) {
         },
         Some("add-member") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(ws_id), Some(user_id), Some(role_str)) => {
+                // The local operator acts as the workspace owner for CLI-driven
+                // privilege changes; the registry enforces that this actor holds
+                // a managing role.
+                let actor = registry
+                    .get(ws_id)
+                    .map(|rec| rec.profile.owner_user_id.clone())
+                    .unwrap_or_default();
                 match WorkspaceRole::from_str(role_str) {
-                    Ok(role) => match registry.add_member(ws_id, user_id.clone(), role, 0) {
+                    Ok(role) => match registry.add_member(&actor, ws_id, user_id.clone(), role, 0) {
                         Ok(()) => {
                             log.push(AuditEntry::WorkspaceMemberAdded {
                                 agent_id: AGENT_ID.to_owned(),
@@ -4705,7 +4712,12 @@ fn cmd_workspace(args: &[String]) {
             ),
         },
         Some("remove-member") => match (args.get(1), args.get(2)) {
-            (Some(ws_id), Some(user_id)) => match registry.remove_member(ws_id, user_id) {
+            (Some(ws_id), Some(user_id)) => {
+                let actor = registry
+                    .get(ws_id)
+                    .map(|rec| rec.profile.owner_user_id.clone())
+                    .unwrap_or_default();
+                match registry.remove_member(&actor, ws_id, user_id) {
                 Ok(removed_role) => {
                     log.push(AuditEntry::WorkspaceMemberRemoved {
                         agent_id: AGENT_ID.to_owned(),
@@ -4720,7 +4732,8 @@ fn cmd_workspace(args: &[String]) {
                     print_workspace_audit(&log);
                 }
                 Err(e) => eprintln!("workspace: error: {e}"),
-            },
+                }
+            }
             _ => eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>"),
         },
         Some("set-quota") => match (args.get(1), args.get(2), args.get(3)) {
@@ -4744,7 +4757,11 @@ fn cmd_workspace(args: &[String]) {
                     max_daily_tokens,
                     ..WorkspaceQuota::default()
                 };
-                match registry.set_quota(ws_id, quota) {
+                let actor = registry
+                    .get(ws_id)
+                    .map(|rec| rec.profile.owner_user_id.clone())
+                    .unwrap_or_default();
+                match registry.set_quota(&actor, ws_id, quota) {
                     Ok(()) => {
                         log.push(AuditEntry::WorkspaceQuotaUpdated {
                             agent_id: AGENT_ID.to_owned(),
@@ -4872,20 +4889,41 @@ fn cmd_workspace(args: &[String]) {
 /// anima-hosted jobs list
 /// anima-hosted jobs add --description <desc> [--cron <expr>] [--at <ns>] [--workspace <id>] [--payload <json>]
 /// anima-hosted jobs show <job_id>
+/// ```
+///
+/// `--cron` takes a 5-field expression (minute hour day-of-month month
+/// day-of-week) evaluated in **UTC**. Malformed expressions are rejected at
+/// add time.
+///
+/// ```text
 /// anima-hosted jobs remove <job_id> [<reason>]
 /// anima-hosted jobs run <job_id>
 /// ```
 fn cmd_jobs(args: &[String]) {
     use jobs::{
-        due_job_ids, record_run_result, JobRegistry, JobSchedule, JobStatus, RunResult,
-        ScheduledJob,
+        due_job_ids, record_run_result, validate_cron, JobRegistry, JobSchedule, JobStatus,
+        RunResult, ScheduledJob,
     };
 
     const AGENT_ID: &str = "anima";
 
+    // Open the on-disk registry. A genuinely missing file (first run) yields a
+    // fresh persistent registry; a corrupt/unreadable existing file is a hard
+    // error so we never silently degrade to a non-persisting in-memory registry
+    // and lose the operator's data on exit.
     let mut registry = {
         let path = JobRegistry::default_path(AGENT_ID);
-        JobRegistry::open(&path).unwrap_or_else(|_| JobRegistry::in_memory())
+        match JobRegistry::open(&path) {
+            Ok(reg) => reg,
+            Err(e) => {
+                eprintln!(
+                    "jobs: failed to open registry at {}: {e}",
+                    path.display()
+                );
+                eprintln!("jobs: refusing to run with an unreadable registry (your data would be lost); fix or remove the file and retry");
+                std::process::exit(1);
+            }
+        }
     };
     let mut log = AuditLog::new();
 
@@ -4966,6 +5004,12 @@ fn cmd_jobs(args: &[String]) {
             let payload = flag_value(args, "--payload").unwrap_or_default();
 
             let schedule = if let Some(expr) = flag_value(args, "--cron") {
+                // Reject a malformed cron expression loudly at creation time
+                // rather than persisting one that would silently never fire.
+                if let Err(e) = validate_cron(&expr) {
+                    eprintln!("jobs add: invalid --cron expression: {e}");
+                    std::process::exit(1);
+                }
                 JobSchedule::Cron { expression: expr }
             } else if let Some(at_str) = flag_value(args, "--at") {
                 match at_str.parse::<u64>() {
@@ -5098,6 +5142,9 @@ fn cmd_jobs(args: &[String]) {
             eprintln!("       anima-hosted jobs remove <job_id> [<reason>]");
             eprintln!("       anima-hosted jobs run <job_id>");
             eprintln!("       anima-hosted jobs poll");
+            eprintln!();
+            eprintln!("note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)");
+            eprintln!("      and are evaluated in UTC. e.g. \"0 9 * * 1-5\" = 09:00 UTC, Mon-Fri.");
         }
     }
 }

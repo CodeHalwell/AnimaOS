@@ -89,16 +89,20 @@ services:
       # from Hugging Face via Ollama's `hf.co/...` resolver.
       ANIMA_INSTINCT_MODEL: ${ANIMA_INSTINCT_MODEL:-hf.co/unsloth/gemma-4-E2B-it-GGUF:Q4_K_M}
       ANIMA_WORKHORSE_MODEL: ${ANIMA_WORKHORSE_MODEL:-hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M}
-    # Literal block scalar (|) preserves newlines and avoids any outer
-    # quoting that `/bin/sh -c` would misinterpret as a command name.
+    # The script must be a SINGLE command argument to `sh -c`. When `command`
+    # is a bare block scalar, Compose word-splits the string into argv, so
+    # `sh -c` would see only the first token (`set`) as the script and the
+    # rest as positional params — pulling nothing and still exiting 0. Passing
+    # it as a one-element list keeps the whole script as `-c`'s argument.
     entrypoint: ["/bin/sh", "-c"]
-    command: |
-      set -e
-      echo "anima-ollama-init: pulling $$ANIMA_INSTINCT_MODEL"
-      ollama pull "$$ANIMA_INSTINCT_MODEL"
-      echo "anima-ollama-init: pulling $$ANIMA_WORKHORSE_MODEL"
-      ollama pull "$$ANIMA_WORKHORSE_MODEL"
-      echo "anima-ollama-init: models ready"
+    command:
+      - |
+        set -e
+        echo "anima-ollama-init: pulling $$ANIMA_INSTINCT_MODEL"
+        ollama pull "$$ANIMA_INSTINCT_MODEL"
+        echo "anima-ollama-init: pulling $$ANIMA_WORKHORSE_MODEL"
+        ollama pull "$$ANIMA_WORKHORSE_MODEL"
+        echo "anima-ollama-init: models ready"
     restart: "no"
 
   # ── Agent runtime ───────────────────────────────────────────────────────
@@ -128,7 +132,10 @@ services:
       # `ollama` (default) / `mock` / `anthropic` / `openai`.
       ANIMA_BACKEND: ${ANIMA_BACKEND:-ollama}
       ANIMA_OLLAMA_URL: http://ollama:11434
-      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M}
+      # Default to the workhorse model that ollama-init pulls, so overriding
+      # ANIMA_WORKHORSE_MODEL alone can't leave hosted requesting a model that
+      # was never pulled. An explicit ANIMA_OLLAMA_MODEL still wins.
+      ANIMA_OLLAMA_MODEL: ${ANIMA_OLLAMA_MODEL:-${ANIMA_WORKHORSE_MODEL:-hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M}}
       ANIMA_OLLAMA_CTX: ${ANIMA_OLLAMA_CTX:-8192}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -153,8 +160,11 @@ services:
     container_name: anima-trainer
     profiles: ["training"]
     volumes:
+      # The trainer code is baked into the image via `COPY trainer/ /app/`.
+      # Do NOT bind-mount ./trainer here: it would shadow the image contents
+      # and cause the root-running build context to write checkpoints back to
+      # the host tree as root. Rebuild the image to pick up code changes.
       - ollama-models:/models
-      - ./trainer:/app
     environment:
       # Where Unsloth caches HF downloads / writes adapter checkpoints.
       HF_HOME: /models/hf-cache

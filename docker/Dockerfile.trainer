@@ -25,22 +25,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Unsloth pulls in transformers, peft, trl, accelerate, datasets and the
-# correct bitsandbytes wheel for the detected CUDA build.  Pinning the
-# major version keeps the image reproducible; bump deliberately.
+# correct bitsandbytes wheel for the detected CUDA build.  These are EXACT
+# pins forming a validated, mutually-compatible set for the PyTorch 2.4 /
+# CUDA 12.4 base above — `>=` floors would resolve a fresh (and frequently
+# incompatible) combination on every build, defeating reproducibility. Bump
+# the whole set together and re-validate.
 RUN pip install --upgrade pip \
  && pip install \
-        "unsloth>=2025.1" \
-        "bitsandbytes>=0.43" \
-        "transformers>=4.45" \
-        "peft>=0.13" \
-        "trl>=0.11" \
-        "accelerate>=1.0" \
-        "datasets>=3.0" \
-        "sentencepiece" \
-        "huggingface-hub"
+        "unsloth==2024.11.9" \
+        "bitsandbytes==0.44.1" \
+        "transformers==4.46.3" \
+        "peft==0.13.2" \
+        "trl==0.12.1" \
+        "accelerate==1.1.1" \
+        "datasets==3.1.0" \
+        "sentencepiece==0.2.0" \
+        "huggingface-hub==0.26.2"
+
+# Run as a non-root user. The trainer fetches models from the network and runs
+# a large GPU toolchain, so a compromise should not have container-root. Note:
+# the shared ollama-models volume (mounted at /models for weight round-trip)
+# is created root-owned by the ollama service; if writes there fail, chown it
+# to uid 1000 on the host once before the first training run.
+RUN useradd --create-home --uid 1000 anima \
+ && mkdir -p /app /models \
+ && chown -R anima:anima /app /models
 
 WORKDIR /app
-COPY trainer/ /app/
+COPY --chown=anima:anima trainer/ /app/
+
+USER anima
 
 # Default: run the sanity check so `docker compose run trainer` proves the
 # environment immediately.  Real training scripts go in /app and are

@@ -31,8 +31,9 @@
 //! let profile = WorkspaceProfile::new("acme", "Acme Corp", "telegram:1", 0);
 //! reg.create(profile, 0).unwrap();
 //!
-//! // Add a second user as a member.
-//! reg.add_member("acme", "telegram:2", WorkspaceRole::Member, 1_000)
+//! // Add a second user as a member. The first argument is the *actor* making
+//! // the change: the owner ("telegram:1") has authority to manage membership.
+//! reg.add_member("telegram:1", "acme", "telegram:2", WorkspaceRole::Member, 1_000)
 //!    .unwrap();
 //!
 //! // Check the member's role.

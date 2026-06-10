@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .agent_loop import AgentLoop
 from .identity_memory import IdentityMemory
-from .ipc import recv_message
+from .ipc import recv_message, send_message
 
 
 def _parse_args() -> argparse.Namespace:
@@ -59,13 +59,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
-    # Load identity memory.
-    state_dir = Path(args.state_dir)
-    identity_path = state_dir / "identity.json"
-    identity = IdentityMemory(identity_path)
-    identity.load()
-
-    # Connect to vita's UDS socket.
+    # Connect to vita's UDS socket FIRST, before any fallible work. vita blocks
+    # on accept() with a connect deadline; if we died before connecting (e.g. a
+    # corrupt identity.json raising ValueError) it would observe a dead child,
+    # but connecting first lets us report load failures as a CortexError frame
+    # instead of an opaque non-zero exit (H2).
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.connect(args.socket)
@@ -74,6 +72,21 @@ def main() -> int:
         return 1
 
     try:
+        # Load identity memory now that the socket is open, so a corrupt file
+        # surfaces as a CortexError rather than a pre-connect death.
+        state_dir = Path(args.state_dir)
+        identity_path = state_dir / "identity.json"
+        identity = IdentityMemory(identity_path)
+        try:
+            identity.load()
+        except Exception as exc:  # pylint: disable=broad-except
+            send_message(sock, {
+                "type": "CortexError",
+                "message": f"identity load failed: {exc}",
+            })
+            print(f"[cortex] identity load failed: {exc}", file=sys.stderr)
+            return 1
+
         # Receive the InvokeRequest.
         request = recv_message(sock)
         if request is None:

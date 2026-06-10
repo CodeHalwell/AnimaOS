@@ -697,7 +697,15 @@ impl LifecycleManager {
                         self.next_archive_id += 1;
                         let item = memory::archive_memory_node(id, key, node);
                         let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
-                        let _ = l3.demote(item, prov);
+                        if let Err(e) = l3.demote(item, prov) {
+                            // Don't silently drop the memory: a full archive (or
+                            // any demote error) is operationally significant, so
+                            // surface it instead of swallowing the Result.
+                            eprintln!(
+                                "anima-vita: L3 demote failed for L1 node '{key}': {e} \
+                                 (memory not archived)"
+                            );
+                        }
                     }
                 }
             }
@@ -806,7 +814,15 @@ impl LifecycleManager {
                     self.next_archive_id += 1;
                     let item = memory::archive_memory_node(id, key, node);
                     let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
-                    let _ = l3.demote(item, prov);
+                    if let Err(e) = l3.demote(item, prov) {
+                        // Don't silently drop the memory: a full archive (or any
+                        // demote error) is operationally significant, so surface
+                        // it instead of swallowing the Result.
+                        eprintln!(
+                            "anima-vita: L3 demote failed for L1 node '{key}': {e} \
+                             (memory not archived)"
+                        );
+                    }
                 }
             }
         }

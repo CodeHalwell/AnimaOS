@@ -1818,8 +1818,21 @@ pub fn load_entries_from_env(agent_id: &str) -> Vec<AuditEntry> {
 /// query call sites (`entries()`, `len()`, `is_empty()`) continue to work
 /// without modification.  When a file sink is configured, every `push` also
 /// serialises the entry as a newline-delimited JSON record.
+/// Default cap on the number of entries retained in memory.
+///
+/// The in-memory `Vec` is a bounded ring: once it reaches this many entries,
+/// each `push` evicts the oldest entry. When a durable file sink (and/or HMAC
+/// sidecar) is configured the evicted record has already been persisted, so
+/// dropping it from memory is safe and keeps long-lived agents from growing
+/// the somatic-loop heap without bound. The HMAC chaining state lives in
+/// [`IntegrityChain`] (not in the entry vec), so eviction never breaks the chain.
+pub const DEFAULT_MAX_IN_MEMORY_ENTRIES: usize = 10_000;
+
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
+    /// Maximum number of entries retained in memory; older entries are evicted
+    /// once this cap is reached. Defaults to [`DEFAULT_MAX_IN_MEMORY_ENTRIES`].
+    max_entries: usize,
     /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
     /// (all clones of a manager write to the same audit file).
     #[cfg(feature = "std")]
@@ -1855,6 +1868,7 @@ impl Clone for AuditLog {
     fn clone(&self) -> Self {
         Self {
             entries: self.entries.clone(),
+            max_entries: self.max_entries,
             #[cfg(feature = "std")]
             file_sink: self.file_sink.clone(),
             // Clone shares the same AtomicBool so failure on one clone disables
@@ -1878,6 +1892,7 @@ impl AuditLog {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            max_entries: DEFAULT_MAX_IN_MEMORY_ENTRIES,
             #[cfg(feature = "std")]
             file_sink: None,
             #[cfg(feature = "std")]
@@ -1897,6 +1912,7 @@ impl AuditLog {
             .open(path)?;
         Ok(Self {
             entries: Vec::new(),
+            max_entries: DEFAULT_MAX_IN_MEMORY_ENTRIES,
             file_sink: Some(Arc::new(Mutex::new(file))),
             sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             integrity: None,
@@ -1926,6 +1942,7 @@ impl AuditLog {
 
         Ok(Self {
             entries: Vec::new(),
+            max_entries: DEFAULT_MAX_IN_MEMORY_ENTRIES,
             file_sink: Some(Arc::new(Mutex::new(file))),
             sink_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             integrity: Some(Arc::new(Mutex::new(IntegrityChain {
@@ -2054,6 +2071,23 @@ impl AuditLog {
             }
         }
         self.entries.push(entry);
+        // Bound the in-memory ring: once the cap is reached, evict the oldest
+        // entries. Durable records (file sink / HMAC sidecar) are already
+        // persisted above, so dropping old in-memory entries loses nothing the
+        // operator cannot recover from disk. The HMAC chain state lives in
+        // `IntegrityChain`, so eviction here never affects chain verification.
+        if self.max_entries > 0 && self.entries.len() > self.max_entries {
+            let overflow = self.entries.len() - self.max_entries;
+            self.entries.drain(0..overflow);
+        }
+    }
+
+    /// Overrides the in-memory retention cap (defaults to
+    /// [`DEFAULT_MAX_IN_MEMORY_ENTRIES`]).  A value of `0` disables eviction
+    /// (unbounded growth — use only for short-lived/test logs).
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
     }
 
     /// Append one MAC to the HMAC tamper-evidence sidecar, advancing the chain.
@@ -2262,6 +2296,48 @@ mod integrity_tests {
         }
         let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
         assert_eq!(result, ChainVerification::Ok { entries: 3 });
+        cleanup(&path);
+    }
+
+    #[test]
+    fn in_memory_entries_are_bounded_and_evict_oldest() {
+        // A small cap proves the ring evicts the oldest entries while keeping
+        // the most recent ones, and that `len()` never exceeds the cap.
+        let mut log = AuditLog::new().with_max_entries(3);
+        for i in 0..10 {
+            log.push(entry(&format!("agent-{i}")));
+        }
+        assert_eq!(log.len(), 3, "in-memory entries must be capped");
+        // The three most recent entries are retained (agent-7, agent-8, agent-9).
+        match &log.entries()[0] {
+            AuditEntry::SleepEntered { agent_id } => assert_eq!(agent_id, "agent-7"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+        match &log.entries()[2] {
+            AuditEntry::SleepEntered { agent_id } => assert_eq!(agent_id, "agent-9"),
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eviction_does_not_break_hmac_chain() {
+        // Even when the in-memory ring evicts old entries, the durable log and
+        // its HMAC sidecar must verify over every persisted line.
+        let path = temp_log_path("evict-chain");
+        let key = b"chain-key";
+        {
+            let mut log = AuditLog::with_file_hmac(&path, key)
+                .expect("open")
+                .with_max_entries(2);
+            for i in 0..6 {
+                log.push(entry(&format!("agent-{i}")));
+            }
+            // The in-memory ring is bounded …
+            assert_eq!(log.len(), 2);
+        }
+        // … but the on-disk chain covers all six persisted lines.
+        let result = verify_audit_chain(&path, chain_sidecar_path(&path), key).expect("verify");
+        assert_eq!(result, ChainVerification::Ok { entries: 6 });
         cleanup(&path);
     }
 

@@ -262,19 +262,50 @@ fn strip_brackets(host: &str) -> &str {
 }
 
 /// Returns `Some(EgressDenialReason::SsrfPrivateAddress)` if `host` is an
-/// IP-literal address that falls in a private/loopback/reserved range.
+/// IP-literal address (in any encoding a resolver/`connect` would accept) that
+/// falls in a private/loopback/reserved range.
+///
+/// Hardened against SSRF-bypass tricks that a naïve `Ipv4Addr::from_str` misses:
+/// - the literal hostnames `localhost` / `*.localhost`,
+/// - decimal-integer (`2130706433`), hex (`0x7f000001`), and octal (`0177.0.0.1`)
+///   IPv4 encodings, which `libc` `getaddrinfo`/`inet_aton` happily resolve,
+/// - IPv4-mapped / IPv4-compatible IPv6 (`::ffff:127.0.0.1`).
 fn ssrf_check(host: &str) -> Option<EgressDenialReason> {
-    // Try IPv4
-    if let Ok(addr) = host.parse::<Ipv4Addr>() {
-        if is_private_ipv4(&addr) {
-            return Some(EgressDenialReason::SsrfPrivateAddress {
-                address: host.to_string(),
-            });
-        }
+    let host = strip_brackets(host);
+
+    // `localhost` and any `*.localhost` name resolve to loopback by convention
+    // (RFC 6761) — reject before any other parsing.
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Some(EgressDenialReason::SsrfPrivateAddress {
+            address: host.to_string(),
+        });
     }
-    // Try IPv6
-    if let Ok(addr) = strip_brackets(host).parse::<Ipv6Addr>() {
-        if is_private_ipv6(&addr) {
+
+    // Try IPv6 first: a bracketed/colon-bearing host can only be IPv6.
+    if host.contains(':') {
+        if let Ok(addr) = host.parse::<Ipv6Addr>() {
+            // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d):
+            // extract the embedded v4 and classify it as v4.
+            if let Some(v4) = embedded_ipv4(&addr) {
+                if is_private_ipv4(&v4) {
+                    return Some(EgressDenialReason::SsrfPrivateAddress {
+                        address: host.to_string(),
+                    });
+                }
+            }
+            if is_private_ipv6(&addr) {
+                return Some(EgressDenialReason::SsrfPrivateAddress {
+                    address: host.to_string(),
+                });
+            }
+        }
+        return None;
+    }
+
+    // IPv4 — accept dotted-quad *and* the alternate encodings a resolver honours.
+    if let Some(addr) = parse_ipv4_any(host) {
+        if is_private_ipv4(&addr) {
             return Some(EgressDenialReason::SsrfPrivateAddress {
                 address: host.to_string(),
             });
@@ -283,13 +314,127 @@ fn ssrf_check(host: &str) -> Option<EgressDenialReason> {
     None
 }
 
-/// Returns `true` for loopback, private, link-local, or cloud-metadata IPv4.
+/// Extract the embedded IPv4 address from an IPv4-mapped (`::ffff:a.b.c.d`) or
+/// IPv4-compatible (`::a.b.c.d`) IPv6 address, if present.
+fn embedded_ipv4(addr: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = addr.segments();
+    // IPv4-mapped: ::ffff:a.b.c.d  → [0,0,0,0,0,0xffff,a.b, c.d]
+    if s[0..5] == [0, 0, 0, 0, 0] && s[5] == 0xffff {
+        return Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        ));
+    }
+    // IPv4-compatible: ::a.b.c.d → [0,0,0,0,0,0,a.b,c.d] (deprecated but real).
+    // Exclude :: and ::1 which are handled as native v6.
+    if s[0..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] > 1) {
+        return Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        ));
+    }
+    None
+}
+
+/// Parse an IPv4 host in any encoding a libc resolver (`inet_aton`) would accept:
+/// dotted quad, dotted with octal/hex octets, or a single decimal/octal/hex
+/// integer. Returns `None` for genuine DNS hostnames (which the caller then
+/// subjects to the deny/allow lists rather than SSRF classification).
+fn parse_ipv4_any(host: &str) -> Option<Ipv4Addr> {
+    // Fast path: the normal dotted quad.
+    if let Ok(addr) = host.parse::<Ipv4Addr>() {
+        return Some(addr);
+    }
+
+    // Each part must be a numeric literal (decimal / 0x-hex / 0-octal); a part
+    // that fails to parse means this is not an all-numeric host (it's a DNS
+    // name), so we bail out and let the deny/allow lists handle it.
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut nums = Vec::with_capacity(parts.len());
+    for p in &parts {
+        nums.push(parse_numeric_part(p)?);
+    }
+
+    // inet_aton semantics: the final part absorbs the remaining low-order bytes.
+    let value: u64 = match nums.len() {
+        // a            → 32-bit value
+        1 => nums[0],
+        // a.b          → a.<24-bit b>
+        2 => {
+            if nums[0] > 0xff || nums[1] > 0x00ff_ffff {
+                return None;
+            }
+            (nums[0] << 24) | nums[1]
+        }
+        // a.b.c        → a.b.<16-bit c>
+        3 => {
+            if nums[0] > 0xff || nums[1] > 0xff || nums[2] > 0xffff {
+                return None;
+            }
+            (nums[0] << 24) | (nums[1] << 16) | nums[2]
+        }
+        // a.b.c.d      → standard quad
+        4 => {
+            if nums.iter().any(|&n| n > 0xff) {
+                return None;
+            }
+            (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
+        }
+        _ => return None,
+    };
+    if value > u32::MAX as u64 {
+        return None;
+    }
+    Some(Ipv4Addr::from(value as u32))
+}
+
+/// Parse a single IPv4 part as decimal, `0x`/`0X` hex, or leading-zero octal.
+/// Returns `None` if the part is empty or contains non-numeric characters
+/// (i.e. it's part of a DNS label, not an IP literal).
+fn parse_numeric_part(p: &str) -> Option<u64> {
+    if p.is_empty() {
+        return None;
+    }
+    let lower = p.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u64::from_str_radix(hex, 16).ok()
+    } else if p.len() > 1 && p.starts_with('0') {
+        if !p.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return None;
+        }
+        u64::from_str_radix(p, 8).ok()
+    } else {
+        if !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        p.parse::<u64>().ok()
+    }
+}
+
+/// Returns `true` for loopback, private, link-local, CGNAT, or
+/// cloud-metadata IPv4 — i.e. any address that must never be reached by an
+/// outbound tool request.
 fn is_private_ipv4(addr: &Ipv4Addr) -> bool {
-    addr.is_loopback()
-        || addr.is_private()
-        || addr.is_link_local()
-        || addr.is_unspecified()
-        || addr.is_broadcast()
+    let o = addr.octets();
+    addr.is_loopback()              // 127.0.0.0/8
+        || addr.is_private()        // 10/8, 172.16/12, 192.168/16
+        || addr.is_link_local()     // 169.254.0.0/16
+        || addr.is_unspecified()    // 0.0.0.0
+        || addr.is_broadcast()      // 255.255.255.255
+        // 0.0.0.0/8 ("this host" — routes to loopback on many stacks).
+        || o[0] == 0
+        // CGNAT / shared address space: 100.64.0.0/10.
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
         // Cloud metadata IP (169.254.169.254) is already covered by is_link_local,
         // but we call it out explicitly for clarity.
         || *addr == Ipv4Addr::new(169, 254, 169, 254)
@@ -514,5 +659,98 @@ mod tests {
         assert!(guard()
             .check_url("https://[2001:4860:4860::8888]/")
             .is_allowed());
+    }
+
+    // ── SSRF bypass hardening (decimal/hex/octal/IPv4-mapped/localhost) ────────
+
+    #[test]
+    fn localhost_hostname_is_denied() {
+        assert!(guard().check_url("https://localhost/admin").is_denied());
+        assert!(guard().check_url("https://LOCALHOST/").is_denied());
+        assert!(guard().check_url("https://foo.localhost/").is_denied());
+    }
+
+    #[test]
+    fn decimal_encoded_loopback_is_denied() {
+        // 2130706433 == 127.0.0.1
+        assert!(guard().check_url("https://2130706433/").is_denied());
+    }
+
+    #[test]
+    fn hex_encoded_loopback_is_denied() {
+        // 0x7f000001 == 127.0.0.1
+        assert!(guard().check_url("https://0x7f000001/").is_denied());
+    }
+
+    #[test]
+    fn octal_encoded_loopback_is_denied() {
+        // 0177.0.0.1 == 127.0.0.1
+        assert!(guard().check_url("https://0177.0.0.1/").is_denied());
+    }
+
+    #[test]
+    fn decimal_encoded_metadata_is_denied() {
+        // 2852039166 == 169.254.169.254
+        assert!(guard().check_url("https://2852039166/").is_denied());
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_loopback_is_denied() {
+        assert!(guard().check_url("https://[::ffff:127.0.0.1]/").is_denied());
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_metadata_is_denied() {
+        assert!(guard()
+            .check_url("https://[::ffff:169.254.169.254]/")
+            .is_denied());
+    }
+
+    #[test]
+    fn ipv4_compatible_ipv6_loopback_is_denied() {
+        assert!(guard().check_url("https://[::127.0.0.1]/").is_denied());
+    }
+
+    #[test]
+    fn ipv6_unspecified_is_denied() {
+        assert!(guard().check_url("https://[::]/").is_denied());
+    }
+
+    #[test]
+    fn ipv6_explicit_loopback_is_denied() {
+        assert!(guard().check_url("https://[::1]/").is_denied());
+    }
+
+    #[test]
+    fn cgnat_range_is_denied() {
+        assert!(guard().check_url("https://100.64.0.1/").is_denied());
+        assert!(guard().check_url("https://100.127.255.254/").is_denied());
+    }
+
+    #[test]
+    fn zero_prefix_is_denied() {
+        assert!(guard().check_url("https://0.0.0.0/").is_denied());
+        assert!(guard().check_url("https://0.1.2.3/").is_denied());
+    }
+
+    #[test]
+    fn public_decimal_quad_still_allowed() {
+        // Normal public dotted quad and a public hostname must still pass.
+        assert!(guard().check_url("https://8.8.8.8/").is_allowed());
+        assert!(guard().check_url("https://93.184.216.34/").is_allowed());
+        assert!(guard().check_url("https://example.com/").is_allowed());
+    }
+
+    #[test]
+    fn public_ipv4_mapped_ipv6_is_allowed() {
+        // ::ffff:8.8.8.8 maps to a public address.
+        assert!(guard().check_url("https://[::ffff:8.8.8.8]/").is_allowed());
+    }
+
+    #[test]
+    fn numeric_looking_hostname_is_not_misclassified() {
+        // A DNS label that merely starts with a digit is not an IP literal and
+        // must not be treated as private.
+        assert!(guard().check_url("https://1host.example.com/").is_allowed());
     }
 }

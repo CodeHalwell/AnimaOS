@@ -125,10 +125,18 @@ pub struct TaskOutcome {
 /// and call [`IterationAwareMlfq::check_and_boost`] with the live
 /// [`TaskAgenda`] before selecting each task.  After every `boost_interval`
 /// dispatches, `check_and_boost` promotes all Medium/Low tasks to High.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct IterationAwareMlfq {
     /// Ordered history of tasks that were dispatched (success and failure alike).
+    ///
+    /// Bounded: once it reaches `max_dispatched_tasks` entries each dispatch
+    /// evicts the oldest, so a long-lived scheduler does not retain every task
+    /// it has ever run and grow the heap without bound.
     pub dispatched_tasks: Vec<Task>,
+    /// Maximum number of entries retained in `dispatched_tasks`; older entries
+    /// are evicted once this cap is reached. Defaults to
+    /// [`DEFAULT_MAX_DISPATCHED_TASKS`].  `0` disables eviction.
+    max_dispatched_tasks: usize,
     /// Per-tier dispatch counters — incremented before the backend call so they
     /// reflect *attempted* dispatches, not only successful ones.
     pub tier_counters: [u64; NUM_TIERS],
@@ -139,6 +147,23 @@ pub struct IterationAwareMlfq {
     pub boost_interval: u32,
     /// Internal dispatch count used to trigger the starvation boost.
     dispatch_count: u64,
+}
+
+/// Default cap on the number of entries retained in
+/// [`IterationAwareMlfq::dispatched_tasks`].
+pub const DEFAULT_MAX_DISPATCHED_TASKS: usize = 10_000;
+
+impl Default for IterationAwareMlfq {
+    fn default() -> Self {
+        Self {
+            dispatched_tasks: Vec::new(),
+            max_dispatched_tasks: DEFAULT_MAX_DISPATCHED_TASKS,
+            tier_counters: [0; NUM_TIERS],
+            total_tokens_dispatched: 0,
+            boost_interval: 0,
+            dispatch_count: 0,
+        }
+    }
 }
 
 impl IterationAwareMlfq {
@@ -152,6 +177,14 @@ impl IterationAwareMlfq {
             boost_interval,
             ..Default::default()
         }
+    }
+
+    /// Overrides the dispatch-history retention cap (defaults to
+    /// [`DEFAULT_MAX_DISPATCHED_TASKS`]).  `0` disables eviction (unbounded —
+    /// use only for short-lived/test schedulers).
+    pub fn with_max_dispatched_tasks(mut self, max_dispatched_tasks: usize) -> Self {
+        self.max_dispatched_tasks = max_dispatched_tasks;
+        self
     }
 
     /// Checks whether a starvation boost is due and, if so, promotes all
@@ -200,6 +233,14 @@ impl IterationAwareMlfq {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tier_counters[tier] = self.tier_counters[tier].saturating_add(1);
         self.dispatched_tasks.push(task.clone());
+        // Bound the dispatch history: evict the oldest entries once the cap is
+        // reached so a long-running scheduler does not retain every task forever.
+        if self.max_dispatched_tasks > 0
+            && self.dispatched_tasks.len() > self.max_dispatched_tasks
+        {
+            let overflow = self.dispatched_tasks.len() - self.max_dispatched_tasks;
+            self.dispatched_tasks.drain(0..overflow);
+        }
         self.dispatch_count = self.dispatch_count.saturating_add(1);
 
         let stream = backend.stream_completion(&task.prompt, cancel).await?;
@@ -668,6 +709,26 @@ mod tests {
         assert_eq!(sched.tier_counters[0], 1);
         // Tokens should not accumulate on failure.
         assert_eq!(sched.total_tokens_dispatched, 0);
+    }
+
+    #[test]
+    fn dispatched_tasks_history_is_bounded_and_evicts_oldest() {
+        use crate::mock::MockLlmBackend;
+
+        // A small cap proves the history ring evicts the oldest entries while
+        // retaining the most recent, and `len()` never exceeds the cap.
+        let mut sched = IterationAwareMlfq::default().with_max_dispatched_tasks(3);
+        let backend = MockLlmBackend::new();
+        let cancel = CancellationToken::new();
+
+        for i in 0..10u64 {
+            block_on(sched.dispatch_task(Task::new(i, 0, "x"), &backend, &cancel)).unwrap();
+        }
+
+        assert_eq!(sched.dispatched_tasks.len(), 3, "history must be capped");
+        // The three most recent tasks (ids 7, 8, 9) are retained.
+        assert_eq!(sched.dispatched_tasks[0].id, 7);
+        assert_eq!(sched.dispatched_tasks[2].id, 9);
     }
 
     // ── Token-count estimation ──────────────────────────────────────────────

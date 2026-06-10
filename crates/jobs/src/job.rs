@@ -158,9 +158,13 @@ impl ScheduledJob {
 ///
 /// The identifier has the form `job-<slug>-<hex>` where `<slug>` is the first
 /// 24 characters of the lowercased description with non-alphanumeric characters
-/// replaced by `-`, and `<hex>` is a 4-character hex suffix derived from the
-/// millisecond timestamp to ensure uniqueness across identical descriptions.
+/// replaced by `-`, and `<hex>` is a hex suffix that mixes the full millisecond
+/// timestamp with a process-local monotonic counter so that jobs created with
+/// the same description in the same millisecond do not collide.
 pub fn make_job_id(description: &str, now_ns: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let slug: String = description
         .to_lowercase()
         .chars()
@@ -171,8 +175,14 @@ pub fn make_job_id(description: &str, now_ns: u64) -> String {
         .take(24)
         .collect();
     let slug = slug.trim_end_matches('-').to_owned();
-    let suffix = (now_ns / 1_000_000) & 0xFFFF;
-    format!("job-{slug}-{suffix:04x}")
+
+    // Use the full millisecond timestamp (48 bits is plenty until well past the
+    // year 10000) and mix in a 16-bit process-local counter so that identical
+    // descriptions created in the same millisecond still get distinct IDs.
+    let millis = now_ns / 1_000_000;
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF;
+    let suffix = (millis << 16) | counter;
+    format!("job-{slug}-{suffix:x}")
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

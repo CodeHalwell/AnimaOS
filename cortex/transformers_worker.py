@@ -96,8 +96,28 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
         })
         return
 
+    # Upper bound on generated tokens regardless of the request, to bound work
+    # and memory on a per-call basis (L3).
+    MAX_NEW_TOKENS_CAP = 4096
     prompt: str = request.get("prompt", "")
-    max_new_tokens: int = int(request.get("max_new_tokens", 256))
+    try:
+        max_new_tokens = int(request.get("max_new_tokens", 256))
+    except (TypeError, ValueError):
+        _send_frame(conn, {
+            "type": "error",
+            "message": f"invalid max_new_tokens: {request.get('max_new_tokens')!r}",
+        })
+        return
+    max_new_tokens = max(1, min(max_new_tokens, MAX_NEW_TOKENS_CAP))
+
+    # Optional sampling parameters (L4). temperature<=0 means greedy/argmax.
+    try:
+        temperature = float(request.get("temperature", 0.0))
+        top_p = float(request.get("top_p", 1.0))
+        top_k = int(request.get("top_k", 0))
+    except (TypeError, ValueError) as exc:
+        _send_frame(conn, {"type": "error", "message": f"invalid sampling params: {exc}"})
+        return
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -111,48 +131,97 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
         return
 
     model.eval()
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    # Truncate the prompt to the model's context window, leaving room for the
+    # generated tokens, so an oversized prompt cannot OOM or hang (L3).
+    max_ctx = getattr(model.config, "max_position_embeddings", None) or 4096
+    max_prompt_tokens = max(1, max_ctx - max_new_tokens)
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_prompt_tokens,
+    ).to(model.device)
+
+    # Stop on any of the model's declared EOS ids, not just the tokenizer's
+    # single eos_token_id — instruct models (e.g. Phi-3.5) end turns on a
+    # different id (<|end|>) declared in generation_config (M1).
+    eos_ids: set[int] = set()
+    if tokenizer.eos_token_id is not None:
+        eos_ids.add(int(tokenizer.eos_token_id))
+    gen_cfg = getattr(model, "generation_config", None)
+    cfg_eos = getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
+    if isinstance(cfg_eos, int):
+        eos_ids.add(cfg_eos)
+    elif isinstance(cfg_eos, (list, tuple)):
+        eos_ids.update(int(x) for x in cfg_eos)
+
+    def _pick_next(logits: "torch.Tensor") -> int:
+        """Select the next token id from the final-position logits."""
+        if temperature <= 0.0:
+            return int(logits.argmax(dim=-1)[0].item())
+        scaled = logits / temperature
+        if top_k > 0:
+            kth = torch.topk(scaled, min(top_k, scaled.shape[-1]), dim=-1).values[..., -1, None]
+            scaled = scaled.masked_fill(scaled < kth, float("-inf"))
+        probs = torch.softmax(scaled, dim=-1)
+        if 0.0 < top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+            cumulative = torch.cumsum(sorted_probs, dim=-1)
+            mask = cumulative - sorted_probs > top_p
+            sorted_probs = sorted_probs.masked_fill(mask, 0.0)
+            probs = torch.zeros_like(probs).scatter_(-1, sorted_idx, sorted_probs)
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+        return int(torch.multinomial(probs, num_samples=1)[0].item())
 
     total = 0
+    # Decode cumulatively and emit only the newly-appended suffix each step.
+    # Decoding tokens one-at-a-time corrupts output: SentencePiece strips the
+    # leading-space marker on isolated pieces and multi-byte chars split across
+    # tokens decode to U+FFFD per fragment (H3).
+    generated_ids: list[int] = []
+    prev_text = ""
     try:
         with torch.no_grad():
             past_key_values = None
+            next_input = inputs["input_ids"]
+            attention_mask = inputs.get("attention_mask")
             for _ in range(max_new_tokens):
                 if past_key_values is None:
-                    # First step: full forward pass over the prompt.
-                    outputs = model(**inputs, use_cache=True)
-                else:
-                    # Subsequent steps: only the new token; KV cache covers the rest.
                     outputs = model(
-                        input_ids=next_token_id.unsqueeze(0),
-                        attention_mask=inputs.get("attention_mask"),
+                        input_ids=next_input,
+                        attention_mask=attention_mask,
+                        use_cache=True,
+                    )
+                else:
+                    outputs = model(
+                        input_ids=next_input,
+                        attention_mask=attention_mask,
                         past_key_values=past_key_values,
                         use_cache=True,
                     )
 
                 past_key_values = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1)
-                # Use .item() to convert the tensor scalar to a Python int before
-                # decoding — decode() is most reliable with a plain int or list.
-                token_int = next_token_id[0].item()
-                token_text = tokenizer.decode([token_int], skip_special_tokens=False)
-
-                _send_frame(conn, {"type": "token", "text": token_text})
+                token_int = _pick_next(outputs.logits[:, -1, :])
+                generated_ids.append(token_int)
                 total += 1
 
-                # Guard against tokenizers that expose eos_token_id as None.
-                eos_id = tokenizer.eos_token_id
-                if eos_id is not None and token_int == eos_id:
+                # Stop before surfacing the EOS token's text.
+                if token_int in eos_ids:
                     break
 
-                if "attention_mask" in inputs:
+                full_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                delta = full_text[len(prev_text):]
+                prev_text = full_text
+                if delta:
+                    _send_frame(conn, {"type": "token", "text": delta})
+
+                next_input = torch.tensor([[token_int]], device=model.device)
+                if attention_mask is not None:
                     ones = torch.ones(
-                        (1, 1), dtype=inputs["attention_mask"].dtype,
-                        device=inputs["attention_mask"].device,
+                        (1, 1), dtype=attention_mask.dtype, device=attention_mask.device,
                     )
-                    inputs["attention_mask"] = torch.cat(
-                        [inputs["attention_mask"], ones], dim=1
-                    )
+                    attention_mask = torch.cat([attention_mask, ones], dim=1)
     except Exception as exc:
         _send_frame(conn, {"type": "error", "message": f"generation error: {exc}"})
         return

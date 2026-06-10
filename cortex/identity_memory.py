@@ -67,14 +67,37 @@ class IdentityMemory:
             ) from exc
 
     def save(self) -> None:
-        """Atomically write the current data to disk."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(self._data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self._path)
+        """Atomically and durably write the current data to disk.
+
+        Uses a process-unique temp name (so concurrent savers cannot rename a
+        torn file into place) and fsyncs both the temp file and the parent
+        directory before/after the rename, so a crash or power loss cannot
+        leave a partial or empty ``identity.json`` (L2).
+        """
+        parent = self._path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
+        payload = json.dumps(self._data, indent=2, ensure_ascii=False)
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, payload.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self._path)
+            # Persist the directory entry created by the rename.
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     # ── Key-value access (dot-separated paths) ────────────────────────────────
 
