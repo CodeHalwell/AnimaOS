@@ -86,12 +86,18 @@ class IdentityMemory:
             finally:
                 os.close(fd)
             os.replace(tmp, self._path)
-            # Persist the directory entry created by the rename.
-            dir_fd = os.open(parent, os.O_RDONLY)
+            # Persist the directory entry created by the rename (best-effort:
+            # the rename already succeeded, and opening a directory for fsync
+            # fails on some platforms/filesystems — e.g. Windows — where it
+            # must not turn a successful save into a reported failure).
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except BaseException:
             try:
                 os.unlink(tmp)

@@ -4687,22 +4687,26 @@ fn cmd_workspace(args: &[String]) {
                     .map(|rec| rec.profile.owner_user_id.clone())
                     .unwrap_or_default();
                 match WorkspaceRole::from_str(role_str) {
-                    Ok(role) => match registry.add_member(&actor, ws_id, user_id.clone(), role, 0) {
-                        Ok(()) => {
-                            log.push(AuditEntry::WorkspaceMemberAdded {
-                                agent_id: AGENT_ID.to_owned(),
-                                workspace_id: ws_id.clone(),
-                                user_id: user_id.clone(),
-                                role: role.as_str().to_owned(),
-                            });
-                            if let Err(e) = registry.flush() {
-                                eprintln!("workspace: warning: could not persist registry: {e}");
+                    Ok(role) => {
+                        match registry.add_member(&actor, ws_id, user_id.clone(), role, 0) {
+                            Ok(()) => {
+                                log.push(AuditEntry::WorkspaceMemberAdded {
+                                    agent_id: AGENT_ID.to_owned(),
+                                    workspace_id: ws_id.clone(),
+                                    user_id: user_id.clone(),
+                                    role: role.as_str().to_owned(),
+                                });
+                                if let Err(e) = registry.flush() {
+                                    eprintln!(
+                                        "workspace: warning: could not persist registry: {e}"
+                                    );
+                                }
+                                println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
+                                print_workspace_audit(&log);
                             }
-                            println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
-                            print_workspace_audit(&log);
+                            Err(e) => eprintln!("workspace: error: {e}"),
                         }
-                        Err(e) => eprintln!("workspace: error: {e}"),
-                    },
+                    }
                     Err(e) => eprintln!("workspace: invalid role: {e}"),
                 }
             }
@@ -4718,20 +4722,20 @@ fn cmd_workspace(args: &[String]) {
                     .map(|rec| rec.profile.owner_user_id.clone())
                     .unwrap_or_default();
                 match registry.remove_member(&actor, ws_id, user_id) {
-                Ok(removed_role) => {
-                    log.push(AuditEntry::WorkspaceMemberRemoved {
-                        agent_id: AGENT_ID.to_owned(),
-                        workspace_id: ws_id.clone(),
-                        user_id: user_id.clone(),
-                        role: removed_role.as_str().to_owned(),
-                    });
-                    if let Err(e) = registry.flush() {
-                        eprintln!("workspace: warning: could not persist registry: {e}");
+                    Ok(removed_role) => {
+                        log.push(AuditEntry::WorkspaceMemberRemoved {
+                            agent_id: AGENT_ID.to_owned(),
+                            workspace_id: ws_id.clone(),
+                            user_id: user_id.clone(),
+                            role: removed_role.as_str().to_owned(),
+                        });
+                        if let Err(e) = registry.flush() {
+                            eprintln!("workspace: warning: could not persist registry: {e}");
+                        }
+                        println!("workspace: removed {user_id:?} from {ws_id:?}");
+                        print_workspace_audit(&log);
                     }
-                    println!("workspace: removed {user_id:?} from {ws_id:?}");
-                    print_workspace_audit(&log);
-                }
-                Err(e) => eprintln!("workspace: error: {e}"),
+                    Err(e) => eprintln!("workspace: error: {e}"),
                 }
             }
             _ => eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>"),
@@ -4916,10 +4920,7 @@ fn cmd_jobs(args: &[String]) {
         match JobRegistry::open(&path) {
             Ok(reg) => reg,
             Err(e) => {
-                eprintln!(
-                    "jobs: failed to open registry at {}: {e}",
-                    path.display()
-                );
+                eprintln!("jobs: failed to open registry at {}: {e}", path.display());
                 eprintln!("jobs: refusing to run with an unreadable registry (your data would be lost); fix or remove the file and retry");
                 std::process::exit(1);
             }
@@ -5143,7 +5144,9 @@ fn cmd_jobs(args: &[String]) {
             eprintln!("       anima-hosted jobs run <job_id>");
             eprintln!("       anima-hosted jobs poll");
             eprintln!();
-            eprintln!("note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)");
+            eprintln!(
+                "note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)"
+            );
             eprintln!("      and are evaluated in UTC. e.g. \"0 9 * * 1-5\" = 09:00 UTC, Mon-Fri.");
         }
     }

@@ -118,6 +118,15 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
     except (TypeError, ValueError) as exc:
         _send_frame(conn, {"type": "error", "message": f"invalid sampling params: {exc}"})
         return
+    if temperature < 0.0:
+        _send_frame(conn, {"type": "error", "message": "temperature must be non-negative"})
+        return
+    if not 0.0 <= top_p <= 1.0:
+        _send_frame(conn, {"type": "error", "message": "top_p must be between 0.0 and 1.0"})
+        return
+    if top_k < 0:
+        _send_frame(conn, {"type": "error", "message": "top_k must be non-negative"})
+        return
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -133,8 +142,11 @@ def run_inference(conn: socket.socket, model_id: str, request: dict[str, Any]) -
     model.eval()
 
     # Truncate the prompt to the model's context window, leaving room for the
-    # generated tokens, so an oversized prompt cannot OOM or hang (L3).
+    # generated tokens, so an oversized prompt cannot OOM or hang (L3). Also
+    # cap max_new_tokens to the window so prompt + generated never exceeds it
+    # (which would crash models with absolute position embeddings).
     max_ctx = getattr(model.config, "max_position_embeddings", None) or 4096
+    max_new_tokens = max(1, min(max_new_tokens, max_ctx - 1))
     max_prompt_tokens = max(1, max_ctx - max_new_tokens)
     inputs = tokenizer(
         prompt,

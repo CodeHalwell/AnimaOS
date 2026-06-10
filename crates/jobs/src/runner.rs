@@ -99,7 +99,10 @@ fn job_is_due(job: &ScheduledJob, now_ns: u64) -> bool {
         // exhaustion flips the status to Failed in `record_run_result`, so such
         // jobs are filtered out earlier by `is_active`.)
         Some(last) if !last.success && is_one_shot(&job.schedule) => {
-            let delay_ns = job.retry_policy.retry_delay_secs.saturating_mul(1_000_000_000);
+            let delay_ns = job
+                .retry_policy
+                .retry_delay_secs
+                .saturating_mul(1_000_000_000);
             now_ns >= last.fired_at_ns.saturating_add(delay_ns)
         }
         // Recurring jobs: defer to the schedule using the last firing time.

@@ -315,6 +315,18 @@ impl WorkspaceRegistry {
 
         authorize_manage(rec, actor)?;
 
+        // An actor may only grant a role strictly below their own. This keeps
+        // Admins to managing membership "up to Member level" (the role
+        // contract in `membership.rs`): an Admin cannot mint another Admin, so
+        // delegating Admin to a user does not let them escalate the workspace.
+        let actor_role = rec.member_role(actor).unwrap_or(WorkspaceRole::Guest);
+        if role >= actor_role {
+            return Err(WorkspaceError::InsufficientRole {
+                required: WorkspaceRole::Owner,
+                actual: actor_role,
+            });
+        }
+
         // Duplicate check before quota so a re-add of an existing member
         // never returns QuotaExceeded.
         if rec.members.iter().any(|m| m.user_id == user_id) {
@@ -380,6 +392,18 @@ impl WorkspaceRegistry {
                 workspace_id: workspace_id.to_owned(),
                 user_id: user_id.to_owned(),
             });
+        }
+        // Symmetric with add_member: removing a peer (or higher) managing role
+        // requires outranking it, so one Admin cannot evict another. Does not
+        // apply to self-removal, which returned above.
+        if actor != user_id {
+            let actor_role = rec.member_role(actor).unwrap_or(WorkspaceRole::Guest);
+            if removed_role >= actor_role {
+                return Err(WorkspaceError::InsufficientRole {
+                    required: WorkspaceRole::Owner,
+                    actual: actor_role,
+                });
+            }
         }
         rec.members.remove(pos);
         Ok(removed_role)
@@ -801,6 +825,38 @@ mod tests {
         let q = WorkspaceQuota::new(7, 7, 7, 7);
         reg.set_quota("owner", "acme", q.clone()).unwrap();
         assert_eq!(reg.get("acme").unwrap().quota, q);
+    }
+
+    #[test]
+    fn admin_cannot_grant_admin_role() {
+        // An Admin may manage membership only up to Member level: delegating
+        // Admin must require the Owner, so a delegated admin cannot mint peers.
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "admin-1", WorkspaceRole::Admin, 0)
+            .unwrap();
+        let err = reg
+            .add_member("admin-1", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        assert!(reg.member_role("acme", "admin-2").is_none());
+        // The owner, who outranks Admin, still may.
+        reg.add_member("owner", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn admin_cannot_remove_peer_admin() {
+        let mut reg = WorkspaceRegistry::in_memory();
+        reg.create(make_profile("acme", "owner"), 0).unwrap();
+        reg.add_member("owner", "acme", "admin-1", WorkspaceRole::Admin, 0)
+            .unwrap();
+        reg.add_member("owner", "acme", "admin-2", WorkspaceRole::Admin, 0)
+            .unwrap();
+        let err = reg.remove_member("admin-1", "acme", "admin-2").unwrap_err();
+        assert!(matches!(err, WorkspaceError::InsufficientRole { .. }));
+        // The owner outranks both and may remove either.
+        reg.remove_member("owner", "acme", "admin-2").unwrap();
     }
 
     #[test]

@@ -113,10 +113,10 @@ pub fn is_cron_due(expression: &str, now_ns: u64, last_fired_ns: u64) -> bool {
 /// [module](crate::schedule); each field must consist of `*`, `N`, `A-B`,
 /// `A,B,C`, `*/N`, or `A-B/N` combinations.
 ///
-/// Field values are not bounds-checked against their domains (e.g. minute
-/// 0–59) because out-of-range numeric fields simply never match — but
-/// structurally invalid fields (non-numeric, zero step, reversed range) are
-/// rejected.
+/// Numeric field values are bounds-checked against their standard domains so
+/// a typo like `0 25 * * *` (hour 25) is rejected at creation rather than
+/// silently never firing. Structurally invalid fields (non-numeric, zero
+/// step, reversed range) are rejected too.
 pub fn validate_cron(expression: &str) -> Result<(), String> {
     let parts: Vec<&str> = expression.split_whitespace().collect();
     if parts.len() != 5 {
@@ -125,33 +125,36 @@ pub fn validate_cron(expression: &str) -> Result<(), String> {
             parts.len()
         ));
     }
-    for (field, label) in parts.iter().zip([
-        "minute",
-        "hour",
-        "day-of-month",
-        "month",
-        "day-of-week",
-    ]) {
-        validate_field(field).map_err(|e| format!("invalid {label} field {field:?}: {e}"))?;
+    // (label, inclusive min, inclusive max) per standard cron field.
+    let fields = [
+        ("minute", 0, 59),
+        ("hour", 0, 23),
+        ("day-of-month", 1, 31),
+        ("month", 1, 12),
+        ("day-of-week", 0, 6),
+    ];
+    for (field, (label, min, max)) in parts.iter().zip(fields) {
+        validate_field(field, min, max)
+            .map_err(|e| format!("invalid {label} field {field:?}: {e}"))?;
     }
     Ok(())
 }
 
-/// Validates a single cron field, returning an error describing the problem.
-fn validate_field(field: &str) -> Result<(), String> {
+/// Validates a single cron field against the `[min, max]` domain.
+fn validate_field(field: &str, min: u64, max: u64) -> Result<(), String> {
     if field.is_empty() {
         return Err("empty field".to_owned());
     }
     // A field is a comma-separated list of items; each item is `*`, `N`,
     // `A-B`, `*/N`, or `A-B/N`.
     for item in field.split(',') {
-        validate_item(item)?;
+        validate_item(item, min, max)?;
     }
     Ok(())
 }
 
 /// Validates a single comma-separated item within a cron field.
-fn validate_item(item: &str) -> Result<(), String> {
+fn validate_item(item: &str, min: u64, max: u64) -> Result<(), String> {
     if item.is_empty() {
         return Err("empty list element".to_owned());
     }
@@ -172,6 +175,14 @@ fn validate_item(item: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    let in_bounds = |n: u64| -> Result<u64, String> {
+        if n < min || n > max {
+            Err(format!("value {n} is out of bounds ({min}-{max})"))
+        } else {
+            Ok(n)
+        }
+    };
+
     // The base is either a single value `N` or a range `A-B`.
     match base.split_once('-') {
         Some((a, b)) => {
@@ -184,16 +195,22 @@ fn validate_item(item: &str) -> Result<(), String> {
             if a > b {
                 return Err(format!("range start {a} is greater than end {b}"));
             }
+            in_bounds(a)?;
+            in_bounds(b)?;
             Ok(())
         }
         None => {
             if step {
                 // `N/M` without a range is not valid cron; require `*` or a range.
-                return Err(format!("step requires `*` or a range before `/` in {item:?}"));
+                return Err(format!(
+                    "step requires `*` or a range before `/` in {item:?}"
+                ));
             }
-            base.parse::<u64>()
-                .map(|_| ())
-                .map_err(|_| format!("{base:?} is not a number"))
+            let n = base
+                .parse::<u64>()
+                .map_err(|_| format!("{base:?} is not a number"))?;
+            in_bounds(n)?;
+            Ok(())
         }
     }
 }
@@ -493,7 +510,10 @@ mod tests {
         let s = JobSchedule::Cron {
             expression: "0 9 * * 1-5".to_owned(),
         };
-        assert!(s.is_due(nine_am, 0), "Monday 09:00 should match 0 9 * * 1-5");
+        assert!(
+            s.is_due(nine_am, 0),
+            "Monday 09:00 should match 0 9 * * 1-5"
+        );
     }
 
     #[test]

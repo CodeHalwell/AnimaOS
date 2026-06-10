@@ -235,8 +235,7 @@ impl IterationAwareMlfq {
         self.dispatched_tasks.push(task.clone());
         // Bound the dispatch history: evict the oldest entries once the cap is
         // reached so a long-running scheduler does not retain every task forever.
-        if self.max_dispatched_tasks > 0
-            && self.dispatched_tasks.len() > self.max_dispatched_tasks
+        if self.max_dispatched_tasks > 0 && self.dispatched_tasks.len() > self.max_dispatched_tasks
         {
             let overflow = self.dispatched_tasks.len() - self.max_dispatched_tasks;
             self.dispatched_tasks.drain(0..overflow);

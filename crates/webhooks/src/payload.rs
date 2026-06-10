@@ -260,7 +260,11 @@ mod tests {
         let body = make_payload("task_completed").to_json();
         let sig = WebhookPayload::sign(&body, "shared-secret");
         // Correct signature is accepted.
-        assert!(WebhookPayload::verify_signature(&body, "shared-secret", &sig));
+        assert!(WebhookPayload::verify_signature(
+            &body,
+            "shared-secret",
+            &sig
+        ));
 
         // A signature that differs only in its last byte must be rejected. (This
         // is the case a short-circuiting compare would have leaked timing on.)
@@ -268,7 +272,11 @@ mod tests {
         let last = wrong.last_mut().unwrap();
         *last = if *last == b'0' { b'1' } else { b'0' };
         let wrong = String::from_utf8(wrong).unwrap();
-        assert!(!WebhookPayload::verify_signature(&body, "shared-secret", &wrong));
+        assert!(!WebhookPayload::verify_signature(
+            &body,
+            "shared-secret",
+            &wrong
+        ));
     }
 
     #[test]
