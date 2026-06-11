@@ -230,9 +230,12 @@ eviction policy and a defined promotion path back into L1.
 1. ARC hit-rate matches the reference implementation on the published trace
    set within 1%. ✅ (`arc_hit_rate_is_at_least_as_good_as_lru_on_frequency_workload`
    — ARC matches or beats LRU with ≤1 % tolerance on the frequency workload)
-2. Concurrent reader/writer soak with no data races (Miri/loom). ✅
+2. Concurrent reader/writer soak with no data races. ✅
    (`concurrent_readers_and_writers_produce_no_panics` — 4 writer +
-   4 reader threads, 500 ops each, no panics, invariant holds)
+   4 reader threads, 500 ops each, no panics, invariant holds.  Verified
+   by threaded stress test; `loom` model-checking was not adopted —
+   the L2 cache delegates its concurrency to `scc::HashMap` rather than
+   hand-rolled synchronisation)
 
 ### Epic E2.3 — Praxis Tool Driver Framework ✅
 
@@ -1904,6 +1907,17 @@ microVM target to production status; retain hosted for development.
 **Exit criteria.**
 1. ✅ The Stage 3 sleep-cycle soak passes inside the microVM target.
 
+> **Scope note (what "ported" means here).** The six subsystem crates were
+> made `no_std`-capable (feature-gated std), and the kernel **links and
+> exercises** `scheduler`, `memory`, and `interoception` (plus `corpus` and
+> `console-proto`) in the E4.5 soak. `praxis`, `anima-self`, and `senses`
+> build for `no_std` but are not yet linked into the kernel binary.
+> **`vita` remains effectively std-only** — the lifecycle director does not
+> run in the microVM yet, so the production target currently exercises the
+> somatic substrate without its autonomous lifecycle. The `vita` port (and
+> linking the remaining crates) is tracked as a software tail in
+> `docs/22-remaining-hardware-gated-work.md` §1a.
+
 **Completed work (branch `claude/intelligent-cannon-ROLFb`).**
 - Added `#![cfg_attr(not(feature = "std"), no_std)]` + `[features] default = ["std"]` to:
   `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses`, `vita`.
@@ -1998,12 +2012,14 @@ test are all in-tree.
   `overflow-checks = false`; CI step `Enforce EFI image-size budget
   (E4.7.1)` in `ci.yml` asserts the release EFI is ≤ 1 MiB and the
   debug EFI is ≤ 6 MiB).
-- S4.7.2 Boot-time gate. ✅ (`ci.yml` `microvm-boot` job — QEMU is
-  spawned in the background, the COM1 serial log is polled every 50 ms
-  for `E4.5_SOAK_DONE`, the elapsed milliseconds are recorded, and the
-  step fails if the time-to-marker exceeds 2 000 ms.  Replaces the
-  previous foreground `timeout 120` invocation that timed the full
-  panic-spin loop instead of actual boot).
+- S4.7.2 Boot-time measurement. 🟡 (`ci.yml` `microvm-boot` job records
+  QEMU wall-clock boot latency **for information only — there is no
+  pass/fail gate on it**, by design: the kernel ends in a deliberate
+  panic spin so `timeout`-bounded QEMU wall-clock is not a boot-to-soak
+  measure, and OVMF POST time on shared runners would gate on runner
+  CPU allocation rather than kernel changes.  The 2 000 ms budget is a
+  Firecracker / Cloud-Hypervisor target asserted as part of the
+  hardware soak run — see exit criterion 1 and `docs/22` §1).
 - S4.7.3 Regression benchmark suite. ✅ (`xtask bench-baseline`
   sub-command parses Criterion's `--output-format bencher` log,
   compares against checked-in baselines at `bench/baselines/<crate>.json`,
