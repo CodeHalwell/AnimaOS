@@ -36,6 +36,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(not(feature = "std"))]
+use alloc::{boxed::Box, string::String, vec::Vec};
+
 use serde::{Deserialize, Serialize};
 
 use crate::features::BlockFeatures;
@@ -241,7 +244,11 @@ impl BlockGate for LinearGate {
 
 /// Sigmoid activation function.
 fn sigmoid(z: f32) -> f32 {
-    1.0 / (1.0 + (-z).exp())
+    #[cfg(not(feature = "libm"))]
+    let e = (-z).exp();
+    #[cfg(feature = "libm")]
+    let e = libm::expf(-z);
+    1.0 / (1.0 + e)
 }
 
 // ── KvController ──────────────────────────────────────────────────────────────
@@ -387,7 +394,7 @@ impl KvController {
         decisions.sort_by(|a, b| {
             b.gate_score
                 .partial_cmp(&a.gate_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
                 .then_with(|| a.block_index.cmp(&b.block_index)) // tie-break: ascending index
         });
 
@@ -414,10 +421,14 @@ impl KvController {
             .collect();
         indexed.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
                 .then_with(|| a.0.cmp(&b.0)) // tie-break: ascending index
         });
-        let retained: std::collections::HashSet<usize> = indexed
+        #[cfg(feature = "std")]
+        type RetainedSet = std::collections::HashSet<usize>;
+        #[cfg(not(feature = "std"))]
+        type RetainedSet = alloc::collections::BTreeSet<usize>;
+        let retained: RetainedSet = indexed
             .iter()
             .take(actual_budget)
             .map(|(i, _)| *i)

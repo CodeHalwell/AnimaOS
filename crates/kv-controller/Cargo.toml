@@ -5,8 +5,21 @@ edition.workspace = true
 license.workspace = true
 description = "Learned KV-cache gating controller — Epic E5.4"
 
+# The gate itself (controller + features) is no_std: vita's KV-gate hook runs
+# inside the microVM kernel. The offline surfaces — trace capture (SystemTime
+# timestamps), the training-pair compiler, and the needle-recall eval harness —
+# are std-gated; they run on the hosted target where the corpus lives.
+[features]
+default = ["std"]
+std = ["dep:serde_json", "serde/std"]
+# f32::exp for bare-metal builds (mirrors memory's libm feature; std builds
+# use libc's libm and must NOT enable this).
+libm = ["dep:libm"]
+
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", optional = true }
+libm = { version = "0.2", optional = true, default-features = false }
 
 [dev-dependencies]
+serde_json = { version = "1" }

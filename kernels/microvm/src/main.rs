@@ -87,9 +87,11 @@
 
 extern crate alloc;
 
+mod net;
 mod operator_console;
 mod sleep_soak;
 mod tls;
+mod vita_soak;
 
 use alloc::vec::Vec;
 use corpus::{BumpAllocator, FrameAllocator};
@@ -414,6 +416,35 @@ async fn kernel_boot_task() {
 
     operator_console::run_operator_console_demo(serial_write)
         .expect("E6.4 operator-console serial framing failed");
+
+    // ------------------------------------------------------------------
+    // Phase 9a — virtio-net + console-over-TCP (E6.5 Phase 1)
+    //
+    // Self-skipping: boards without a virtio-net function (plain soak runs,
+    // Firecracker mmio) log and continue; the CI invocation attaches
+    // `-device virtio-net-pci` and gates on the E6.5 markers.
+    // ------------------------------------------------------------------
+    serial_write("\n[E6.5] kernel_boot_task: Phase 9a — virtio-net console transport\n");
+    embassy_futures::yield_now().await;
+
+    net::run_net_phase(serial_write).expect("E6.5 virtio-net console phase failed");
+
+    // ------------------------------------------------------------------
+    // Phase 9 — In-kernel lifecycle director (E4.5b)
+    //
+    // The real vita LifecycleManager + somatic_execution_loop run on this
+    // executor: guidance enters through the SensoryBridge, the agent wakes,
+    // dispatches through the MLFQ scheduler to a no_std backend, and
+    // re-enters sleep through the maintenance sequencer. The audited arc is
+    // asserted before the marker is written.
+    // ------------------------------------------------------------------
+    serial_write("\n[E4.5b] kernel_boot_task: Phase 9 — in-kernel lifecycle director\n");
+    embassy_futures::yield_now().await;
+
+    vita_soak::run_vita_lifecycle_soak(serial_write)
+        .await
+        .expect("E4.5b in-kernel lifecycle soak failed");
+    serial_write("E4.5B_VITA_DONE\n");
 
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.

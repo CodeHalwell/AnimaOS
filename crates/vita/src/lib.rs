@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 //! Self-preservation plane: autonomous lifecycle director.
 
@@ -14,9 +15,12 @@ pub mod cortex_bridge;
 pub mod defence_bridge;
 #[cfg(feature = "std")]
 pub mod dispatch;
+#[cfg(feature = "std")]
 pub mod episodic;
 pub mod gate;
 pub mod identity;
+/// IPC envelope types shared by the router on every target (no_std + std).
+pub mod invoke;
 pub mod kv_gate;
 #[cfg(feature = "std")]
 pub mod metacognition;
@@ -35,13 +39,14 @@ pub use audit::{AuditEntry, AuditLog};
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
-    CortexInvocationResult, FnDispatcher, InvokeMemoryScope, InvokeRequest, MockCortexBridge,
-    PythonCortexBridge, ToolDispatcher, ToolSpec, DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURNS,
+    CortexInvocationResult, FnDispatcher, MockCortexBridge, PythonCortexBridge, ToolDispatcher,
+    DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURNS,
 };
 #[cfg(feature = "std")]
 pub use defence_bridge::push_defence_outcome;
 #[cfg(feature = "std")]
 pub use dispatch::{redact_url, EgressAwareDispatcher};
+#[cfg(feature = "std")]
 pub use episodic::{
     embed_episode, make_episode_archived_item, make_episode_provenance, pack_episode_payload,
     unpack_episode, EpisodeMatch, EpisodeQuery, EpisodeRecord, EpisodeStore,
@@ -60,6 +65,7 @@ pub use identity::{
     AgentSelfModel, IdentityDocument, IdentityError, IdentityMemory, ObservedPattern,
     RecurringTask, SystemPolicies, UserPreferences,
 };
+pub use invoke::{InvokeMemoryScope, InvokeRequest, ToolSpec};
 pub use kv_gate::{
     effective_budget_under_pressure, gate_working_context, gate_working_context_with_signals,
     ContextBlock, GatePassResult,
@@ -98,23 +104,35 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
-use core::time::Duration;
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 #[cfg(feature = "std")]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use senses::sync::Mutex;
 #[cfg(feature = "std")]
 use std::time::Duration;
 
 use interoception::HomeostaticMonitor;
 #[cfg(feature = "std")]
 use interoception::{InteroceptiveSensorBundle, NullPublisher};
-use memory::{
-    AuditTraceEntry, CompilationConfig, DreamConfig, L1PruningStore, VirtualContextManager,
-};
+#[cfg(feature = "std")]
+use memory::{AuditTraceEntry, CompilationConfig};
+use memory::{DreamConfig, L1PruningStore, VirtualContextManager};
 use scheduler::{CancellationToken, IterationAwareMlfq, LlmBackend, Task, TaskAgenda};
 use senses::{HumanGuidance, SensoryBridge, SensoryBridgeError, SensoryPriority};
 #[cfg(feature = "std")]
 use skills::{EpisodeSummary, PromotionGateConfig, ReflectionConfig, SkillRegistry};
-use sleep::{CompilationContext, DreamContext, PruningContext, ReplayContext};
+use sleep::PruningContext;
+#[cfg(feature = "std")]
+use sleep::{CompilationContext, DreamContext, ReplayContext};
 
 #[cfg(feature = "std")]
 pub use sleep::{run_self_improvement_reflection, ReflectionRegistration};
@@ -168,12 +186,14 @@ pub struct LifecycleManager {
     ///
     /// `None` when running without persistent storage (e.g. in tests that do not
     /// require L3 persistence).
+    #[cfg(feature = "std")]
     pub l3_archive: Option<memory::L3Archive>,
     /// Monotonically increasing ID counter for L3 archive entries.
     pub next_archive_id: u64,
     /// Replay configuration for the `GenerativeReplay` sleep phase (E3.6).
     ///
     /// Applied every sleep cycle when an L3 archive is configured.
+    #[cfg(feature = "std")]
     pub replay_config: memory::ReplayConfig,
     /// Dream-exploration configuration for the `DreamExploration` sleep phase (E3.7).
     ///
@@ -182,6 +202,7 @@ pub struct LifecycleManager {
     /// Policy-compilation configuration for the `PolicyCompilation` sleep phase (E3.8).
     ///
     /// `None` disables file output (compilation runs in-memory only, no JSONL files written).
+    #[cfg(feature = "std")]
     pub compilation_config: Option<CompilationConfig>,
     /// Task scheduler.
     pub scheduler: IterationAwareMlfq,
@@ -316,29 +337,31 @@ pub struct LifecycleManager {
     pub consolidation_config: Option<consolidation::ConsolidationConfig>,
 }
 
-impl std::fmt::Debug for LifecycleManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LifecycleManager")
-            .field("agent_id", &self.agent_id)
+impl core::fmt::Debug for LifecycleManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut s = f.debug_struct("LifecycleManager");
+        s.field("agent_id", &self.agent_id)
             .field("state", &self.state)
             .field("config", &self.config)
             .field("policy_bounds", &self.policy_bounds)
             .field("agenda_len", &self.agenda.len())
             .field("l1_memory_nodes", &self.l1_memory.len())
-            .field("pruning_elapsed", &self.pruning_elapsed)
-            .field(
-                "replay_config_threshold",
-                &self.replay_config.accuracy_threshold,
-            )
-            .field("dream_config_seed", &self.dream_config.seed)
-            .field(
-                "compilation_config",
-                &self
-                    .compilation_config
-                    .as_ref()
-                    .map(|c| c.output_dir.display().to_string()),
-            )
-            .field("backend", &self.backend.id())
+            .field("pruning_elapsed", &self.pruning_elapsed);
+        #[cfg(feature = "std")]
+        s.field(
+            "replay_config_threshold",
+            &self.replay_config.accuracy_threshold,
+        );
+        s.field("dream_config_seed", &self.dream_config.seed);
+        #[cfg(feature = "std")]
+        s.field(
+            "compilation_config",
+            &self
+                .compilation_config
+                .as_ref()
+                .map(|c| c.output_dir.display().to_string()),
+        );
+        s.field("backend", &self.backend.id())
             .field("audit_len", &self.audit.len())
             .field("iterations", &self.iterations)
             .field("max_iterations", &self.max_iterations)
@@ -368,10 +391,13 @@ impl LifecycleManager {
             memory,
             l1_memory: L1PruningStore::new(),
             pruning_elapsed: 1.0,
+            #[cfg(feature = "std")]
             l3_archive: None,
             next_archive_id: 0,
+            #[cfg(feature = "std")]
             replay_config: memory::ReplayConfig::default(),
             dream_config: DreamConfig::default(),
+            #[cfg(feature = "std")]
             compilation_config: None,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
@@ -645,12 +671,14 @@ impl LifecycleManager {
             let elapsed = self.pruning_elapsed;
 
             // Replay context (E3.6): immutable borrow of l3_archive.
+            #[cfg(feature = "std")]
             let replay_ctx = self.l3_archive.as_ref().map(|l3| sleep::ReplayContext {
                 l3,
                 config: self.replay_config.clone(),
             });
 
             // Dream context (E3.7): immutable borrow of l3_archive.
+            #[cfg(feature = "std")]
             let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
                 l3,
                 config: self.dream_config.clone(),
@@ -659,12 +687,14 @@ impl LifecycleManager {
             // Compilation context (E3.8): convert audit entries to trace entries.
             // We collect them into an owned Vec so that the CompilationContext borrow
             // lives long enough for the duration of run_maintenance_audited.
+            #[cfg(feature = "std")]
             let trace_entries: Vec<AuditTraceEntry> = self
                 .audit
                 .entries()
                 .iter()
                 .map(audit_entry_to_trace)
                 .collect();
+            #[cfg(feature = "std")]
             let compilation_ctx = self
                 .compilation_config
                 .as_ref()
@@ -680,6 +710,7 @@ impl LifecycleManager {
                 elapsed,
                 floor: None,
             };
+            #[cfg(feature = "std")]
             let report = sleep::run_maintenance_audited(
                 &agent_id,
                 &mut self.audit,
@@ -688,8 +719,13 @@ impl LifecycleManager {
                 dream_ctx,
                 compilation_ctx,
             );
+            // no_std: only the pruning phase carries a context — the replay /
+            // dream / compilation phases run as audited no-ops in the kernel.
+            #[cfg(not(feature = "std"))]
+            let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
 
             // E2.6: Demote evicted L1 nodes to L3 archive if present.
+            #[cfg(feature = "std")]
             if let Some(l3) = self.l3_archive.as_mut() {
                 if let Some(outcome) = report.outcomes.first() {
                     for (key, node) in &outcome.evicted_l1_nodes {
@@ -767,23 +803,27 @@ impl LifecycleManager {
         // Build replay context (E3.6) and dream context (E3.7): immutable borrows
         // of l3_archive — compatible with mutable borrow of l1_memory below since
         // they target different fields.
+        #[cfg(feature = "std")]
         let replay_ctx = self.l3_archive.as_ref().map(|l3| ReplayContext {
             l3,
             config: self.replay_config.clone(),
         });
 
+        #[cfg(feature = "std")]
         let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
             l3,
             config: self.dream_config.clone(),
         });
 
         // Compilation context (E3.8).
+        #[cfg(feature = "std")]
         let trace_entries: Vec<AuditTraceEntry> = self
             .audit
             .entries()
             .iter()
             .map(audit_entry_to_trace)
             .collect();
+        #[cfg(feature = "std")]
         let compilation_ctx = self
             .compilation_config
             .as_ref()
@@ -797,6 +837,7 @@ impl LifecycleManager {
             elapsed,
             floor: None,
         };
+        #[cfg(feature = "std")]
         let report = sleep::run_maintenance_audited(
             &agent_id,
             &mut self.audit,
@@ -805,8 +846,13 @@ impl LifecycleManager {
             dream_ctx,
             compilation_ctx,
         );
+        // no_std: only the pruning phase carries a context — the replay / dream /
+        // compilation phases run as audited no-ops in the kernel.
+        #[cfg(not(feature = "std"))]
+        let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
 
         // E2.6: Demote evicted L1 nodes to L3 archive if present.
+        #[cfg(feature = "std")]
         if let Some(l3) = self.l3_archive.as_mut() {
             if let Some(outcome) = report.outcomes.first() {
                 for (key, node) in &outcome.evicted_l1_nodes {
@@ -934,6 +980,7 @@ pub fn cost_class_for_mlfq_tier(mlfq_tier: u8) -> CostClass {
 ///
 /// Only `TaskStarted`, `TaskCompleted`, and `TaskFailed` carry task-level
 /// information; all other variants map to [`AuditTraceEntry::Other`].
+#[cfg(feature = "std")]
 fn audit_entry_to_trace(entry: &AuditEntry) -> AuditTraceEntry {
     match entry {
         AuditEntry::TaskStarted {
@@ -1094,6 +1141,7 @@ pub async fn somatic_execution_loop(
                     }
                     #[cfg(not(feature = "std"))]
                     {
+                        let _ = mg; // binding only exists for the std arm
                         unreachable!("motivated_gate is std-only")
                     }
                 } else {
@@ -1244,7 +1292,12 @@ pub async fn somatic_execution_loop(
         };
 
         if is_idle {
+            // Hosted: yield the OS thread. Kernel: a spin hint — the Embassy
+            // poll loop re-enters the future on the next executor pass.
+            #[cfg(feature = "std")]
             std::thread::sleep(Duration::from_millis(1));
+            #[cfg(not(feature = "std"))]
+            core::hint::spin_loop();
         }
 
         lifecycle.iterations = lifecycle.iterations.saturating_add(1);

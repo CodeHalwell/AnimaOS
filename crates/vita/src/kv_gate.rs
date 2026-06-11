@@ -32,6 +32,15 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use interoception::InteroceptiveSignals;
 use kv_controller::{BlockFeatures, BlockRole, ControllerState, KvController, KvGateDecision};
 
@@ -216,7 +225,22 @@ pub fn effective_budget_under_pressure(nominal_budget: usize, memory_pressure: f
     let excess = (pressure - 0.5) * 2.0; // normalise to [0.0, 1.0]
     let max_reduction = 0.30_f32;
     let factor = 1.0 - max_reduction * excess;
+    #[cfg(feature = "std")]
     let effective = (nominal_budget as f32 * factor).ceil() as usize;
+    // `f32::ceil` lives in std (and vita carries no libm of its own), so the
+    // kernel build takes the integer ceiling by hand: truncate toward zero and
+    // bump on any fractional remainder.  Exact for this non-negative domain —
+    // any f32 above 2^24 is already integral, so the comparison never misfires.
+    #[cfg(not(feature = "std"))]
+    let effective = {
+        let scaled = nominal_budget as f32 * factor;
+        let truncated = scaled as usize;
+        if (truncated as f32) < scaled {
+            truncated + 1
+        } else {
+            truncated
+        }
+    };
     effective.max(1)
 }
 

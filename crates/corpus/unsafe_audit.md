@@ -99,6 +99,8 @@ groups:
 | heap/executor init blocks (lines ~226, ~578, ~592) | one-time `BumpAllocator::init` over a `static` heap and Embassy executor setup | executed once, before any allocation, on the single boot CPU |
 | `executor.poll()` (line ~644) | raw Embassy executor poll loop | the no-arch executor requires the caller to guarantee single-threaded polling, satisfied by the spin loop |
 | `tls.rs` (2 sites) | entropy via `RDRAND` (CPUID-guarded) | CPUID check precedes use; absence is a hard error before any TLS bytes are produced |
+| `net.rs` `unsafe impl Hal for KernelHal` (4 trait methods) | DMA + MMIO contract for `virtio-drivers` | UEFI boot services identity-map RAM, so virtual = physical for every contract: `dma_alloc` hands out zeroed, page-aligned, never-reused bump-allocator pages; `mmio_phys_to_virt`/`share`/`unshare` are the identity with no bounce buffers |
+| `net.rs` `MmioCam::new` (ECAM candidate scan) | PCI configuration access | each candidate window is identity-mapped device space; a wrong candidate reads `0x0000`/`0xFFFF` vendor ids and is rejected by the host-bridge validity check — reads never touch unmapped memory |
 
 These are exercised end-to-end by the `microvm-boot` CI job, which boots the
 image under QEMU/OVMF and asserts the `E4.1_*`…`E4.5_SOAK_DONE` serial

@@ -32,11 +32,27 @@
 //! The outcome struct has been extended with an optional [`PruningReport`]
 //! field that callers can inspect to observe the pruning statistics.
 
-use memory::decay::SEMANTIC_FLOOR;
-use memory::{
-    AuditTraceEntry, CompilationConfig, CompilationReport, DreamConfig, DreamReport,
-    L1PruningStore, L3Archive, PruningReport, ReplayConfig, ReplayReport,
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
 };
+
+use memory::decay::SEMANTIC_FLOOR;
+use memory::{DreamReport, L1PruningStore, PruningReport};
+// L3-archive-backed replay/dream/compilation machinery is hosted-only: the
+// bare-metal kernel has no filesystem-backed L3 archive or trace corpus.
+#[cfg(feature = "std")]
+use memory::{
+    AuditTraceEntry, CompilationConfig, CompilationReport, DreamConfig, L3Archive, ReplayConfig,
+    ReplayReport,
+};
+#[cfg(feature = "std")]
 use skills::{
     evaluate_skill_proposal, generate_skill_draft, reflect_on_episodes, EpisodeSummary,
     PromotionGateConfig, ProposalAction, ReflectionConfig, SkillAuthor, SkillContentScreen,
@@ -106,6 +122,7 @@ pub struct PruningContext<'a> {
 ///
 /// The L3 archive is borrowed immutably — rollback re-insertion is performed
 /// by the caller after the maintenance pass completes.
+#[cfg(feature = "std")]
 pub struct ReplayContext<'a> {
     /// L3 archive to validate against.
     pub l3: &'a L3Archive,
@@ -124,6 +141,7 @@ pub struct ReplayContext<'a> {
 ///
 /// The L3 archive is borrowed immutably — edge persistence / hand-off is
 /// performed by the caller after maintenance completes.
+#[cfg(feature = "std")]
 pub struct DreamContext<'a> {
     /// L3 archive to walk during this cycle.
     pub l3: &'a L3Archive,
@@ -138,6 +156,7 @@ pub struct DreamContext<'a> {
 /// When supplied to [`run_maintenance_audited`] the phase will call
 /// [`memory::compile_traces_to_pairs`] using `entries` and `config`, then
 /// populate the [`SleepRoutineOutcome::compilation`] field.
+#[cfg(feature = "std")]
 pub struct CompilationContext<'a> {
     /// Audit-log trace entries to compile into training pairs for this cycle.
     ///
@@ -172,6 +191,7 @@ pub struct SleepRoutineOutcome {
     pub evicted_l1_nodes: Vec<(String, memory::MemoryNode)>,
     /// Replay statistics for the `GenerativeReplay` phase; `None` for other
     /// phases or when no [`ReplayContext`] was provided.
+    #[cfg(feature = "std")]
     pub replay: Option<ReplayReport>,
     /// Nodes that failed the replay check and should be re-inserted into L1
     /// (rollback).  Empty when rollback was not triggered or was disabled.
@@ -186,6 +206,7 @@ pub struct SleepRoutineOutcome {
     pub dream_candidates: Vec<memory::AssociativeEdge>,
     /// Compilation statistics for the `PolicyCompilation` phase; `None` for
     /// other phases or when no [`CompilationContext`] was provided (E3.8).
+    #[cfg(feature = "std")]
     pub compilation: Option<CompilationReport>,
     /// Training pairs compiled during the `PolicyCompilation` phase.
     ///
@@ -193,6 +214,7 @@ pub struct SleepRoutineOutcome {
     /// [`CompilationContext`] was supplied.  The lifecycle manager uses these
     /// pairs to trigger the S8.4.3 consolidation hook without re-running the
     /// compiler.
+    #[cfg(feature = "std")]
     pub compiled_pairs: Vec<memory::compilation::TrainingPair>,
 }
 
@@ -246,9 +268,9 @@ pub fn run_maintenance_audited(
     agent_id: &str,
     audit: &mut AuditLog,
     mut pruning_ctx: Option<PruningContext<'_>>,
-    mut replay_ctx: Option<ReplayContext<'_>>,
-    mut dream_ctx: Option<DreamContext<'_>>,
-    mut compilation_ctx: Option<CompilationContext<'_>>,
+    #[cfg(feature = "std")] mut replay_ctx: Option<ReplayContext<'_>>,
+    #[cfg(feature = "std")] mut dream_ctx: Option<DreamContext<'_>>,
+    #[cfg(feature = "std")] mut compilation_ctx: Option<CompilationContext<'_>>,
 ) -> SleepMaintenanceReport {
     let mut outcomes = Vec::with_capacity(PHASES.len());
 
@@ -262,9 +284,20 @@ pub fn run_maintenance_audited(
 
         let outcome = match routine {
             SleepRoutine::MemoryPruning => run_pruning_phase(pruning_ctx.take()),
+            #[cfg(feature = "std")]
             SleepRoutine::GenerativeReplay => run_replay_phase(replay_ctx.take()),
+            #[cfg(feature = "std")]
             SleepRoutine::DreamExploration => run_dream_phase(dream_ctx.take()),
+            #[cfg(feature = "std")]
             SleepRoutine::PolicyCompilation => run_compilation_phase(compilation_ctx.take()),
+            // The bare-metal kernel has no filesystem-backed L3 archive or
+            // trace corpus, so these phases complete as audited no-ops.
+            #[cfg(not(feature = "std"))]
+            SleepRoutine::GenerativeReplay
+            | SleepRoutine::DreamExploration
+            | SleepRoutine::PolicyCompilation => {
+                stub_outcome(routine, "skipped: requires hosted L3/corpus")
+            }
         };
         let success = outcome.completed;
 
@@ -302,33 +335,16 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
         Some(c) => {
             let floor = c.floor.unwrap_or(SEMANTIC_FLOOR);
             let (report, evicted) = c.l1.drain_pruned_with(c.elapsed, floor);
-            SleepRoutineOutcome {
-                routine: SleepRoutine::MemoryPruning,
-                completed: true,
-                notes: "decay applied, floor enforced",
-                pruning: Some(report),
-                evicted_l1_nodes: evicted,
-                replay: None,
-                replay_rollback_nodes: Vec::new(),
-                dream: None,
-                dream_candidates: Vec::new(),
-                compilation: None,
-                compiled_pairs: Vec::new(),
-            }
+            let mut outcome =
+                stub_outcome(SleepRoutine::MemoryPruning, "decay applied, floor enforced");
+            outcome.pruning = Some(report);
+            outcome.evicted_l1_nodes = evicted;
+            outcome
         }
-        None => SleepRoutineOutcome {
-            routine: SleepRoutine::MemoryPruning,
-            completed: true,
-            notes: "decay applied, floor enforced (no store supplied)",
-            pruning: None,
-            evicted_l1_nodes: Vec::new(),
-            replay: None,
-            replay_rollback_nodes: Vec::new(),
-            dream: None,
-            dream_candidates: Vec::new(),
-            compilation: None,
-            compiled_pairs: Vec::new(),
-        },
+        None => stub_outcome(
+            SleepRoutine::MemoryPruning,
+            "decay applied, floor enforced (no store supplied)",
+        ),
     }
 }
 
@@ -337,6 +353,7 @@ fn run_pruning_phase(ctx: Option<PruningContext<'_>>) -> SleepRoutineOutcome {
 /// When `ctx` is `Some`, runs [`memory::run_replay_validation`] against the
 /// L3 archive and populates the outcome with a [`ReplayReport`] and any
 /// rollback nodes.  When `ctx` is `None`, falls back to the no-op stub.
+#[cfg(feature = "std")]
 fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
     match ctx {
         Some(c) => {
@@ -346,19 +363,10 @@ fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
             } else {
                 "replay verified, no rollback required"
             };
-            SleepRoutineOutcome {
-                routine: SleepRoutine::GenerativeReplay,
-                completed: true,
-                notes,
-                pruning: None,
-                evicted_l1_nodes: Vec::new(),
-                replay: Some(report),
-                replay_rollback_nodes: rollback_nodes,
-                dream: None,
-                dream_candidates: Vec::new(),
-                compilation: None,
-                compiled_pairs: Vec::new(),
-            }
+            let mut outcome = stub_outcome(SleepRoutine::GenerativeReplay, notes);
+            outcome.replay = Some(report);
+            outcome.replay_rollback_nodes = rollback_nodes;
+            outcome
         }
         None => run_routine_stub(SleepRoutine::GenerativeReplay),
     }
@@ -369,6 +377,7 @@ fn run_replay_phase(ctx: Option<ReplayContext<'_>>) -> SleepRoutineOutcome {
 /// When `ctx` is `Some`, runs [`memory::run_dream_walk`] against the L3 archive
 /// and populates the outcome with a [`DreamReport`] and candidate associative
 /// edges.  When `ctx` is `None`, falls back to the no-op stub.
+#[cfg(feature = "std")]
 fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
     match ctx {
         Some(c) => {
@@ -378,19 +387,10 @@ fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
             } else {
                 "dream walk complete, no edges above threshold"
             };
-            SleepRoutineOutcome {
-                routine: SleepRoutine::DreamExploration,
-                completed: true,
-                notes,
-                pruning: None,
-                evicted_l1_nodes: Vec::new(),
-                replay: None,
-                replay_rollback_nodes: Vec::new(),
-                dream: Some(report),
-                dream_candidates: candidates,
-                compilation: None,
-                compiled_pairs: Vec::new(),
-            }
+            let mut outcome = stub_outcome(SleepRoutine::DreamExploration, notes);
+            outcome.dream = Some(report);
+            outcome.dream_candidates = candidates;
+            outcome
         }
         None => run_routine_stub(SleepRoutine::DreamExploration),
     }
@@ -401,6 +401,7 @@ fn run_dream_phase(ctx: Option<DreamContext<'_>>) -> SleepRoutineOutcome {
 /// When `ctx` is `Some`, runs [`memory::compile_traces_to_pairs`] against the
 /// provided audit trace entries and populates the outcome with a
 /// [`CompilationReport`].  When `ctx` is `None`, falls back to the no-op stub.
+#[cfg(feature = "std")]
 fn run_compilation_phase(ctx: Option<CompilationContext<'_>>) -> SleepRoutineOutcome {
     match ctx {
         Some(c) => {
@@ -410,19 +411,10 @@ fn run_compilation_phase(ctx: Option<CompilationContext<'_>>) -> SleepRoutineOut
             } else {
                 "compilation complete, no task pairs found"
             };
-            SleepRoutineOutcome {
-                routine: SleepRoutine::PolicyCompilation,
-                completed: true,
-                notes,
-                pruning: None,
-                evicted_l1_nodes: Vec::new(),
-                replay: None,
-                replay_rollback_nodes: Vec::new(),
-                dream: None,
-                dream_candidates: Vec::new(),
-                compilation: Some(report),
-                compiled_pairs: pairs,
-            }
+            let mut outcome = stub_outcome(SleepRoutine::PolicyCompilation, notes);
+            outcome.compilation = Some(report);
+            outcome.compiled_pairs = pairs;
+            outcome
         }
         None => run_routine_stub(SleepRoutine::PolicyCompilation),
     }
@@ -436,17 +428,28 @@ fn run_routine_stub(routine: SleepRoutine) -> SleepRoutineOutcome {
         SleepRoutine::DreamExploration => "associative edges proposed",
         SleepRoutine::PolicyCompilation => "training pairs emitted",
     };
+    stub_outcome(routine, notes)
+}
+
+/// Builds a completed [`SleepRoutineOutcome`] with every report field empty.
+///
+/// Shared by the no-op stub path and (under `no_std`) by the phases that are
+/// skipped outright because they require the hosted L3 archive / trace corpus.
+fn stub_outcome(routine: SleepRoutine, notes: &'static str) -> SleepRoutineOutcome {
     SleepRoutineOutcome {
         routine,
         completed: true,
         notes,
         pruning: None,
         evicted_l1_nodes: Vec::new(),
+        #[cfg(feature = "std")]
         replay: None,
         replay_rollback_nodes: Vec::new(),
         dream: None,
         dream_candidates: Vec::new(),
+        #[cfg(feature = "std")]
         compilation: None,
+        #[cfg(feature = "std")]
         compiled_pairs: Vec::new(),
     }
 }
@@ -504,6 +507,7 @@ pub struct ReflectionRegistration {
 /// empty (or below the configured `min_episodes`) nothing is registered and the
 /// reflection summary records zero patterns — the Dreaming phase's existing
 /// behaviour is untouched.
+#[cfg(feature = "std")]
 pub fn run_self_improvement_reflection(
     agent_id: &str,
     episodes: &[EpisodeSummary],

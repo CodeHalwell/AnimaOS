@@ -132,7 +132,7 @@ supply-chain audit (`deny.toml`) and build times unchanged.
 | Method + path     | Role                                                            |
 |-------------------|-----------------------------------------------------------------|
 | `GET /`           | The self-contained browser dashboard (HTML + vanilla JS).       |
-| `GET /events`     | Server-Sent Events: the live `OperatorEvent` stream + a snapshot replay so a newly-opened dashboard paints immediately. |
+| `GET /events`     | Server-Sent Events: the live `OperatorEvent` stream + a snapshot replay so a newly-opened dashboard paints immediately. Every event carries an SSE `id:` (the audit-file byte offset of its source line), and `Last-Event-ID` on reconnect skips already-rendered replay — stable across server restarts, so a network blip or agent restart never duplicates the conversation. |
 | `POST /guidance`  | Afferent ingress: an `OperatorInput` → validated → sensory packet. |
 | `GET /healthz`    | Liveness probe (always open).                                   |
 

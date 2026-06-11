@@ -51,6 +51,15 @@ interoception = { path = "../../crates/interoception", default-features = false 
 #   `ANIMA_TLM` telemetry lines onto COM1 and parses `ANIMA_IN` guidance lines.
 console-proto = { path = "../../crates/console-proto", default-features = false }
 
+# vita: the lifecycle director itself (E4.5b) — somatic_execution_loop,
+# LifecycleManager, the audited wake→sleep arc. libm supplies bare-metal
+# float math through memory/kv-controller.
+vita = { path = "../../crates/vita", default-features = false, features = ["libm"] }
+
+# senses: the afferent bridge the lifecycle ingests from (policy-checked
+# guidance packets) — same seam the operator console uses on hosted.
+senses = { path = "../../crates/senses", default-features = false }
+
 # uefi: UEFI application framework.
 # Features used:
 #   logger — wires `log` crate to the UEFI console (SimpleTextOutputProtocol).
@@ -157,6 +166,7 @@ hkdf = { version = "0.13", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
 rand_core = { version = "0.10", default-features = false }
 der = { version = "0.8", default-features = false, features = ["alloc"] }
+virtio-drivers = { version = "0.13", default-features = false, features = ["alloc"] }
 
 [build-dependencies]
 rcgen = "0.14"

@@ -97,6 +97,21 @@ use vita::{
     SemanticClass, ThresholdGate,
 };
 
+/// Exit status recorded by CLI error paths; `main` exits with this after the
+/// dispatched subcommand returns (0 = success, 1 = runtime failure,
+/// 2 = usage error — the conventional CLI meanings).
+static CLI_EXIT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Record a non-zero exit status for the current CLI invocation without
+/// unwinding — later, more severe codes do not downgrade earlier ones.
+fn cli_fail(code: i32) {
+    let _ = CLI_EXIT.fetch_max(code, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn cli_exit() -> ! {
+    std::process::exit(CLI_EXIT.load(std::sync::atomic::Ordering::Relaxed));
+}
+
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
@@ -1355,6 +1370,7 @@ fn cmd_quota(args: &[String]) {
     let user_path = UserRegistry::default_path(AGENT_ID);
     let registry = UserRegistry::open(&user_path).unwrap_or_else(|e| {
         eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        cli_fail(1);
         UserRegistry::in_memory()
     });
 
@@ -1483,7 +1499,10 @@ fn cmd_quota(args: &[String]) {
                 println!("quota: reset complete");
                 let _ = &mut log; // log unused in this path; kept for future persistence hook
             }
-            None => eprintln!("usage: anima-hosted quota reset <user_id>"),
+            None => {
+                eprintln!("usage: anima-hosted quota reset <user_id>");
+                cli_fail(2);
+            }
         },
         Some("policy") => {
             println!("quota policy (default):");
@@ -1608,6 +1627,7 @@ fn cmd_quota(args: &[String]) {
             eprintln!("usage: anima-hosted quota show [<user_id>]");
             eprintln!("       anima-hosted quota reset <user_id>");
             eprintln!("       anima-hosted quota policy");
+            cli_fail(2);
         }
     }
 }
@@ -1781,6 +1801,7 @@ fn cmd_sessions(args: &[String]) {
     let path = SessionStore::default_path(AGENT_ID);
     let mut store = SessionStore::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open session store ({e}); using in-memory fallback");
+        cli_fail(1);
         SessionStore::in_memory()
     });
     let mut log = AuditLog::new();
@@ -1840,9 +1861,15 @@ fn cmd_sessions(args: &[String]) {
                         );
                     }
                 }
-                None => eprintln!("sessions: session {id:?} not found"),
+                None => {
+                    eprintln!("sessions: session {id:?} not found");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted sessions show <session_id>"),
+            None => {
+                eprintln!("usage: anima-hosted sessions show <session_id>");
+                cli_fail(2);
+            }
         },
         // ── new ───────────────────────────────────────────────────────────────
         Some("new") => match args.get(1) {
@@ -1855,9 +1882,10 @@ fn cmd_sessions(args: &[String]) {
                 let session = SessionRecord::new(&session_id, user_id, AGENT_ID);
                 match store.insert(session) {
                     Ok(()) => {
-                        store
-                            .flush()
-                            .unwrap_or_else(|e| eprintln!("sessions: flush error: {e}"));
+                        store.flush().unwrap_or_else(|e| {
+                            eprintln!("sessions: flush error: {e}");
+                            cli_fail(1);
+                        });
                         log.push(AuditEntry::SessionStarted {
                             agent_id: AGENT_ID.to_string(),
                             session_id: session_id.clone(),
@@ -1866,10 +1894,16 @@ fn cmd_sessions(args: &[String]) {
                         println!("sessions: created {session_id}");
                         print_session_audit(&log);
                     }
-                    Err(e) => eprintln!("sessions: error: {e}"),
+                    Err(e) => {
+                        eprintln!("sessions: error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
-            None => eprintln!("usage: anima-hosted sessions new <user_id>"),
+            None => {
+                eprintln!("usage: anima-hosted sessions new <user_id>");
+                cli_fail(2);
+            }
         },
         // ── append ────────────────────────────────────────────────────────────
         Some("append") => match (args.get(1), args.get(2), args.get(3)) {
@@ -1889,13 +1923,22 @@ fn cmd_sessions(args: &[String]) {
                                 println!("sessions: appended {role_str} turn to {id}");
                                 print_session_audit(&log);
                             }
-                            Err(e) => eprintln!("sessions: error: {e}"),
+                            Err(e) => {
+                                eprintln!("sessions: error: {e}");
+                                cli_fail(1);
+                            }
                         }
                     }
-                    Err(e) => eprintln!("sessions: unknown role: {e}"),
+                    Err(e) => {
+                        eprintln!("sessions: unknown role: {e}");
+                        cli_fail(2);
+                    }
                 }
             }
-            _ => eprintln!("usage: anima-hosted sessions append <session_id> <role> <content>"),
+            _ => {
+                eprintln!("usage: anima-hosted sessions append <session_id> <role> <content>");
+                cli_fail(2);
+            }
         },
         // ── archive ───────────────────────────────────────────────────────────
         Some("archive") => match args.get(1) {
@@ -1917,11 +1960,15 @@ fn cmd_sessions(args: &[String]) {
                         println!("sessions: archived {id} ({turn_count} turns)");
                         print_session_audit(&log);
                     }
-                    Err(e) => eprintln!("sessions: error: {e}"),
+                    Err(e) => {
+                        eprintln!("sessions: error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
             None => {
-                eprintln!("usage: anima-hosted sessions archive <session_id> [--summary <text>]")
+                eprintln!("usage: anima-hosted sessions archive <session_id> [--summary <text>]");
+                cli_fail(2);
             }
         },
         // ── export ────────────────────────────────────────────────────────────
@@ -1946,15 +1993,24 @@ fn cmd_sessions(args: &[String]) {
                                 println!("{output}");
                                 print_session_audit(&log);
                             }
-                            Err(e) => eprintln!("sessions: error: {e}"),
+                            Err(e) => {
+                                eprintln!("sessions: error: {e}");
+                                cli_fail(1);
+                            }
                         }
                     }
-                    Err(e) => eprintln!("sessions: unknown format: {e}"),
+                    Err(e) => {
+                        eprintln!("sessions: unknown format: {e}");
+                        cli_fail(2);
+                    }
                 }
             }
-            None => eprintln!(
-                "usage: anima-hosted sessions export <session_id> [--format jsonl|markdown]"
-            ),
+            None => {
+                eprintln!(
+                    "usage: anima-hosted sessions export <session_id> [--format jsonl|markdown]"
+                );
+                cli_fail(2);
+            }
         },
         // ── search ────────────────────────────────────────────────────────────
         Some("search") => match args.get(1) {
@@ -1976,7 +2032,10 @@ fn cmd_sessions(args: &[String]) {
                     }
                 }
             }
-            None => eprintln!("usage: anima-hosted sessions search <query>"),
+            None => {
+                eprintln!("usage: anima-hosted sessions search <query>");
+                cli_fail(2);
+            }
         },
         // ── help / unknown ────────────────────────────────────────────────────
         _ => {
@@ -2068,6 +2127,7 @@ fn cmd_data(args: &[String]) {
     let path = UserRegistry::default_path(AGENT_ID);
     let mut registry = UserRegistry::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        cli_fail(1);
         UserRegistry::in_memory()
     });
     let mut log = AuditLog::new();
@@ -2091,9 +2151,15 @@ fn cmd_data(args: &[String]) {
                         println!("  {:20} {status}", cat.as_str());
                     }
                 }
-                None => eprintln!("data: no user with id={user_id:?}"),
+                None => {
+                    eprintln!("data: no user with id={user_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted data consent-status <user_id>"),
+            None => {
+                eprintln!("usage: anima-hosted data consent-status <user_id>");
+                cli_fail(2);
+            }
         },
 
         // ── `anima data export <user_id> [--output <path>]` ──────────────────
@@ -2147,6 +2213,7 @@ fn cmd_data(args: &[String]) {
                             .expect("serialisation never fails");
                         std::fs::write(&output_path, &json).unwrap_or_else(|e| {
                             eprintln!("data: could not write {output_path}: {e}");
+                            cli_fail(1);
                         });
                         log.push(AuditEntry::DataExported {
                             agent_id: AGENT_ID.to_owned(),
@@ -2163,10 +2230,16 @@ fn cmd_data(args: &[String]) {
                         );
                         print_data_audit(&log);
                     }
-                    None => eprintln!("data: no user with id={user_id:?}"),
+                    None => {
+                        eprintln!("data: no user with id={user_id:?}");
+                        cli_fail(1);
+                    }
                 }
             }
-            None => eprintln!("usage: anima-hosted data export <user_id> [--output <path>]"),
+            None => {
+                eprintln!("usage: anima-hosted data export <user_id> [--output <path>]");
+                cli_fail(2);
+            }
         },
 
         // ── `anima data delete <user_id>` ─────────────────────────────────────
@@ -2193,9 +2266,10 @@ fn cmd_data(args: &[String]) {
 
                     // Remove the user record from the registry and persist.
                     registry.remove(user_id).ok();
-                    registry
-                        .flush()
-                        .unwrap_or_else(|e| eprintln!("data: registry flush failed: {e}"));
+                    registry.flush().unwrap_or_else(|e| {
+                        eprintln!("data: registry flush failed: {e}");
+                        cli_fail(1);
+                    });
 
                     println!(
                         "data: deletion directive generated for {user_id:?} \
@@ -2213,9 +2287,13 @@ fn cmd_data(args: &[String]) {
                     print_data_audit(&log);
                 } else {
                     eprintln!("data: no user with id={user_id:?}");
+                    cli_fail(1);
                 }
             }
-            None => eprintln!("usage: anima-hosted data delete <user_id>"),
+            None => {
+                eprintln!("usage: anima-hosted data delete <user_id>");
+                cli_fail(2);
+            }
         },
 
         // ── `anima data expiry-check` ─────────────────────────────────────────
@@ -2261,9 +2339,10 @@ fn cmd_data(args: &[String]) {
                         }
                     }
                 }
-                registry
-                    .flush()
-                    .unwrap_or_else(|e| eprintln!("expiry-check: registry flush failed: {e}"));
+                registry.flush().unwrap_or_else(|e| {
+                    eprintln!("expiry-check: registry flush failed: {e}");
+                    cli_fail(1);
+                });
             }
             log.push(AuditEntry::ExpiredConsentCleaned {
                 agent_id: AGENT_ID.to_owned(),
@@ -2280,6 +2359,7 @@ fn cmd_data(args: &[String]) {
             eprintln!("       anima-hosted data export <user_id> [--output <path>]");
             eprintln!("       anima-hosted data delete <user_id>");
             eprintln!("       anima-hosted data expiry-check");
+            cli_fail(2);
         }
     }
 }
@@ -2367,6 +2447,7 @@ fn cmd_feedback(args: &[String]) {
     let path = FeedbackStore::default_path(AGENT_ID);
     let mut store = FeedbackStore::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open feedback store ({e}); using in-memory fallback");
+        cli_fail(1);
         FeedbackStore::in_memory()
     });
     let mut log = AuditLog::new();
@@ -2416,6 +2497,7 @@ fn cmd_feedback(args: &[String]) {
                                         continue;
                                     } else {
                                         eprintln!("feedback record: --correct requires a value");
+                                        cli_fail(2);
                                         return;
                                     }
                                 }
@@ -2432,6 +2514,7 @@ fn cmd_feedback(args: &[String]) {
                                             Ok(cat) => cats.push(cat),
                                             Err(e) => {
                                                 eprintln!("feedback record: {e}");
+                                                cli_fail(2);
                                                 return;
                                             }
                                         }
@@ -2439,6 +2522,7 @@ fn cmd_feedback(args: &[String]) {
                                         continue;
                                     } else {
                                         eprintln!("feedback record: --category requires a value");
+                                        cli_fail(2);
                                         return;
                                     }
                                 }
@@ -2463,19 +2547,29 @@ fn cmd_feedback(args: &[String]) {
                                     );
                                     if let Err(e) = store.flush() {
                                         eprintln!("feedback: flush failed: {e}");
+                                        cli_fail(1);
                                     }
                                 }
-                                Err(e) => eprintln!("feedback: {e}"),
+                                Err(e) => {
+                                    eprintln!("feedback: {e}");
+                                    cli_fail(1);
+                                }
                             }
                         }
-                        Err(e) => eprintln!("feedback record: invalid rating — {e}"),
+                        Err(e) => {
+                            eprintln!("feedback record: invalid rating — {e}");
+                            cli_fail(2);
+                        }
                     }
                 }
-                _ => eprintln!(
-                    "usage: anima-hosted feedback record \
+                _ => {
+                    eprintln!(
+                        "usage: anima-hosted feedback record \
                      <invocation_id> <user_id> <up|down|stars:N> \
                      [--correct <text>] [--category <cat>]"
-                ),
+                    );
+                    cli_fail(2);
+                }
             }
         }
 
@@ -2593,6 +2687,7 @@ fn cmd_feedback(args: &[String]) {
                 Ok(j) => j,
                 Err(e) => {
                     eprintln!("feedback export: serialise failed: {e}");
+                    cli_fail(1);
                     return;
                 }
             };
@@ -2600,7 +2695,10 @@ fn cmd_feedback(args: &[String]) {
             if let Some(out) = out_path {
                 match std::fs::write(out, &json) {
                     Ok(()) => println!("feedback: exported {} records to {out}", store.len()),
-                    Err(e) => eprintln!("feedback export: write failed: {e}"),
+                    Err(e) => {
+                        eprintln!("feedback export: write failed: {e}");
+                        cli_fail(1);
+                    }
                 }
             } else {
                 println!("{json}");
@@ -2616,6 +2714,7 @@ fn cmd_feedback(args: &[String]) {
             eprintln!("       anima-hosted feedback list [--user <user_id>]");
             eprintln!("       anima-hosted feedback analyze [--user <user_id>]");
             eprintln!("       anima-hosted feedback export [--output <path>]");
+            cli_fail(2);
         }
     }
 
@@ -2919,6 +3018,7 @@ fn cmd_cache(args: &[String]) {
                 Some(t) => t.as_str(),
                 None => {
                     eprintln!("usage: anima cache warm <tool_id> <payload>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -2937,12 +3037,15 @@ fn cmd_cache(args: &[String]) {
                 }
                 Err(e) => {
                     eprintln!("cache warm failed for {tool_id}: {e:?}");
+                    cli_fail(1);
                 }
             }
         }
         other => {
             eprintln!("unknown cache subcommand: {other}");
+            cli_fail(2);
             eprintln!("usage: anima cache [stats|clear|warm]");
+            cli_fail(2);
         }
     }
 }
@@ -2965,6 +3068,7 @@ fn cmd_graph(args: &[String]) {
     let path = KnowledgeGraph::default_path(AGENT_ID);
     let mut g = KnowledgeGraph::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not load knowledge graph ({e}); using in-memory graph");
+        cli_fail(1);
         KnowledgeGraph::in_memory()
     });
     let mut log = AuditLog::new();
@@ -2979,6 +3083,7 @@ fn cmd_graph(args: &[String]) {
                         eprintln!(
                             "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
                         );
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -2988,6 +3093,7 @@ fn cmd_graph(args: &[String]) {
                         eprintln!(
                             "usage: anima-hosted graph entity add <id> <kind> [--name <name>]"
                         );
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -2995,6 +3101,7 @@ fn cmd_graph(args: &[String]) {
                     Ok(k) => k,
                     Err(()) => {
                         eprintln!("error: unknown entity kind '{kind_str}'");
+                        cli_fail(2);
                         eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
                         return;
                     }
@@ -3004,6 +3111,7 @@ fn cmd_graph(args: &[String]) {
                     && !kind_str.to_ascii_lowercase().starts_with("custom:")
                 {
                     eprintln!("error: unknown entity kind '{kind_str}'");
+                    cli_fail(2);
                     eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
                     return;
                 }
@@ -3013,6 +3121,7 @@ fn cmd_graph(args: &[String]) {
                     None => {
                         if args.last().map(String::as_str) == Some("--name") {
                             eprintln!("error: --name requires a value");
+                            cli_fail(2);
                             return;
                         }
                         id
@@ -3027,11 +3136,16 @@ fn cmd_graph(args: &[String]) {
                             kind: kind.to_string(),
                             display_name: display_name.to_string(),
                         });
-                        g.flush()
-                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        g.flush().unwrap_or_else(|e| {
+                            eprintln!("warning: flush failed: {e}");
+                            cli_fail(1);
+                        });
                         println!("entity '{id}' ({kind}) added to knowledge graph");
                     }
-                    Err(e) => eprintln!("error: {e}"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
             Some("show") => {
@@ -3039,6 +3153,7 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph entity show <id>");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3070,7 +3185,10 @@ fn cmd_graph(args: &[String]) {
                             }
                         }
                     }
-                    None => eprintln!("error: entity '{id}' not found"),
+                    None => {
+                        eprintln!("error: entity '{id}' not found");
+                        cli_fail(1);
+                    }
                 }
             }
             Some("list") => {
@@ -3084,6 +3202,7 @@ fn cmd_graph(args: &[String]) {
                                 && !k_str.to_ascii_lowercase().starts_with("custom:")
                             {
                                 eprintln!("error: unknown entity kind '{k_str}'");
+                                cli_fail(2);
                                 eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
                                 return;
                             }
@@ -3091,6 +3210,7 @@ fn cmd_graph(args: &[String]) {
                         }
                         Err(()) => {
                             eprintln!("error: unknown entity kind '{k_str}'");
+                            cli_fail(2);
                             eprintln!("valid kinds: person, place, project, concept, technology, organization, custom:<label>");
                             return;
                         }
@@ -3120,19 +3240,24 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph entity remove <id>");
+                        cli_fail(2);
                         return;
                     }
                 };
                 if g.remove_entity(id) {
-                    g.flush()
-                        .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                    g.flush().unwrap_or_else(|e| {
+                        eprintln!("warning: flush failed: {e}");
+                        cli_fail(1);
+                    });
                     println!("entity '{id}' removed (including all connected relations)");
                 } else {
                     eprintln!("error: entity '{id}' not found");
+                    cli_fail(1);
                 }
             }
             _ => {
                 eprintln!("usage: anima-hosted graph entity add|show|list|remove ...");
+                cli_fail(2);
             }
         },
 
@@ -3145,6 +3270,7 @@ fn cmd_graph(args: &[String]) {
                         eprintln!(
                             "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
                         );
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3154,6 +3280,7 @@ fn cmd_graph(args: &[String]) {
                         eprintln!(
                             "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
                         );
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3163,6 +3290,7 @@ fn cmd_graph(args: &[String]) {
                         eprintln!(
                             "usage: anima-hosted graph relation add <from_id> <to_id> <kind>"
                         );
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3170,6 +3298,7 @@ fn cmd_graph(args: &[String]) {
                     Ok(k) => k,
                     Err(()) => {
                         eprintln!("error: unknown relation kind '{kind_str}'");
+                        cli_fail(2);
                         eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
                         return;
                     }
@@ -3179,6 +3308,7 @@ fn cmd_graph(args: &[String]) {
                     && !kind_str.to_ascii_lowercase().starts_with("custom:")
                 {
                     eprintln!("error: unknown relation kind '{kind_str}'");
+                    cli_fail(2);
                     eprintln!("valid kinds: works_at, related_to, part_of, created_by, depends_on, collaborates, is_a, custom:<label>");
                     return;
                 }
@@ -3190,11 +3320,16 @@ fn cmd_graph(args: &[String]) {
                             to_entity: to.to_string(),
                             kind: kind.to_string(),
                         });
-                        g.flush()
-                            .unwrap_or_else(|e| eprintln!("warning: flush failed: {e}"));
+                        g.flush().unwrap_or_else(|e| {
+                            eprintln!("warning: flush failed: {e}");
+                            cli_fail(1);
+                        });
                         println!("relation {from} --[{kind}]--> {to} added");
                     }
-                    Err(e) => eprintln!("error: {e}"),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
             Some("list") => {
@@ -3211,6 +3346,7 @@ fn cmd_graph(args: &[String]) {
             }
             _ => {
                 eprintln!("usage: anima-hosted graph relation add|list ...");
+                cli_fail(2);
             }
         },
 
@@ -3221,6 +3357,7 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph query neighbors <id> [--depth N]");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3250,6 +3387,7 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph query by-kind <kind>");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3257,6 +3395,7 @@ fn cmd_graph(args: &[String]) {
                     Ok(k) => k,
                     Err(()) => {
                         eprintln!("error: unknown entity kind '{kind_str}'");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3280,6 +3419,7 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3287,6 +3427,7 @@ fn cmd_graph(args: &[String]) {
                     Some(v) => v.as_str(),
                     None => {
                         eprintln!("usage: anima-hosted graph query by-attr <key> <value>");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -3307,6 +3448,7 @@ fn cmd_graph(args: &[String]) {
             }
             _ => {
                 eprintln!("usage: anima-hosted graph query neighbors|by-kind|by-attr ...");
+                cli_fail(2);
             }
         },
 
@@ -3320,6 +3462,7 @@ fn cmd_graph(args: &[String]) {
             eprintln!("anima-hosted graph query neighbors <id> [--depth N]");
             eprintln!("anima-hosted graph query by-kind <kind>");
             eprintln!("anima-hosted graph query by-attr <key> <value>");
+            cli_fail(2);
         }
     }
 
@@ -3585,6 +3728,7 @@ fn cmd_alert(args: &[String]) {
             // alert add <id> <field> <op> <threshold> [--severity S] [--desc D]
             if args.len() < 5 {
                 eprintln!("Usage: alert add <id> <field> <op> <threshold> [--severity info|warning|critical] [--desc \"...\"]");
+                cli_fail(2);
                 return;
             }
             let id = &args[1];
@@ -3592,6 +3736,7 @@ fn cmd_alert(args: &[String]) {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("Invalid field: {e}");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3599,6 +3744,7 @@ fn cmd_alert(args: &[String]) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("Invalid op: {e}");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3606,6 +3752,7 @@ fn cmd_alert(args: &[String]) {
                 Ok(t) => t,
                 Err(_) => {
                     eprintln!("Invalid threshold (expected f64)");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3651,7 +3798,10 @@ fn cmd_alert(args: &[String]) {
                     println!("\nAudit trail:");
                     print_audit_alert(&log);
                 }
-                Err(e) => eprintln!("Error: {e}"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    cli_fail(1);
+                }
             }
         }
 
@@ -3660,6 +3810,7 @@ fn cmd_alert(args: &[String]) {
                 Some(s) => s,
                 None => {
                     eprintln!("Usage: alert remove <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3673,7 +3824,10 @@ fn cmd_alert(args: &[String]) {
                     println!("\nAudit trail:");
                     print_audit_alert(&log);
                 }
-                Err(e) => eprintln!("Error: {e}"),
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    cli_fail(1);
+                }
             }
         }
 
@@ -3765,7 +3919,9 @@ fn cmd_alert(args: &[String]) {
 
         other => {
             eprintln!("Unknown alert subcommand: {other}");
+            cli_fail(2);
             eprintln!("Available: list, add, remove, eval");
+            cli_fail(2);
         }
     }
 }
@@ -3834,6 +3990,7 @@ fn cmd_webhook(args: &[String]) {
     let path = WebhookRegistry::default_path(AGENT_ID);
     let mut registry = WebhookRegistry::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open webhook registry ({e}); using in-memory fallback");
+        cli_fail(1);
         WebhookRegistry::in_memory()
     });
     let mut log = AuditLog::from_env(AGENT_ID);
@@ -3869,6 +4026,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(u) => u.clone(),
                 None => {
                     eprintln!("webhook add: missing <url>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3886,6 +4044,7 @@ fn cmd_webhook(args: &[String]) {
                         }
                         None => {
                             eprintln!("webhook add: --secret requires a value");
+                            cli_fail(2);
                             return;
                         }
                     },
@@ -3902,6 +4061,7 @@ fn cmd_webhook(args: &[String]) {
                         }
                         None => {
                             eprintln!("webhook add: --events requires a value");
+                            cli_fail(2);
                             return;
                         }
                     },
@@ -3941,7 +4101,10 @@ fn cmd_webhook(args: &[String]) {
                         }
                     }
                 }
-                Err(e) => eprintln!("webhook: {e}"),
+                Err(e) => {
+                    eprintln!("webhook: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("remove") => {
@@ -3949,6 +4112,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(id) => id.clone(),
                 None => {
                     eprintln!("webhook remove: missing <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3961,7 +4125,10 @@ fn cmd_webhook(args: &[String]) {
                     println!("webhook: removed {id} (was: {})", ep.url);
                     println!("  🗑  webhook_removed id={id}");
                 }
-                Err(e) => eprintln!("webhook: {e}"),
+                Err(e) => {
+                    eprintln!("webhook: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("enable") | Some("disable") => {
@@ -3970,6 +4137,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(id) => id.clone(),
                 None => {
                     eprintln!("webhook {}: missing <id>", args[0]);
+                    cli_fail(2);
                     return;
                 }
             };
@@ -3978,7 +4146,10 @@ fn cmd_webhook(args: &[String]) {
                     let verb = if enabled { "enabled" } else { "disabled" };
                     println!("webhook: {verb} {id}");
                 }
-                Err(e) => eprintln!("webhook: {e}"),
+                Err(e) => {
+                    eprintln!("webhook: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("show") => {
@@ -3986,6 +4157,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(id) => id.clone(),
                 None => {
                     eprintln!("webhook show: missing <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -4011,7 +4183,10 @@ fn cmd_webhook(args: &[String]) {
                     println!("  Signed : {secret_tag}");
                     println!("  Events : {filter_tag}");
                 }
-                None => eprintln!("webhook: no endpoint with id={id:?}"),
+                None => {
+                    eprintln!("webhook: no endpoint with id={id:?}");
+                    cli_fail(1);
+                }
             }
         }
         Some("test") => {
@@ -4019,6 +4194,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(id) => id.clone(),
                 None => {
                     eprintln!("webhook test: missing <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -4026,6 +4202,7 @@ fn cmd_webhook(args: &[String]) {
                 Some(ep) => ep.clone(),
                 None => {
                     eprintln!("webhook: no endpoint with id={id:?}");
+                    cli_fail(1);
                     return;
                 }
             };
@@ -4068,6 +4245,7 @@ fn cmd_webhook(args: &[String]) {
                 });
                 println!("webhook: test ping failed: {error}");
                 println!("  ❌ webhook_failed id={id} error={error:?}");
+                cli_fail(1);
             }
         }
         Some("stats") => {
@@ -4136,6 +4314,7 @@ fn cmd_webhook(args: &[String]) {
             eprintln!("       anima-hosted webhook show <id>");
             eprintln!("       anima-hosted webhook test <id>");
             eprintln!("       anima-hosted webhook stats");
+            cli_fail(2);
         }
     }
 }
@@ -4171,7 +4350,10 @@ fn cmd_diagnose(args: &[String]) {
     if emit_json {
         match serde_json::to_string_pretty(&report) {
             Ok(json) => println!("{json}"),
-            Err(e) => eprintln!("diagnose: JSON serialisation error: {e}"),
+            Err(e) => {
+                eprintln!("diagnose: JSON serialisation error: {e}");
+                cli_fail(1);
+            }
         }
     } else if quiet {
         println!("{:?}", report.overall_status);
@@ -4206,6 +4388,7 @@ fn cmd_identity(args: &[String]) {
     let path = IdentityMemory::default_path(AGENT_ID);
     let mut store = IdentityMemory::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open identity store ({e}); using in-memory fallback");
+        cli_fail(1);
         IdentityMemory::in_memory()
     });
     let mut log = AuditLog::new();
@@ -4251,17 +4434,22 @@ fn cmd_identity(args: &[String]) {
                                 }
                             }
                         }
-                        Err(e) => eprintln!("identity: error: {e}"),
+                        Err(e) => {
+                            eprintln!("identity: error: {e}");
+                            cli_fail(1);
+                        }
                     }
                 }
                 _ => {
                     eprintln!("usage: anima-hosted identity set <key> <value>");
+                    cli_fail(2);
                 }
             }
         }
         _ => {
             eprintln!("usage: anima-hosted identity show [<key>]");
             eprintln!("       anima-hosted identity set <key> <value>");
+            cli_fail(2);
         }
     }
 }
@@ -4330,6 +4518,7 @@ fn cmd_users(args: &[String]) {
     let path = UserRegistry::default_path(AGENT_ID);
     let mut registry = UserRegistry::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open user registry ({e}); using in-memory fallback");
+        cli_fail(1);
         UserRegistry::in_memory()
     });
     let mut log = AuditLog::new();
@@ -4383,9 +4572,15 @@ fn cmd_users(args: &[String]) {
                         println!("consent      : {}", consented.join(", "));
                     }
                 }
-                None => eprintln!("users: no user with id={user_id:?}"),
+                None => {
+                    eprintln!("users: no user with id={user_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted users show <user_id>"),
+            None => {
+                eprintln!("usage: anima-hosted users show <user_id>");
+                cli_fail(2);
+            }
         },
         Some("trust") => match (args.get(1), args.get(2)) {
             (Some(user_id), Some(tier_str)) => match TrustTier::from_str(tier_str) {
@@ -4403,17 +4598,27 @@ fn cmd_users(args: &[String]) {
                         );
                         if let Err(e) = registry.flush() {
                             eprintln!("users: flush failed: {e}");
+                            cli_fail(1);
                         }
                         print_user_audit(&log);
                     }
-                    Err(e) => eprintln!("users: {e}"),
+                    Err(e) => {
+                        eprintln!("users: {e}");
+                        cli_fail(1);
+                    }
                 },
-                Err(e) => eprintln!("users: invalid trust tier: {e}"),
+                Err(e) => {
+                    eprintln!("users: invalid trust tier: {e}");
+                    cli_fail(2);
+                }
             },
-            _ => eprintln!(
-                "usage: anima-hosted users trust <user_id> \
+            _ => {
+                eprintln!(
+                    "usage: anima-hosted users trust <user_id> \
                      unknown|verified|trusted|operator"
-            ),
+                );
+                cli_fail(2);
+            }
         },
         Some("consent") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(user_id), Some(cat_str), Some(action)) => match DataCategory::from_str(cat_str) {
@@ -4423,6 +4628,7 @@ fn cmd_users(args: &[String]) {
                         "revoke" => false,
                         other => {
                             eprintln!("users: expected 'grant' or 'revoke', got {other:?}");
+                            cli_fail(2);
                             return;
                         }
                     };
@@ -4442,19 +4648,29 @@ fn cmd_users(args: &[String]) {
                             );
                             if let Err(e) = registry.flush() {
                                 eprintln!("users: flush failed: {e}");
+                                cli_fail(1);
                             }
                             print_user_audit(&log);
                         }
-                        None => eprintln!("users: no user with id={user_id:?}"),
+                        None => {
+                            eprintln!("users: no user with id={user_id:?}");
+                            cli_fail(1);
+                        }
                     }
                 }
-                Err(e) => eprintln!("users: invalid category: {e}"),
+                Err(e) => {
+                    eprintln!("users: invalid category: {e}");
+                    cli_fail(2);
+                }
             },
-            _ => eprintln!(
-                "usage: anima-hosted users consent <user_id> \
+            _ => {
+                eprintln!(
+                    "usage: anima-hosted users consent <user_id> \
                      episodic_memory|identity_facts|usage_stats|knowledge_corpus \
                      grant|revoke"
-            ),
+                );
+                cli_fail(2);
+            }
         },
         Some("register") => {
             // Convenience helper: manually register a user (useful for testing).
@@ -4473,15 +4689,22 @@ fn cmd_users(args: &[String]) {
                             println!("users: registered {user_id:?}");
                             if let Err(e) = registry.flush() {
                                 eprintln!("users: flush failed: {e}");
+                                cli_fail(1);
                             }
                             print_user_audit(&log);
                         }
-                        Err(e) => eprintln!("users: {e}"),
+                        Err(e) => {
+                            eprintln!("users: {e}");
+                            cli_fail(1);
+                        }
                     }
                 }
-                _ => eprintln!(
-                    "usage: anima-hosted users register <user_id> <display_name> <channel>"
-                ),
+                _ => {
+                    eprintln!(
+                        "usage: anima-hosted users register <user_id> <display_name> <channel>"
+                    );
+                    cli_fail(2);
+                }
             }
         }
         _ => {
@@ -4497,6 +4720,7 @@ fn cmd_users(args: &[String]) {
                  grant|revoke"
             );
             eprintln!("       anima-hosted users register <user_id> <display_name> <channel>");
+            cli_fail(2);
         }
     }
 }
@@ -4592,6 +4816,7 @@ fn cmd_workspace(args: &[String]) {
     let path = WorkspaceRegistry::default_path(AGENT_ID);
     let mut registry = WorkspaceRegistry::open(&path).unwrap_or_else(|e| {
         eprintln!("warning: could not open workspace registry ({e}); using in-memory fallback");
+        cli_fail(1);
         WorkspaceRegistry::in_memory()
     });
     let mut log = AuditLog::new();
@@ -4642,9 +4867,15 @@ fn cmd_workspace(args: &[String]) {
                         println!("  {} ({})", m.user_id, m.role);
                     }
                 }
-                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+                None => {
+                    eprintln!("workspace: no workspace with id={ws_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted workspace show <workspace_id>"),
+            None => {
+                eprintln!("usage: anima-hosted workspace show <workspace_id>");
+                cli_fail(2);
+            }
         },
         Some("create") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(raw_id), Some(display_name), Some(owner_user_id)) => {
@@ -4652,6 +4883,7 @@ fn cmd_workspace(args: &[String]) {
                     Ok(id) => id,
                     Err(e) => {
                         eprintln!("workspace: invalid id: {e}");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -4666,16 +4898,23 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!("workspace: created {workspace_id:?} owned by {owner_user_id:?}");
                         print_workspace_audit(&log);
                     }
-                    Err(e) => eprintln!("workspace: error: {e}"),
+                    Err(e) => {
+                        eprintln!("workspace: error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
-            _ => eprintln!(
-                "usage: anima-hosted workspace create <id> <display_name> <owner_user_id>"
-            ),
+            _ => {
+                eprintln!(
+                    "usage: anima-hosted workspace create <id> <display_name> <owner_user_id>"
+                );
+                cli_fail(2);
+            }
         },
         Some("add-member") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(ws_id), Some(user_id), Some(role_str)) => {
@@ -4700,20 +4939,30 @@ fn cmd_workspace(args: &[String]) {
                                     eprintln!(
                                         "workspace: warning: could not persist registry: {e}"
                                     );
+                                    cli_fail(1);
                                 }
                                 println!("workspace: added {user_id:?} to {ws_id:?} as {role_str}");
                                 print_workspace_audit(&log);
                             }
-                            Err(e) => eprintln!("workspace: error: {e}"),
+                            Err(e) => {
+                                eprintln!("workspace: error: {e}");
+                                cli_fail(1);
+                            }
                         }
                     }
-                    Err(e) => eprintln!("workspace: invalid role: {e}"),
+                    Err(e) => {
+                        eprintln!("workspace: invalid role: {e}");
+                        cli_fail(2);
+                    }
                 }
             }
-            _ => eprintln!(
-                "usage: anima-hosted workspace add-member \
+            _ => {
+                eprintln!(
+                    "usage: anima-hosted workspace add-member \
                  <workspace_id> <user_id> guest|member|admin"
-            ),
+                );
+                cli_fail(2);
+            }
         },
         Some("remove-member") => match (args.get(1), args.get(2)) {
             (Some(ws_id), Some(user_id)) => {
@@ -4731,14 +4980,21 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!("workspace: removed {user_id:?} from {ws_id:?}");
                         print_workspace_audit(&log);
                     }
-                    Err(e) => eprintln!("workspace: error: {e}"),
+                    Err(e) => {
+                        eprintln!("workspace: error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
-            _ => eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>"),
+            _ => {
+                eprintln!("usage: anima-hosted workspace remove-member <workspace_id> <user_id>");
+                cli_fail(2);
+            }
         },
         Some("set-quota") => match (args.get(1), args.get(2), args.get(3)) {
             (Some(ws_id), Some(max_members_str), Some(max_tokens_str)) => {
@@ -4746,6 +5002,7 @@ fn cmd_workspace(args: &[String]) {
                     Ok(n) => n,
                     Err(_) => {
                         eprintln!("workspace: max_members must be a non-negative integer");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -4753,6 +5010,7 @@ fn cmd_workspace(args: &[String]) {
                     Ok(n) => n,
                     Err(_) => {
                         eprintln!("workspace: max_daily_tokens must be a non-negative integer");
+                        cli_fail(2);
                         return;
                     }
                 };
@@ -4775,6 +5033,7 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!(
                             "workspace: updated quota for {ws_id:?}: \
@@ -4782,13 +5041,19 @@ fn cmd_workspace(args: &[String]) {
                         );
                         print_workspace_audit(&log);
                     }
-                    Err(e) => eprintln!("workspace: error: {e}"),
+                    Err(e) => {
+                        eprintln!("workspace: error: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
-            _ => eprintln!(
-                "usage: anima-hosted workspace set-quota \
+            _ => {
+                eprintln!(
+                    "usage: anima-hosted workspace set-quota \
                  <workspace_id> <max_members> <max_daily_tokens>"
-            ),
+                );
+                cli_fail(2);
+            }
         },
         Some("suspend") => match args.get(1) {
             Some(ws_id) => match registry.get_mut(ws_id) {
@@ -4804,6 +5069,7 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!("workspace: suspended {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
@@ -4811,9 +5077,15 @@ fn cmd_workspace(args: &[String]) {
                         println!("workspace: {ws_id:?} is already {old} (no change)");
                     }
                 }
-                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+                None => {
+                    eprintln!("workspace: no workspace with id={ws_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted workspace suspend <workspace_id>"),
+            None => {
+                eprintln!("usage: anima-hosted workspace suspend <workspace_id>");
+                cli_fail(2);
+            }
         },
         Some("reactivate") => match args.get(1) {
             Some(ws_id) => match registry.get_mut(ws_id) {
@@ -4829,16 +5101,24 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!("workspace: reactivated {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
                     } else {
                         println!("workspace: {ws_id:?} is {old} (cannot reactivate)");
+                        cli_fail(1);
                     }
                 }
-                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+                None => {
+                    eprintln!("workspace: no workspace with id={ws_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted workspace reactivate <workspace_id>"),
+            None => {
+                eprintln!("usage: anima-hosted workspace reactivate <workspace_id>");
+                cli_fail(2);
+            }
         },
         Some("delete") => match args.get(1) {
             Some(ws_id) => match registry.get_mut(ws_id) {
@@ -4854,6 +5134,7 @@ fn cmd_workspace(args: &[String]) {
                         });
                         if let Err(e) = registry.flush() {
                             eprintln!("workspace: warning: could not persist registry: {e}");
+                            cli_fail(1);
                         }
                         println!("workspace: soft-deleted {ws_id:?} ({old} → {new})");
                         print_workspace_audit(&log);
@@ -4861,9 +5142,15 @@ fn cmd_workspace(args: &[String]) {
                         println!("workspace: {ws_id:?} is already deleted");
                     }
                 }
-                None => eprintln!("workspace: no workspace with id={ws_id:?}"),
+                None => {
+                    eprintln!("workspace: no workspace with id={ws_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted workspace delete <workspace_id>"),
+            None => {
+                eprintln!("usage: anima-hosted workspace delete <workspace_id>");
+                cli_fail(2);
+            }
         },
         _ => {
             eprintln!("usage: anima-hosted workspace create <id> <display_name> <owner_user_id>");
@@ -4881,6 +5168,7 @@ fn cmd_workspace(args: &[String]) {
             eprintln!("       anima-hosted workspace suspend <workspace_id>");
             eprintln!("       anima-hosted workspace reactivate <workspace_id>");
             eprintln!("       anima-hosted workspace delete <workspace_id>");
+            cli_fail(2);
         }
     }
 }
@@ -4990,15 +5278,22 @@ fn cmd_jobs(args: &[String]) {
                         println!("Last run : (never)");
                     }
                 }
-                None => eprintln!("jobs: no job with id={job_id:?}"),
+                None => {
+                    eprintln!("jobs: no job with id={job_id:?}");
+                    cli_fail(1);
+                }
             },
-            None => eprintln!("usage: anima-hosted jobs show <job_id>"),
+            None => {
+                eprintln!("usage: anima-hosted jobs show <job_id>");
+                cli_fail(2);
+            }
         },
         Some("add") => {
             // Parse flags: --description, --cron, --at, --workspace, --payload
             let description = flag_value(args, "--description").unwrap_or_default();
             if description.is_empty() {
                 eprintln!("jobs add: --description is required");
+                cli_fail(2);
                 return;
             }
             let workspace = flag_value(args, "--workspace").unwrap_or_default();
@@ -5017,6 +5312,7 @@ fn cmd_jobs(args: &[String]) {
                     Ok(at_ns) => JobSchedule::Once { at_ns },
                     Err(_) => {
                         eprintln!("jobs add: --at must be a Unix nanosecond timestamp (u64)");
+                        cli_fail(2);
                         return;
                     }
                 }
@@ -5045,10 +5341,14 @@ fn cmd_jobs(args: &[String]) {
                     println!("jobs: scheduled {job_id:?}");
                     if let Err(e) = registry.flush() {
                         eprintln!("jobs: flush failed: {e}");
+                        cli_fail(1);
                     }
                     print_jobs_audit(&log);
                 }
-                Err(e) => eprintln!("jobs: {e}"),
+                Err(e) => {
+                    eprintln!("jobs: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("remove") => match args.get(1) {
@@ -5067,18 +5367,26 @@ fn cmd_jobs(args: &[String]) {
                         println!("jobs: removed {job_id:?} (reason={reason:?})");
                         if let Err(e) = registry.flush() {
                             eprintln!("jobs: flush failed: {e}");
+                            cli_fail(1);
                         }
                         print_jobs_audit(&log);
                     }
-                    None => eprintln!("jobs: no job with id={job_id:?}"),
+                    None => {
+                        eprintln!("jobs: no job with id={job_id:?}");
+                        cli_fail(1);
+                    }
                 }
             }
-            None => eprintln!("usage: anima-hosted jobs remove <job_id> [<reason>]"),
+            None => {
+                eprintln!("usage: anima-hosted jobs remove <job_id> [<reason>]");
+                cli_fail(2);
+            }
         },
         Some("run") => match args.get(1) {
             Some(job_id) => {
                 if registry.get(job_id).is_none() {
                     eprintln!("jobs: no job with id={job_id:?}");
+                    cli_fail(1);
                     return;
                 }
                 let now_ns = std::time::SystemTime::now()
@@ -5116,10 +5424,14 @@ fn cmd_jobs(args: &[String]) {
                 println!("jobs: completed {job_id:?} → status={new_status}");
                 if let Err(e) = registry.flush() {
                     eprintln!("jobs: flush failed: {e}");
+                    cli_fail(1);
                 }
                 print_jobs_audit(&log);
             }
-            None => eprintln!("usage: anima-hosted jobs run <job_id>"),
+            None => {
+                eprintln!("usage: anima-hosted jobs run <job_id>");
+                cli_fail(2);
+            }
         },
         Some("poll") => {
             let now_ns = std::time::SystemTime::now()
@@ -5148,6 +5460,7 @@ fn cmd_jobs(args: &[String]) {
                 "note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)"
             );
             eprintln!("      and are evaluated in UTC. e.g. \"0 9 * * 1-5\" = 09:00 UTC, Mon-Fri.");
+            cli_fail(2);
         }
     }
 }
@@ -5501,6 +5814,7 @@ fn cmd_skills(args: &[String]) {
                 Some(s) => s.to_lowercase().replace(' ', "-"),
                 None => {
                     eprintln!("usage: skills info <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5519,7 +5833,10 @@ fn cmd_skills(args: &[String]) {
                         println!("\nLinked files: {}", body.linked_files.join(", "));
                     }
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("register") => {
@@ -5527,6 +5844,7 @@ fn cmd_skills(args: &[String]) {
                 Some(p) => p,
                 None => {
                     eprintln!("usage: skills register <path-to-SKILL.md>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5567,10 +5885,16 @@ fn cmd_skills(args: &[String]) {
                                 println!("rejected: {:?}", outcome.action);
                             }
                         }
-                        Err(e) => eprintln!("error: {e}"),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            cli_fail(1);
+                        }
                     }
                 }
-                Err(e) => eprintln!("error reading {path}: {e}"),
+                Err(e) => {
+                    eprintln!("error reading {path}: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("promote") => {
@@ -5578,6 +5902,7 @@ fn cmd_skills(args: &[String]) {
                 Some(s) => s.to_lowercase().replace(' ', "-"),
                 None => {
                     eprintln!("usage: skills promote <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5589,7 +5914,10 @@ fn cmd_skills(args: &[String]) {
                     });
                     println!("promoted: {id}");
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("rollback") => {
@@ -5597,6 +5925,7 @@ fn cmd_skills(args: &[String]) {
                 Some(s) => s.to_lowercase().replace(' ', "-"),
                 None => {
                     eprintln!("usage: skills rollback <id>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5614,7 +5943,10 @@ fn cmd_skills(args: &[String]) {
                     });
                     println!("rolled back: {id}");
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("quarantine") => {
@@ -5622,6 +5954,7 @@ fn cmd_skills(args: &[String]) {
                 Some(s) => s.to_lowercase().replace(' ', "-"),
                 None => {
                     eprintln!("usage: skills quarantine <id> [reason]");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5638,7 +5971,10 @@ fn cmd_skills(args: &[String]) {
                     });
                     println!("quarantined: {id}");
                 }
-                Err(e) => eprintln!("error: {e}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    cli_fail(1);
+                }
             }
         }
         Some("kill-switch") => {
@@ -5769,7 +6105,10 @@ fn cmd_skills(args: &[String]) {
                         });
                     }
                     Ok(None) => {}
-                    Err(e) => eprintln!("skills: enqueue failed: {e}"),
+                    Err(e) => {
+                        eprintln!("skills: enqueue failed: {e}");
+                        cli_fail(1);
+                    }
                 }
             }
             println!(
@@ -5785,10 +6124,12 @@ fn cmd_skills(args: &[String]) {
         }
         Some(sub) => {
             eprintln!("unknown skills subcommand: {sub:?}");
+            cli_fail(2);
             eprintln!(
                 "usage: skills {{list|info|register|promote|rollback|quarantine|\
                  kill-switch|reflect|queue|approve <id>}}"
             );
+            cli_fail(2);
         }
     }
 
@@ -5837,6 +6178,7 @@ fn cmd_tools(args: &[String]) {
                 Some(u) => u,
                 None => {
                     eprintln!("usage: tools browse <url>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5850,7 +6192,10 @@ fn cmd_tools(args: &[String]) {
                     ),
                     Err(_) => println!("browse {url}: {}", String::from_utf8_lossy(&bytes)),
                 },
-                Err(e) => eprintln!("browse error: {e:?}"),
+                Err(e) => {
+                    eprintln!("browse error: {e:?}");
+                    cli_fail(1);
+                }
             }
         }
         Some("extract") => {
@@ -5858,6 +6203,7 @@ fn cmd_tools(args: &[String]) {
                 (Some(u), Some(s)) => (u, s),
                 _ => {
                     eprintln!("usage: tools extract <url> <selector>");
+                    cli_fail(2);
                     return;
                 }
             };
@@ -5870,12 +6216,17 @@ fn cmd_tools(args: &[String]) {
                     "extract {url} [{selector}]:\n  {}",
                     String::from_utf8_lossy(&bytes)
                 ),
-                Err(e) => eprintln!("extract error: {e:?}"),
+                Err(e) => {
+                    eprintln!("extract error: {e:?}");
+                    cli_fail(1);
+                }
             }
         }
         Some(sub) => {
             eprintln!("unknown tools subcommand: {sub:?}");
+            cli_fail(2);
             eprintln!("usage: tools {{list|browse <url>|extract <url> <selector>}}");
+            cli_fail(2);
         }
     }
 }
@@ -5939,6 +6290,7 @@ description: Summarises overnight logs into a short operator digest.
         Ok(o) => o,
         Err(e) => {
             eprintln!("skills: proposal evaluation failed: {e}");
+            cli_fail(1);
             return;
         }
     };
@@ -5959,6 +6311,7 @@ description: Summarises overnight logs into a short operator digest.
         }
         Err(e) => {
             eprintln!("skills: enqueue failed: {e}");
+            cli_fail(1);
             return;
         }
     };
@@ -5998,7 +6351,10 @@ description: Summarises overnight logs into a short operator digest.
                     let active = registry.list_active().len();
                     println!("approved: {target} (skill promoted; {active} active skill(s))");
                 }
-                Err(e) => eprintln!("skills approve error: {e}"),
+                Err(e) => {
+                    eprintln!("skills approve error: {e}");
+                    cli_fail(1);
+                }
             }
         }
         _ => unreachable!("cmd_skills_approval only called for queue/approve"),
@@ -6034,6 +6390,7 @@ fn cmd_ask(args: &[String]) {
     let task = task.trim();
     if task.is_empty() {
         eprintln!("usage: anima-hosted ask \"<task>\"");
+        cli_fail(2);
         return;
     }
 
@@ -6110,6 +6467,7 @@ fn cmd_ask(args: &[String]) {
         }
         Err(e) => {
             eprintln!("ask: cortex invocation failed: {e}");
+            cli_fail(1);
         }
     }
 }
@@ -6164,6 +6522,29 @@ fn cmd_serve() {
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
 
+    // E3.8 → E8: persist the sleep-phase training corpus so the containerised
+    // trainer (`trainer/sleep_phase.py`, sharing the ~/.anima volume) can
+    // consume it.  Defaults inside the persisted volume; ANIMA_CORPUS_DIR
+    // overrides the location, ANIMA_CORPUS_DIR=off disables file output
+    // (compilation then runs in-memory only).
+    let corpus_dir = std::env::var("ANIMA_CORPUS_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{home}/.anima/training_corpus")
+    });
+    if corpus_dir != "off" {
+        manager.compilation_config = Some(memory::CompilationConfig {
+            output_dir: std::path::PathBuf::from(&corpus_dir),
+            formats: vec![
+                memory::TrainingFormat::Alpaca,
+                memory::TrainingFormat::Conversation,
+                memory::TrainingFormat::ChainOfThought,
+            ],
+            // Accumulate across sleep cycles: the trainer consumes the corpus
+            // on its own cadence, so each cycle must not erase the last.
+            append: true,
+        });
+    }
+
     // E12: optionally enable drive-augmented arbitration (motivation) on the
     // serving agent.  Off by default; opt in via ANIMA_MOTIVATION=1 so the
     // existing gate behaviour is unchanged unless requested.
@@ -6200,6 +6581,9 @@ fn cmd_serve() {
         frontier_b.id()
     );
     println!("  audit log : {}", audit_path.display());
+    if corpus_dir != "off" {
+        println!("  corpus    : {corpus_dir} (sleep-phase training pairs)");
+    }
     println!(
         "\nThe agent starts idle and sleeps until a sense wakes it. Send guidance —\n\
          it enters the sensory queue and is arbitrated by the gate, never executed directly:\n  \
@@ -6387,7 +6771,10 @@ fn cmd_snapshot(args: &[String]) {
                 reason,
             });
         }
-        Err(e) => eprintln!("snapshot: error saving to {path:?}: {e}"),
+        Err(e) => {
+            eprintln!("snapshot: error saving to {path:?}: {e}");
+            cli_fail(1);
+        }
     }
 }
 
@@ -6470,7 +6857,10 @@ fn cmd_replay(args: &[String]) {
                     trace.homeostatic.financial_budget
                 );
             }
-            None => eprintln!("replay: no decision found for event_id={id:?}"),
+            None => {
+                eprintln!("replay: no decision found for event_id={id:?}");
+                cli_fail(1);
+            }
         }
     } else {
         // List all decisions.
@@ -6490,117 +6880,214 @@ fn cmd_replay(args: &[String]) {
     }
 }
 
+/// Prints the top-level usage summary for `anima-hosted help` (also `--help` /
+/// `-h`): one aligned line per subcommand, header, and a docs pointer.
+fn print_cli_help() {
+    println!("anima-hosted — the AnimaOS hosted agent");
+    println!();
+    println!("usage: anima-hosted <command> [args...]");
+    println!();
+    println!("commands:");
+    for (cmd, desc) in [
+        (
+            "why",
+            "explain recent gate decisions with live interoceptive signals",
+        ),
+        ("identity", "show or edit identity-memory facts"),
+        (
+            "skills",
+            "manage the skill registry (list, register, promote, ...)",
+        ),
+        ("tools", "list and exercise the registered tools"),
+        (
+            "ask|cortex",
+            "run a one-shot task through the cortex bridge",
+        ),
+        ("serve", "start the agent with the operator console server"),
+        ("digest", "print an activity digest from the audit log"),
+        ("snapshot", "write a versioned agent-state snapshot"),
+        ("replay", "replay past gate decisions from the audit log"),
+        (
+            "users",
+            "manage per-user profiles, trust tiers, and consent",
+        ),
+        ("workspace", "manage multi-user workspaces"),
+        ("jobs", "manage scheduled jobs in the cron engine"),
+        ("doctor", "run environment preflight checks"),
+        ("init", "guided first-run setup wizard"),
+        ("quota", "inspect per-user quota usage and policy"),
+        ("config", "show, validate, or initialise the runtime config"),
+        ("sessions", "manage conversation history"),
+        ("data", "export, delete, and consent-check personal data"),
+        ("feedback", "record and analyse response-quality feedback"),
+        ("stats", "print performance analytics reports"),
+        ("cache", "inspect, clear, or warm the tool response cache"),
+        ("graph", "manage the knowledge graph"),
+        (
+            "metrics",
+            "aggregate audit metrics (text, json, prometheus)",
+        ),
+        ("alert", "manage metric alert rules"),
+        ("webhook", "manage outbound webhook endpoints"),
+        (
+            "diagnose",
+            "run diagnostic health checks over the audit log",
+        ),
+        ("demo", "run the two-agent somatic-loop demo"),
+    ] {
+        println!("  {cmd:<11} {desc}");
+    }
+    println!();
+    println!("See docs/getting-started.md for a full walkthrough.");
+}
+
 fn main() {
+    // Rust ignores SIGPIPE, so `println!` panics with a backtrace when stdout
+    // closes early (`anima-hosted help | head`). Die quietly with the
+    // conventional shell status (128 + SIGPIPE = 141) instead, without
+    // `unsafe` signal handling — the workspace quarantine stays intact.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        default_hook(info);
+    }));
+
     // ── Subcommand dispatch ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("why") {
         cmd_why();
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("identity") {
         cmd_identity(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("skills") {
         cmd_skills(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("tools") {
         cmd_tools(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("ask")
         || args.first().map(String::as_str) == Some("cortex")
     {
         cmd_ask(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("serve") {
         cmd_serve();
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("digest") {
         cmd_digest(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("snapshot") {
         cmd_snapshot(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("replay") {
         cmd_replay(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("users") {
         cmd_users(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("workspace") {
         cmd_workspace(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("jobs") {
         cmd_jobs(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("doctor") {
         let report = doctor::run_doctor();
         doctor::print_report(&report);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("init") {
         let non_interactive = args.iter().any(|a| a == "--non-interactive");
         let reset = args.iter().any(|a| a == "--reset");
         init::run_init("anima", non_interactive, reset);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("quota") {
         cmd_quota(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("config") {
         cmd_config(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("sessions") {
         cmd_sessions(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("data") {
         cmd_data(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("feedback") {
         cmd_feedback(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("stats") {
         cmd_stats(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("cache") {
         cmd_cache(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("graph") {
         cmd_graph(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("metrics") {
         cmd_metrics(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("alert") {
         cmd_alert(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("webhook") {
         cmd_webhook(&args[1..]);
-        return;
+        cli_exit();
     }
     if args.first().map(String::as_str) == Some("diagnose") {
         cmd_diagnose(&args[1..]);
-        return;
+        cli_exit();
+    }
+
+    // ── help / demo / unknown-command handling ───────────────────────────────
+    match args.first().map(String::as_str) {
+        Some("help") | Some("--help") | Some("-h") => {
+            print_cli_help();
+            cli_exit();
+        }
+        // Explicit `demo` runs the two-agent demo below; a bare invocation
+        // keeps doing the same for back-compat, with a hint on stderr.
+        Some("demo") => {}
+        None => {
+            eprintln!("(no subcommand — running the two-agent demo; see 'anima-hosted help')");
+        }
+        Some(other) => {
+            eprintln!("anima-hosted: unknown command '{other}' — see 'anima-hosted help'");
+            std::process::exit(2);
+        }
     }
 
     // ── Backend selection (E1.3) ─────────────────────────────────────────────

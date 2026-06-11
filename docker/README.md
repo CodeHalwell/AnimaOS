@@ -36,6 +36,29 @@ event stream (`GET /events`). The same round-trip is asserted in CI by the
 `docker.yml` smoke-test step on every image build. Switch to a real
 backend by moving to one of the compose files below.
 
+### Run the published image (no build at all)
+
+CI publishes the hosted image to GHCR on every `main` push
+(`ghcr.io/codehalwell/animaos/hosted:main`, immutable `:sha-*` tags,
+`:v*` on releases):
+
+```sh
+docker run --rm -e ANIMA_BACKEND=mock -p 127.0.0.1:8088:8088 \
+  ghcr.io/codehalwell/animaos/hosted:main serve
+```
+
+(If the package is private, `docker login ghcr.io` with a token that has
+`read:packages` first.) Copy `.env.example` to `.env` to configure the
+compose stacks; every variable has a working default.
+
+### Operational posture
+
+The image carries a `HEALTHCHECK` (GET / against the embedded console), all
+compose variants run `hosted` with `restart: unless-stopped`, identity +
+audit state persists in the `anima-data` volume, and the console binds host
+loopback only. Set `ANIMA_CONSOLE_TOKEN` before exposing the console beyond
+localhost.
+
 ## Topology
 
 ```

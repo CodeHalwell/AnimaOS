@@ -30,6 +30,7 @@ services:
       dockerfile: docker/Dockerfile
     image: animaos/hosted:dev
     container_name: anima-hosted
+    restart: unless-stopped
     # Default: run the operator-console server.
     # Override for one-shot subcommands, e.g. `docker compose ... run --rm hosted why`.
     command: ["serve"]

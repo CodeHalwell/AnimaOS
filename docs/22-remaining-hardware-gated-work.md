@@ -15,10 +15,10 @@ hermetic.
 
 | Item | Epic | State today | What closes it |
 |---|---|---|---|
-| **30-day soak run** | E4.7 | 🟡 Harness, manifest schema, and CI smoke-test all shipped (`cargo xtask soak`, `.github/workflows/soak.yml`). The 720-hour run has **not** been executed. | Run `cargo xtask soak --hours 720 --efi <release.efi>` on a Firecracker / Cloud-Hypervisor host and commit the resulting manifest under `artifacts/soak/`. |
-| **microVM Phase-1 transport** | E6 S6.5 | ⬜ `console-proto` over `smoltcp` + TLS is designed; blocked on a `virtio-net` driver that does not yet exist in the kernel. The protocol carries over unchanged — only the transport is missing. | Implement a `virtio-net` driver for the Firecracker/Cloud-Hypervisor target, then bind the existing `console-proto` framing onto a `smoltcp` TCP socket (the Phase-0 COM1 path already proves the protocol). |
+| **30-day soak run** | E4.7 | 🟡 Harness, manifest schema, and CI smoke-test all shipped; a 20-iteration QEMU record (20/20 ok, 0 timeouts, 0 unscheduled exits, vita phase included) is committed at `artifacts/soak/2026-06-11-sandbox-20x/` as harness proof. The 720-hour run has **not** been executed — wall-clock time cannot be compressed. | Run `cargo xtask soak --hours 720 --efi <release.efi>` on a Firecracker / Cloud-Hypervisor host and commit the resulting manifest under `artifacts/soak/`. |
+| **microVM Phase-1 transport** | E6 S6.5 | ✅ **Driver + TCP transport shipped.** `kernels/microvm/src/net.rs`: virtio-net over the modern PCI transport (`virtio-drivers`, ECAM candidate scan validated against the host bridge), an identity-mapped DMA `Hal`, and a `smoltcp` device gluing it to the E4.3 stack. End-to-end proven under QEMU q35 and CI-gated: the kernel TCP-connects to a host listener, frames a real `ANIMA_TLM` event (received verbatim host-side), and decodes the `ANIMA_IN` guidance reply (`E6.5_NET_DONE` / `E6.5_GUIDANCE_OK`). Self-skips on boards without the device. | Follow-ups: parse ACPI MCFG instead of the candidate list; a `virtio-mmio` transport flip for Firecracker (same crate, same device code); TLS 1.3 (E4.4) bound onto this socket for the authenticated console. |
 | **Native FFI runtimes** | E8 S8.3 | ⬜ Abstraction + fixtures shipped (`llm-backends/src/native.rs`: `NativeRuntime`, `LlamaCppNativeBackend`, `LiteRtLmBackend`, `FixtureNativeRuntime`). Real bindings sit behind unwired flags `llama-native-live` / `litert-lm-live`. | Wire the `llama.cpp` and LiteRT-LM FFI behind those feature flags against the installed native libraries; flip the fixture default when a runtime is present. |
-| **Real fine-tuning** | E8 S8.4.5/.6 | ⬜ Pipeline, eval harness, and adapter library shipped (`crates/finetune`, `cargo xtask finetune`). `UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`. | Implement the Unsloth/HRA GPU training + merge/quant path behind the `live` gate on a CUDA host; the JSONL loader, manifest, and adapter-mount plumbing are already in place. |
+| **Real fine-tuning** | E8 S8.4.5/.6 | 🟡 The full loop is now wired end-to-end in software: the hosted agent persists its sleep-phase corpus (`ANIMA_CORPUS_DIR`, default `~/.anima/training_corpus`, shared into the trainer container read-only), and `trainer/sleep_phase.py` consumes it — corpus validation + manifest verified via `--dry-run`; QLoRA (Unsloth) + GGUF export + Ollama Modelfile are the `live` path. `crates/finetune`'s `UnslothFineTuner` remains a `live`-gated skeleton. | Run `sleep_phase.py` (no `--dry-run`) on a CUDA host to validate the training/merge/quant path, then point `UnslothFineTuner::live` at the same flow; the manifest's `adapter_artifact` block already mirrors `finetune::AdapterArtifact` for library ingestion. |
 
 ## 1a. The software tail (no hardware required)
 
@@ -27,7 +27,42 @@ lost behind the table above:
 
 | Item | Epic | State today | What closes it |
 |---|---|---|---|
-| **`vita` in the microVM** | E4.5 follow-on | ⬜ `vita` is `no_std`-attributed but effectively std-only; the kernel links `corpus` + `scheduler` + `memory` + `interoception` + `console-proto` and runs the E4.5 soak **without the lifecycle director**. `praxis`, `anima-self`, and `senses` build for `no_std` but are not yet linked. | Port `vita`'s somatic execution loop off `std` (timers, channels, audit sink behind traits), link it plus the remaining `no_std` crates into `kernels/microvm`, and extend the boot soak to drive a full wake→sleep cycle in-kernel. This is the highest-leverage *software* item: it is what makes the bare-metal target an organism rather than a substrate. |
+| **`vita` in the microVM** | E4.5 follow-on | ✅ **Closed.** `vita` (with `senses` and `kv-controller`) compiles for `x86_64-unknown-uefi` under `build-std = [core, alloc]`, and the kernel's Phase 9 (E4.5b) runs the real `LifecycleManager` + `somatic_execution_loop` on the Embassy executor: policy-checked guidance → MLFQ dispatch to a no_std backend → audited sleep cycle (pruning real; replay/dream/compilation as hosted-only stubs). `E4.5B_VITA_DONE` is CI-gated in `microvm-boot`; release EFI 225 KiB. | Remaining in-kernel refinements: live backends now have a transport (virtio-net ✅); a wall-clock source is **not currently needed** — every `SystemTime` consumer (identity/episodic file stores, trace capture) is std-gated, so nothing in the no_std path reads wall time; revisit when audit entries gain timestamps or identity persists in-kernel. |
+
+#### `vita` no_std gap map (measured 2026-06-11 — executed the same day)
+
+A probe build of the kernel with `vita = { default-features = false }` against
+`build-std = [core, alloc]` pinned the work to:
+
+1. **Crate attribute missing** — `vita/src/lib.rs` has feature-gated
+   `std`/`alloc` imports but no `#![cfg_attr(not(feature = "std"), no_std)]`;
+   without it the crate silently requires `std` regardless of features.
+2. **Cargo plumbing** — vita's deps are pulled with default (std) features.
+   Each needs `default-features = false` + forwarding through vita's `std`
+   feature: `scheduler`, `memory` (`libm` for no_std float math),
+   `interoception`, `senses`, `serde`/`serde_json`
+   (`default-features = false, features = ["alloc"]`), and the three below.
+3. **Small dependency ports** — `kv-controller` (1 `use std::` site; no
+   `std` feature yet; `vita::kv_gate` imports it unconditionally),
+   `defence` (3 sites), `skills` (2 sites; `std` feature already exists and
+   vita's import is already gated).
+4. **Mutex gap** — `LifecycleManager.task_cancel`/`motivated_gate` are
+   `Arc<Mutex<…>>` with `Mutex` imported only under `std`; needs a no_std
+   lock (e.g. a `spin`-backed shim preserving the `.lock().unwrap()` call
+   shape) or gating.
+5. **Stranded IPC types** — `vita::router` (no_std) imports `ToolSpec` /
+   `InvokeMemoryScope` / `InvokeRequest` from the wholly std-gated
+   `cortex_bridge`; the plain-data types must move to an always-compiled
+   module (alloc-only).
+6. **Audit sink** — `vita::audit` has 12 `use std::` sites (JSONL file sink,
+   HMAC sidecar); no_std needs the in-memory ring + a serial-writer seam so
+   the kernel can frame entries onto COM1 via `console-proto`.
+7. **Kernel posture decision (recorded)** — stay on
+   `build-std = [core, alloc]`. The alternative (UEFI's Tier-2 partial
+   `std`) was probed and rejected: the prebuilt sysroot `std` collides with
+   build-std (`E0152` duplicate lang items), would fight the kernel's own
+   `#[global_allocator]`/`panic_handler`, and risks the ≤ 1 MiB image
+   budget.
 
 ### Close-out checklist (for whoever has the hardware)
 

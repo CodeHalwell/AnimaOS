@@ -22,7 +22,7 @@ const REPLAY_CAPACITY: usize = 256;
 
 struct Subscriber {
     id: u64,
-    tx: Sender<OperatorEvent>,
+    tx: Sender<(u64, OperatorEvent)>,
 }
 
 #[derive(Default)]
@@ -30,22 +30,26 @@ struct HubInner {
     subscribers: Vec<Subscriber>,
     /// Rolling buffer of recent feed events (tasks, messages, gate, audit)
     /// replayed to new clients so a dashboard opened mid-session has context.
-    recent: VecDeque<OperatorEvent>,
+    /// Each entry carries its publish sequence number so reconnecting clients
+    /// (SSE `Last-Event-ID`) can be replayed only what they have not seen.
+    recent: VecDeque<(u64, OperatorEvent)>,
     /// The most recent `State` snapshot — replayed first so a new client paints
     /// the current lifecycle immediately rather than waiting for the next change.
-    last_state: Option<OperatorEvent>,
+    last_state: Option<(u64, OperatorEvent)>,
     /// The most recent `Vitals` snapshot, replayed for the same reason.
-    last_vitals: Option<OperatorEvent>,
+    last_vitals: Option<(u64, OperatorEvent)>,
+    /// Monotonic event sequence (the SSE `id:` value).
+    seq: u64,
     next_id: u64,
 }
 
 /// A subscription handle returned by [`ConsoleHub::subscribe`].
 pub struct Subscription {
     /// Snapshot events (current vitals + state + recent feed) to render before
-    /// the live stream begins.
-    pub snapshot: Vec<OperatorEvent>,
-    /// The live event stream.
-    pub rx: Receiver<OperatorEvent>,
+    /// the live stream begins, each tagged with its publish sequence number.
+    pub snapshot: Vec<(u64, OperatorEvent)>,
+    /// The live event stream, each event tagged with its sequence number.
+    pub rx: Receiver<(u64, OperatorEvent)>,
     id: u64,
 }
 
@@ -111,14 +115,38 @@ impl ConsoleHub {
     /// Dead subscribers (receiver dropped) are reaped lazily here.
     pub fn publish(&self, event: OperatorEvent) {
         let mut inner = self.inner.lock().expect("hub poisoned");
+        let seq = inner.seq;
+        Self::publish_locked(&mut inner, seq, event);
+    }
+
+    /// Publish an event with a caller-supplied sequence number.
+    ///
+    /// The audit tailer passes the audit-file byte offset of the line that
+    /// produced the event: offsets are strictly increasing, append-only, and
+    /// — crucially — identical for the same historical line across server
+    /// restarts, so a reconnecting client's `Last-Event-ID` cursor remains
+    /// valid against a freshly-started process re-reading the same file.
+    /// The internal counter is advanced past `seq` so interleaved direct
+    /// `publish` calls (e.g. auth-lockout audits) stay monotonic.
+    pub fn publish_at(&self, seq: u64, event: OperatorEvent) {
+        let mut inner = self.inner.lock().expect("hub poisoned");
+        Self::publish_locked(&mut inner, seq, event);
+    }
+
+    /// Publish under an already-held lock — sequence allocation and delivery
+    /// happen in one critical section, so concurrent publishers (audit
+    /// tailer, HTTP server, serial bridge) can never mint duplicate or
+    /// out-of-order SSE ids.
+    fn publish_locked(inner: &mut HubInner, seq: u64, event: OperatorEvent) {
+        inner.seq = inner.seq.max(seq + 1);
 
         // Keep the latest snapshot of the two "current value" event kinds.
         match &event {
-            OperatorEvent::State { .. } => inner.last_state = Some(event.clone()),
-            OperatorEvent::Vitals { .. } => inner.last_vitals = Some(event.clone()),
+            OperatorEvent::State { .. } => inner.last_state = Some((seq, event.clone())),
+            OperatorEvent::Vitals { .. } => inner.last_vitals = Some((seq, event.clone())),
             OperatorEvent::Heartbeat { .. } => {} // not worth replaying
             _ => {
-                inner.recent.push_back(event.clone());
+                inner.recent.push_back((seq, event.clone()));
                 while inner.recent.len() > REPLAY_CAPACITY {
                     inner.recent.pop_front();
                 }
@@ -128,7 +156,7 @@ impl ConsoleHub {
         // Fan out, dropping any subscriber whose receiver has hung up.
         inner
             .subscribers
-            .retain(|s| s.tx.send(event.clone()).is_ok());
+            .retain(|s| s.tx.send((seq, event.clone())).is_ok());
     }
 
     /// Register a new subscriber, returning the replay snapshot plus a live
@@ -148,6 +176,9 @@ impl ConsoleHub {
             snapshot.push(s.clone());
         }
         snapshot.extend(inner.recent.iter().cloned());
+        // Replay in publish order so a client's `Last-Event-ID` cursor moves
+        // monotonically through the snapshot.
+        snapshot.sort_by_key(|(seq, _)| *seq);
 
         inner.subscribers.push(Subscriber { id, tx });
         Subscription { snapshot, rx, id }
@@ -216,7 +247,7 @@ mod tests {
         hub.publish(OperatorEvent::Heartbeat { uptime_secs: 1 });
         assert!(matches!(
             sub.rx.recv().unwrap(),
-            OperatorEvent::Heartbeat { .. }
+            (_, OperatorEvent::Heartbeat { .. })
         ));
     }
 
@@ -236,12 +267,14 @@ mod tests {
         });
 
         let sub = hub.subscribe();
-        // Snapshot order: vitals, state, then recent feed.
-        assert!(matches!(sub.snapshot[0], OperatorEvent::Vitals { .. }));
-        assert!(matches!(sub.snapshot[1], OperatorEvent::State { .. }));
+        // Snapshot replays in publish order: vitals, state, then the feed
+        // event — and the sequence numbers must be strictly increasing so a
+        // reconnecting client's Last-Event-ID cursor is meaningful.
+        assert!(matches!(sub.snapshot[0], (0, OperatorEvent::Vitals { .. })));
+        assert!(matches!(sub.snapshot[1], (1, OperatorEvent::State { .. })));
         assert!(matches!(
             sub.snapshot[2],
-            OperatorEvent::AgentMessage { .. }
+            (2, OperatorEvent::AgentMessage { .. })
         ));
     }
 
@@ -261,9 +294,12 @@ mod tests {
         let sub = hub.subscribe();
         SignalPublisher::publish(&hub, &InteroceptiveSignals::maximum_stress());
         match sub.rx.recv().unwrap() {
-            OperatorEvent::Vitals {
-                aggregate_stress, ..
-            } => assert!((aggregate_stress - 1.0).abs() < 1e-5),
+            (
+                _,
+                OperatorEvent::Vitals {
+                    aggregate_stress, ..
+                },
+            ) => assert!((aggregate_stress - 1.0).abs() < 1e-5),
             other => panic!("expected vitals, got {other:?}"),
         }
     }
