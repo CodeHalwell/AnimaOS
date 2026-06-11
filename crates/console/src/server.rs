@@ -1007,31 +1007,37 @@ mod tests {
             });
         }
 
-        let read_stream = |req: &str| {
+        // Read until `until` appears or the deadline passes — a transient
+        // read-timeout is NOT end-of-stream (CI runners pause mid-frame).
+        let read_stream = |req: &str, until: &str| {
             let mut s = TcpStream::connect(addr).unwrap();
             s.write_all(req.as_bytes()).unwrap();
-            s.set_read_timeout(Some(Duration::from_millis(400)))
+            s.set_read_timeout(Some(Duration::from_millis(200)))
                 .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
             let mut text = String::new();
             let mut buf = [0u8; 2048];
-            for _ in 0..10 {
+            while std::time::Instant::now() < deadline && !text.contains(until) {
                 match s.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
-                    Err(_) => break, // read timeout — snapshot fully drained
+                    Err(_) => {} // timeout tick — keep waiting for the frame
                 }
             }
             text
         };
 
         // A fresh client (no Last-Event-ID) is replayed the whole ring.
-        let fresh = read_stream("GET /events HTTP/1.1\r\nHost: x\r\n\r\n");
+        let fresh = read_stream("GET /events HTTP/1.1\r\nHost: x\r\n\r\n", "gamma");
         for word in ["alpha", "beta", "gamma"] {
             assert!(fresh.contains(word), "fresh client missing {word}: {fresh}");
         }
 
         // A reconnecting client that already saw seq 1 gets only seq 2.
-        let resumed = read_stream("GET /events HTTP/1.1\r\nHost: x\r\nLast-Event-ID: 1\r\n\r\n");
+        let resumed = read_stream(
+            "GET /events HTTP/1.1\r\nHost: x\r\nLast-Event-ID: 1\r\n\r\n",
+            "gamma",
+        );
         assert!(
             !resumed.contains("alpha") && !resumed.contains("beta"),
             "events at or below the cursor must be skipped: {resumed}"
@@ -1075,13 +1081,14 @@ mod tests {
             },
         );
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut text = String::new();
         let mut buf = [0u8; 2048];
-        for _ in 0..10 {
+        while std::time::Instant::now() < deadline && !text.contains("fresh-line") {
             match s.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
-                Err(_) => break,
+                Err(_) => {} // timeout tick — keep waiting
             }
         }
         assert!(
