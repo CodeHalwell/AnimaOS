@@ -20,6 +20,15 @@ hermetic.
 | **Native FFI runtimes** | E8 S8.3 | ⬜ Abstraction + fixtures shipped (`llm-backends/src/native.rs`: `NativeRuntime`, `LlamaCppNativeBackend`, `LiteRtLmBackend`, `FixtureNativeRuntime`). Real bindings sit behind unwired flags `llama-native-live` / `litert-lm-live`. | Wire the `llama.cpp` and LiteRT-LM FFI behind those feature flags against the installed native libraries; flip the fixture default when a runtime is present. |
 | **Real fine-tuning** | E8 S8.4.5/.6 | ⬜ Pipeline, eval harness, and adapter library shipped (`crates/finetune`, `cargo xtask finetune`). `UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`. | Implement the Unsloth/HRA GPU training + merge/quant path behind the `live` gate on a CUDA host; the JSONL loader, manifest, and adapter-mount plumbing are already in place. |
 
+## 1a. The software tail (no hardware required)
+
+One item is *not* hardware-gated and is called out separately so it isn't
+lost behind the table above:
+
+| Item | Epic | State today | What closes it |
+|---|---|---|---|
+| **`vita` in the microVM** | E4.5 follow-on | ⬜ `vita` is `no_std`-attributed but effectively std-only; the kernel links `corpus` + `scheduler` + `memory` + `interoception` + `console-proto` and runs the E4.5 soak **without the lifecycle director**. `praxis`, `anima-self`, and `senses` build for `no_std` but are not yet linked. | Port `vita`'s somatic execution loop off `std` (timers, channels, audit sink behind traits), link it plus the remaining `no_std` crates into `kernels/microvm`, and extend the boot soak to drive a full wake→sleep cycle in-kernel. This is the highest-leverage *software* item: it is what makes the bare-metal target an organism rather than a substrate. |
+
 ### Close-out checklist (for whoever has the hardware)
 
 1. **Soak** — provision one Firecracker or Cloud-Hypervisor VM; build the

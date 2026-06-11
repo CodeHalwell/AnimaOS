@@ -254,9 +254,12 @@ Port to bare-metal microVM, integrate `smoltcp` and `rustls`, complete the forma
 
 - MicroVM image size optimised. ✅ — release EFI ≤ 1 MiB (CI gated in
   `ci.yml` step `Enforce EFI image-size budget (E4.7.1)`).
-- Boot time optimised to under 2 seconds. ✅ — `ci.yml` `microvm-boot`
-  job times QEMU start → `E4.5_SOAK_DONE` marker on COM1 and fails if
-  the elapsed time exceeds 2 000 ms.
+- Boot time optimised to under 2 seconds. 🟡 — `ci.yml` `microvm-boot`
+  records QEMU wall-clock boot latency for information only; QEMU+OVMF
+  on a shared runner (full firmware POST) is not a representative
+  measurement and is deliberately not gated.  The 2 s budget applies to
+  Firecracker / Cloud Hypervisor and is asserted as part of the
+  hardware soak run (`docs/22` §1).
 - Soak testing: 30-day continuous run without restart. 🟡 — harness
   in `xtask soak`, manifest schema + CI smoke test in
   `.github/workflows/soak.yml`; the 720-hour run itself is operator-
