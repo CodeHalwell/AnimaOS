@@ -34,8 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
+# Download-then-execute rather than `curl | sh`: in a pipeline the RUN step's
+# exit status is `sh`'s, so a curl failure (proxy, TLS, DNS) would silently
+# produce a layer with no toolchain and only surface later as `cargo: not
+# found` (exit 127).  `curl -f` + a separate execution step fails loudly at
+# the point of error.
+RUN curl --proto '=https' --tlsv1.2 -fsSf -o /tmp/rustup-init.sh https://sh.rustup.rs \
+    && sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal \
+    && rm /tmp/rustup-init.sh
 
 WORKDIR /src
 COPY . .

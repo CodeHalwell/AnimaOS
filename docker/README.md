@@ -1,11 +1,12 @@
 # AnimaOS — Docker deployment
 
 Containerised stack for running AnimaOS against local GPU inference (and,
-optionally, Unsloth-based sleep-phase fine-tuning). Three compose files cover
+optionally, Unsloth-based sleep-phase fine-tuning). Four compose files cover
 the main deployment targets:
 
 | Compose file | Target | GPU |
 |---|---|---|
+| `docker-compose.mock.yml` *(standalone)* | Zero-dependency MVP — mock backend | none |
 | `docker-compose.yml` | NVIDIA GPU (Linux + WSL 2) | CUDA via nvidia-container-toolkit |
 | `docker-compose.cpu.yml` *(overlay)* | CPU-only Linux | none |
 | `docker-compose.apple.yml` *(standalone)* | Apple Silicon Mac | Metal (via native Ollama) |
@@ -13,6 +14,27 @@ the main deployment targets:
 The default stack is designed for a single workstation with an NVIDIA GPU
 (developed against an RTX 3090). For CPU-only or Apple Silicon setups, see
 the sections below.
+
+## Quickest start (no GPU, no model downloads)
+
+```sh
+docker compose -f docker-compose.mock.yml up --build
+```
+
+Runs the full organism — somatic lifecycle, sleep cycle, gate/router,
+operator console — against the deterministic mock LLM backend. Open
+<http://127.0.0.1:8088/> for the dashboard, then:
+
+```sh
+curl -X POST http://127.0.0.1:8088/guidance \
+     -H 'Content-Type: application/json' \
+     -d '{"text":"summarise system state","priority":"High"}'
+```
+
+and watch the agent wake, dispatch, answer, and return to sleep on the
+event stream (`GET /events`). The same round-trip is asserted in CI by the
+`docker.yml` smoke-test step on every image build. Switch to a real
+backend by moving to one of the compose files below.
 
 ## Topology
 

@@ -94,3 +94,52 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Always keep a local copy of the image for the smoke test below,
+          # even on PR events where nothing is pushed to GHCR.
+          load: true
+
+      # MVP smoke test — the containerised agent must come up against the
+      # deterministic mock backend and complete one full afferent→efferent
+      # round-trip: guidance in, agent wakes, mock LLM streams, AgentMessage
+      # out on the SSE stream.  This is the same path exercised by
+      # `docker compose -f docker-compose.mock.yml up`.
+      - name: Smoke-test image (mock backend, console round-trip)
+        run: |
+          IMAGE=$(head -1 <<< "${{ steps.meta.outputs.tags }}")
+          echo "Smoke-testing ${IMAGE}"
+          docker run -d --name anima-smoke \
+            -e ANIMA_BACKEND=mock \
+            -p 127.0.0.1:8088:8088 \
+            "${IMAGE}" serve
+
+          # Wait for the console to accept connections (≤ 30 s).
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8088/; then break; fi
+            if [ "$i" = "30" ]; then
+              echo "❌ console did not come up within 30 s"
+              docker logs anima-smoke; exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ dashboard responds"
+
+          # Capture the SSE stream while injecting guidance.
+          curl -sN --max-time 15 http://127.0.0.1:8088/events > /tmp/events.log &
+          SSE_PID=$!
+          sleep 1
+          curl -sf -X POST http://127.0.0.1:8088/guidance \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"ci smoke test","priority":"High"}'
+          echo "✅ guidance accepted"
+          wait $SSE_PID || true
+
+          if grep -q '"type":"AgentMessage"' /tmp/events.log; then
+            echo "✅ agent completed a mock round-trip (AgentMessage on SSE)"
+          else
+            echo "❌ no AgentMessage on the event stream"
+            echo "--- events ---"; cat /tmp/events.log
+            echo "--- container logs ---"; docker logs anima-smoke
+            exit 1
+          fi
+
+          docker rm -f anima-smoke
