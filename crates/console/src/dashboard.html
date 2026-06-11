@@ -173,14 +173,23 @@
   .ev.veto { border-left-color: var(--crit); }  .ev.veto .tag { color: var(--crit); }
 
   /* ── Responsive ──────────────────────────────────────────────────── */
+  /* Never hide capability: below the three-column width the telemetry
+     panel stacks under the conversation; below tablet width everything
+     stacks single-column. The full event stream stays reachable at every
+     viewport size. */
   @media (max-width: 1180px) {
-    main { grid-template-columns: 280px 1fr; }
-    .col.right { display: none; }
+    main { grid-template-columns: 280px 1fr; height: auto; }
+    .col.left { grid-row: 1 / span 2; }
+    #chatpanel { height: 62vh; }
+    .col.right { grid-column: 2; }
+    #feedpanel { height: 34vh; }
   }
   @media (max-width: 780px) {
-    main { grid-template-columns: 1fr; height: auto; }
-    .col.left { order: 2; }
-    #chatpanel { height: 70vh; }
+    main { grid-template-columns: 1fr; }
+    .col.left { grid-row: auto; order: 3; }
+    .col.right { grid-column: auto; order: 2; }
+    #chatpanel { height: 58vh; }
+    #feedpanel { height: 30vh; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
