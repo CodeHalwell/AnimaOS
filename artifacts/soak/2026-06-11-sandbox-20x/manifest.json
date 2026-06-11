@@ -1,0 +1,153 @@
+{
+  "started_at": "2026-06-11T22:26:17.110794405Z",
+  "last_updated": "2026-06-11T22:28:15.778738075Z",
+  "total_iterations": 20,
+  "completed_iterations": 20,
+  "successful_iterations": 20,
+  "timeout_iterations": 0,
+  "unscheduled_exit_iterations": 0,
+  "mean_boot_latency_ms": 5891.9,
+  "p95_boot_latency_ms": 8829.0,
+  "iterations": [
+    {
+      "iteration": 1,
+      "started_at": "2026-06-11T22:26:17.110886261Z",
+      "completed_at": "2026-06-11T22:26:25.825972054Z",
+      "boot_latency_ms": 8678,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 2,
+      "started_at": "2026-06-11T22:26:25.826302033Z",
+      "completed_at": "2026-06-11T22:26:34.694448568Z",
+      "boot_latency_ms": 8829,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 3,
+      "started_at": "2026-06-11T22:26:34.694807237Z",
+      "completed_at": "2026-06-11T22:26:40.151975323Z",
+      "boot_latency_ms": 5417,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 4,
+      "started_at": "2026-06-11T22:26:40.152532318Z",
+      "completed_at": "2026-06-11T22:26:45.761656647Z",
+      "boot_latency_ms": 5568,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 5,
+      "started_at": "2026-06-11T22:26:45.762065193Z",
+      "completed_at": "2026-06-11T22:26:51.732580489Z",
+      "boot_latency_ms": 5922,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 6,
+      "started_at": "2026-06-11T22:26:51.733677873Z",
+      "completed_at": "2026-06-11T22:26:58.497948207Z",
+      "boot_latency_ms": 6722,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 7,
+      "started_at": "2026-06-11T22:26:58.498434858Z",
+      "completed_at": "2026-06-11T22:27:04.206955372Z",
+      "boot_latency_ms": 5669,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 8,
+      "started_at": "2026-06-11T22:27:04.207543745Z",
+      "completed_at": "2026-06-11T22:27:09.665917593Z",
+      "boot_latency_ms": 5418,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 9,
+      "started_at": "2026-06-11T22:27:09.666475679Z",
+      "completed_at": "2026-06-11T22:27:15.072771664Z",
+      "boot_latency_ms": 5368,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 10,
+      "started_at": "2026-06-11T22:27:15.073373199Z",
+      "completed_at": "2026-06-11T22:27:20.894500969Z",
+      "boot_latency_ms": 5770,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 11,
+      "started_at": "2026-06-11T22:27:20.895005300Z",
+      "completed_at": "2026-06-11T22:27:26.354193335Z",
+      "boot_latency_ms": 5418,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 12,
+      "started_at": "2026-06-11T22:27:26.354781232Z",
+      "completed_at": "2026-06-11T22:27:31.710933103Z",
+      "boot_latency_ms": 5317,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 13,
+      "started_at": "2026-06-11T22:27:31.711557302Z",
+      "completed_at": "2026-06-11T22:27:37.168503235Z",
+      "boot_latency_ms": 5417,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 14,
+      "started_at": "2026-06-11T22:27:37.169205518Z",
+      "completed_at": "2026-06-11T22:27:42.777814619Z",
+      "boot_latency_ms": 5568,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 15,
+      "started_at": "2026-06-11T22:27:42.778474898Z",
+      "completed_at": "2026-06-11T22:27:48.287064704Z",
+      "boot_latency_ms": 5468,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 16,
+      "started_at": "2026-06-11T22:27:48.287683302Z",
+      "completed_at": "2026-06-11T22:27:53.796183123Z",
+      "boot_latency_ms": 5469,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 17,
+      "started_at": "2026-06-11T22:27:53.796890361Z",
+      "completed_at": "2026-06-11T22:27:59.304303895Z",
+      "boot_latency_ms": 5468,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 18,
+      "started_at": "2026-06-11T22:27:59.305035689Z",
+      "completed_at": "2026-06-11T22:28:04.812082706Z",
+      "boot_latency_ms": 5467,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 19,
+      "started_at": "2026-06-11T22:28:04.812846380Z",
+      "completed_at": "2026-06-11T22:28:10.269709485Z",
+      "boot_latency_ms": 5417,
+      "outcome": "ok"
+    },
+    {
+      "iteration": 20,
+      "started_at": "2026-06-11T22:28:10.270445712Z",
+      "completed_at": "2026-06-11T22:28:15.778699635Z",
+      "boot_latency_ms": 5468,
+      "outcome": "ok"
+    }
+  ]
+}

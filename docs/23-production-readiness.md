@@ -48,10 +48,15 @@ so kernel work (the tails below) does not depend on CI round-trips.
       director runs in-kernel (E4.5b phase: guidance → MLFQ dispatch →
       audited four-phase sleep), CI-gated via `E4.5B_VITA_DONE`. The
       bare-metal target is now an organism, not a substrate.
-- [ ] **virtio-net driver** — unblocks in-kernel networking: live LLM calls,
-      networked console (E6 S6.5), real outbound TLS.
+- [x] **virtio-net driver** — DONE (PCI/modern via `virtio-drivers`, ECAM
+      scan, identity-DMA Hal, smoltcp glue). The console protocol runs over
+      real TCP, CI-gated end-to-end against a host listener
+      (`E6.5_NET_DONE`/`E6.5_GUIDANCE_OK`). Follow-ups in docs/22: ACPI
+      MCFG parse, Firecracker virtio-mmio flip, TLS on the socket.
 - [ ] **30-day soak** on Firecracker / Cloud Hypervisor; commit the manifest
-      under `artifacts/soak/`; assert the 2 s boot budget there.
+      under `artifacts/soak/`; assert the 2 s boot budget there. (Harness
+      proof banked: 20/20 sandbox QEMU iterations committed — wall-clock
+      time is the only remaining ingredient.)
 
 ## Pillar 3 — Operator UI
 

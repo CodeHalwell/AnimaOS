@@ -400,6 +400,9 @@ jobs:
         run: |
           mkdir -p esp/EFI/BOOT
           cp efi-artifact/anima-microvm.efi esp/EFI/BOOT/BOOTX64.EFI
+          # q35 OVMF lands in the EFI shell when no NVRAM boot entry matches
+          # the SATA device path; startup.nsh makes the launch unconditional.
+          printf 'FS0:\\EFI\\BOOT\\BOOTX64.EFI\r\n' > esp/startup.nsh
           ls -la esp/EFI/BOOT/
       - name: Boot in QEMU and verify E4.1 + E4.2 + E4.3 + E4.4 output
         # Strategy: the UEFI binary writes to COM1 (port 0x3F8) via x86
@@ -431,8 +434,35 @@ jobs:
           # Run QEMU with boot-time measurement.
           # -serial file: captures all bytes written to COM1 (port 0x3F8).
           # -cpu qemu64,+rdrand: expose the RDRAND instruction to the guest.
+          # Host side of the E6.5 console-over-TCP exchange: accepts the
+          # kernel's connection, expects one ANIMA_TLM line, answers with an
+          # ANIMA_IN guidance line (the same protocol the COM1 path proves).
+          python3 - > /tmp/listener.log 2>&1 <<'PYEOF' &
+          import socket
+          srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          srv.bind(("127.0.0.1", 9099)); srv.listen(1); srv.settimeout(110)
+          conn, _ = srv.accept(); conn.settimeout(60)
+          buf = b""
+          while b"\n" not in buf:
+              d = conn.recv(1024)
+              if not d: break
+              buf += d
+          print("kernel sent:", buf.decode(errors="replace"), flush=True)
+          assert buf.startswith(b"ANIMA_TLM "), buf
+          conn.sendall(b'ANIMA_IN {"text":"ci guidance over tcp","priority":"High"}\n')
+          try:
+              while conn.recv(1024):
+                  pass
+          except Exception:
+              pass
+          PYEOF
+          LISTENER_PID=$!
+
           BOOT_START=$(date +%s%3N)
           timeout 120 qemu-system-x86_64 \
+            -M q35 \
+            -netdev user,id=n0 \
+            -device virtio-net-pci,netdev=n0 \
             -cpu qemu64,+rdrand \
             -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive format=raw,file=fat:rw:esp \
@@ -477,6 +507,16 @@ jobs:
           grep -q "E4.5B_VITA_DONE" /tmp/qemu-serial.txt && \
             echo "✅ E4.5b exit criterion met: in-kernel vita lifecycle arc complete" || \
             { echo "❌ E4.5B_VITA_DONE not found in serial output"; exit 1; }
+
+          # E6.5 Phase 1: virtio-net up + console protocol over real TCP.
+          grep -q "E6.5_NET_DONE" /tmp/qemu-serial.txt && \
+            echo "✅ E6.5 transport: virtio-net + smoltcp TCP + ANIMA_TLM egress" || \
+            { echo "❌ E6.5_NET_DONE not found"; cat /tmp/listener.log; exit 1; }
+          grep -q "E6.5_GUIDANCE_OK" /tmp/qemu-serial.txt && \
+            echo "✅ E6.5 ingress: ANIMA_IN guidance decoded over TCP" || \
+            { echo "❌ E6.5_GUIDANCE_OK not found"; cat /tmp/listener.log; exit 1; }
+          wait "$LISTENER_PID" || { echo "❌ host listener failed"; cat /tmp/listener.log; exit 1; }
+          echo "── host listener log ──"; cat /tmp/listener.log
 
           # E4.1 exit criterion (carried forward): panic handler reached.
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \

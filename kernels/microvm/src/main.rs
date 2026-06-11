@@ -88,6 +88,7 @@
 extern crate alloc;
 
 mod operator_console;
+mod net;
 mod sleep_soak;
 mod vita_soak;
 mod tls;
@@ -415,6 +416,18 @@ async fn kernel_boot_task() {
 
     operator_console::run_operator_console_demo(serial_write)
         .expect("E6.4 operator-console serial framing failed");
+
+    // ------------------------------------------------------------------
+    // Phase 9a — virtio-net + console-over-TCP (E6.5 Phase 1)
+    //
+    // Self-skipping: boards without a virtio-net function (plain soak runs,
+    // Firecracker mmio) log and continue; the CI invocation attaches
+    // `-device virtio-net-pci` and gates on the E6.5 markers.
+    // ------------------------------------------------------------------
+    serial_write("\n[E6.5] kernel_boot_task: Phase 9a — virtio-net console transport\n");
+    embassy_futures::yield_now().await;
+
+    net::run_net_phase(serial_write).expect("E6.5 virtio-net console phase failed");
 
     // ------------------------------------------------------------------
     // Phase 9 — In-kernel lifecycle director (E4.5b)
