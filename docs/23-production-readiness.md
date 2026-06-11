@@ -24,6 +24,11 @@
 **Remaining.**
 - [ ] Validate the Ollama stacks end-to-end on real hosts (GPU + CPU): model
       pulls, tier routing, sustained sessions. (Hermetic CI cannot do this.)
+      *Progress:* the live OpenAI-compatible HTTP path — request construction
+      with tool schemas, response/tool_calls parsing, and the full
+      plan→tool→observe→answer loop — has been exercised against a real local
+      HTTP server (`ANIMA_COMPAT_LIVE=1`), so what remains on a real host is
+      Ollama-specific behaviour, not the wire plumbing.
 - [ ] Decide the exposed-deployment story: reverse-proxy/TLS guidance and a
       non-empty `ANIMA_CONSOLE_TOKEN` requirement outside loopback.
 - [ ] Publish a versioned release image (`:v*`) once the above is validated.
@@ -32,8 +37,11 @@
 
 **Shipped.** UEFI framekernel boots under QEMU/OVMF in CI with the full
 marker sequence (Embassy, smoltcp, TLS 1.3, sleep-cycle soak, console
-Phase 0); ≤ 1 MiB release image enforced; Kani + Miri nightly; soak harness +
-manifest schema in-tree.
+Phase 0); ≤ 1 MiB release image enforced (current release EFI ≈ 200 KiB);
+Kani + Miri nightly; soak harness + manifest schema in-tree. The boot is
+also reproducible outside CI: nightly + `x86_64-unknown-uefi` +
+QEMU/OVMF brings the same marker sequence up green on a stock dev box,
+so kernel work (the tails below) does not depend on CI round-trips.
 
 **Remaining** (tracked in detail in `docs/22`):
 - [ ] **`vita` in the kernel** (`docs/22` §1a) — port the lifecycle director
