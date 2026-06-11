@@ -51,6 +51,8 @@ cargo run --bin anima-hosted -- doctor
 cargo run --bin anima-hosted -- init
 
 # 5. Start the agent and console
+docker compose -f docker-compose.mock.yml up --build   # zero-dependency MVP (mock LLM)
+# …or, with an NVIDIA GPU + Ollama models:
 docker compose up --build
 ```
 

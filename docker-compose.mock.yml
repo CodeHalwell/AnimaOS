@@ -1,0 +1,51 @@
+# Mock-backend standalone compose — the zero-dependency MVP.
+#
+# Runs the full AnimaOS organism (somatic lifecycle, sleep cycle, gate,
+# router, operator console) against the deterministic mock LLM backend.
+# No GPU, no model downloads, no Ollama daemon — works on any machine
+# that can run Docker, in well under a minute after the image is built.
+#
+# Use this to evaluate the agent lifecycle and operator console, to demo
+# the system, or as a CI smoke surface.  For real inference, switch to:
+#   - docker-compose.yml                       (NVIDIA GPU + Ollama)
+#   - docker-compose.yml + docker-compose.cpu.yml   (CPU-only Ollama)
+#   - docker-compose.apple.yml                 (Apple Silicon, host Ollama)
+#
+# Usage:
+#   docker compose -f docker-compose.mock.yml up --build
+#   # then open http://127.0.0.1:8088/ for the dashboard, or:
+#   #   anima-console tui --url http://127.0.0.1:8088
+#   #   curl -X POST http://127.0.0.1:8088/guidance \
+#   #        -H 'Content-Type: application/json' \
+#   #        -d '{"text":"summarise system state","priority":"High"}'
+#
+# One-shot subcommands:
+#   docker compose -f docker-compose.mock.yml run --rm hosted why
+#   docker compose -f docker-compose.mock.yml run --rm hosted doctor
+
+services:
+  hosted:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: animaos/hosted:dev
+    container_name: anima-hosted
+    # Default: run the operator-console server.
+    # Override for one-shot subcommands, e.g. `docker compose ... run --rm hosted why`.
+    command: ["serve"]
+    ports:
+      # Operator console — bound to host loopback.
+      # Open http://127.0.0.1:8088/ in a browser for the dashboard.
+      - "127.0.0.1:8088:8088"
+    environment:
+      # The deterministic mock backend: no network egress, reproducible streams.
+      ANIMA_BACKEND: mock
+      ANIMA_CONSOLE_ADDR: 0.0.0.0:8088
+      ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-}
+      ANIMA_AUDIT_DIR: /home/anima/.anima/audit
+    volumes:
+      # Persist the identity store and audit logs across runs.
+      - anima-data:/home/anima/.anima
+
+volumes:
+  anima-data:

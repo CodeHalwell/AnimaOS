@@ -10,25 +10,54 @@ See [`docs/`](./docs/README.md) for the full design suite.
 
 ```
 anima-os/
-├── .github/workflows/ci.yml   # fmt + build + test + clippy + microvm-{build,boot}
+├── .github/workflows/ci.yml       # fmt + build + test + clippy + microvm-{build,boot}
 ├── .github/workflows/bench.yml    # criterion benches + E4.7 regression gate
 ├── .github/workflows/soak.yml     # E4.7 microVM soak harness (manual)
-├── .github/workflows/nightly.yml  # E4.6 Kani + Miri
+├── .github/workflows/nightly.yml  # E4.6 Kani + Miri + coverage
+├── .github/workflows/docker.yml   # hosted image build + mock-backend smoke test
 ├── Cargo.toml
-├── crates/
+├── crates/                        # 35 crates in four layers:
+│   │
+│   │ # ── Somatic core (E1–E6) ─────────────────────────────────────────
 │   ├── corpus/                # The body (TCB): frame allocator, PCB, syscall enum
 │   ├── vita/                  # Autonomous lifecycle director + sleep routines + router/gate
 │   ├── scheduler/             # 3-tier MLFQ, bounded token pipe, LlmBackend
 │   ├── memory/                # CLS L1/L2/L3, ARC cache, emotional decay, TurboQuant
 │   ├── praxis/                # Efferent actuator: routing, circuit breaker, MCP/A2A envelopes
 │   ├── self/                  # Self/non-self barrier: typestate capability tokens
-│   ├── interoception/         # Stress index, TTFT window
+│   ├── interoception/         # Stress index, TTFT window, sensor bundle
 │   ├── senses/                # Afferent input: text / PCM packetization
+│   ├── kv-controller/         # Learned KV-cache controller (E5.4)
+│   ├── defence/               # Injection / drift / reward-hacking detection (E5.6)
 │   ├── console-proto/         # Operator-console wire protocol (no_std, both surfaces)
-│   └── console/               # Operator console: HTTP/SSE server + anima-console client
-└── kernels/
-    ├── hosted/                # Linux process emulation binary (`anima-hosted`) — development only
-    └── microvm/               # x86_64-unknown-uefi framekernel — production target
+│   ├── console/               # Operator console: HTTP/SSE server + anima-console client
+│   │
+│   │ # ── Autonomy layer (E7–E17) ──────────────────────────────────────
+│   ├── actuators/             # E7  — web search, browser, egress/SSRF guard
+│   ├── finetune/              # E8  — fine-tuning pipeline, eval harness, adapter library
+│   ├── comms/                 # E10 — channel gateways (Telegram/Slack), modality routing
+│   ├── skills/                # E11 — agent skills, proposal/promotion gates
+│   ├── motivation/            # E12 — drive hierarchy, affect, endogenous goals
+│   ├── constitution/          # E13 — immutable value charter + enforcement hook
+│   ├── lifecycle/             # E15 — digest, replay, snapshot, approval queue
+│   ├── users/                 # E17 — per-user identity, trust tiers
+│   │
+│   │ # ── Operational wave (E18–E30) ───────────────────────────────────
+│   ├── quota/ metrics/ config/ metrics-endpoint/ sessions/ consent/
+│   ├── feedback/ analytics/ tool-cache/ knowledge-graph/ alerts/
+│   ├── webhooks/ diagnostics/
+│   │
+│   │ # ── Multi-tenancy & scheduling (E31–E32) ─────────────────────────
+│   ├── workspace/             # E31 — multi-tenant workspaces, roles, quotas
+│   └── jobs/                  # E32 — scheduled job / cron engine
+├── kernels/
+│   ├── hosted/                # Linux process binary (`anima-hosted`) — development only
+│   └── microvm/               # x86_64-unknown-uefi framekernel — production target
+├── llm-backends/              # Anthropic / OpenAI / Ollama / OpenAI-compat / native runtimes
+├── cortex/                    # Python cognitive layer (plan/act/observe/revise over UDS IPC)
+├── trainer/                   # Unsloth sleep-phase trainer image (GPU, compose profile)
+├── web/                       # Astro + React GitHub Pages site
+└── xtask/                     # soak / bench-baseline / demo / finetune drivers
 ```
 
 > The `self` directory contains the package `anima-self` (Rust import: `anima_self`).
@@ -118,7 +147,7 @@ anima-os/
 - Embassy async executor (raw, no-arch, `__pender` no-op) + spin-poll loop
 - `smoltcp` 0.11 TCP/IP loopback — three-way handshake, client/server exchange
 - TLS 1.3 in bare-metal: P-256 ECDHE, AES-128-GCM, SHA-256/HKDF, ECDSA CertificateVerify (RustCrypto), smoltcp transport
-- No-std port of `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses` (`vita` requires std — future work)
+- `no_std`-capable ports of `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses`; the kernel currently links `scheduler` + `memory` + `interoception` (`vita` remains std-only — the in-kernel lifecycle is the top software tail, see `docs/22` §1a)
 - Sleep-cycle soak: VCM pressure, MLFQ boost, L1 pruning, stress index, `run_dream_walk_no_std`
 - CI: `microvm-boot` greps COM1 serial for `E4.1_*` … `E4.5_SOAK_DONE`; Miri + Kani in nightly CI
 
@@ -135,6 +164,20 @@ anima-os/
   the `SensoryBridge` for ingress — no changes to the lifecycle
 - microVM Phase 0: the same protocol framed onto COM1 (`ANIMA_TLM` / `ANIMA_IN`)
   with no `serde_json` in the kernel — see `docs/11-operator-interface.md`
+
+### Autonomy & Operations Layers (E7–E32)
+
+Above the somatic core sit the autonomous-agent layer (E7–E17: embodiment
+tools, local-inference ecosystem, onboarding, comms gateways, skills,
+motivation, constitution, higher cognition, trust & lifecycle, multi-agent
+A2A, per-user identity) and the operational wave (E18–E32: quotas, metrics +
+`/metrics` endpoint, runtime config, sessions, consent, feedback, analytics,
+tool cache, knowledge graph, alerts, webhooks, self-diagnostics, multi-tenant
+workspaces, cron jobs).  The crate map is in the workspace layout above; the
+epic-by-epic state with exit criteria lives in
+[`docs/07-implementation-plan.md`](./docs/07-implementation-plan.md), and the
+four remaining hardware-gated tails in
+[`docs/22-remaining-hardware-gated-work.md`](./docs/22-remaining-hardware-gated-work.md).
 
 The non-TCB crates explicitly enforce `#![forbid(unsafe_code)]`.
 
@@ -158,7 +201,7 @@ CI runs the following gates:
 
 | Workflow      | What it gates                                              |
 |---------------|------------------------------------------------------------|
-| `ci.yml`      | fmt + build + test + clippy, supply-chain audit, microVM UEFI build (E4.7.1 image-size budget) and QEMU boot (E4.7.2 boot-time ≤ 2 s) |
+| `ci.yml`      | fmt + build + test + clippy, supply-chain audit, microVM UEFI build (E4.7.1 image-size budget) and QEMU boot-marker verification (boot latency recorded informationally) |
 | `bench.yml`   | Criterion benches with the E4.7.3 regression gate against `bench/baselines/<crate>.json` |
 | `nightly.yml` | Kani bounded model checking (15 proofs) + Miri (E4.6)      |
 | `soak.yml`    | E4.7 soak harness smoke test (manual dispatch)             |
@@ -185,8 +228,11 @@ The UEFI framekernel at `kernels/microvm` boots under Firecracker or Cloud
 Hypervisor.  Per Epic E4.7 production hardening:
 
 - Release image budget: **≤ 1 MiB EFI** (enforced in `ci.yml`).
-- Boot-to-soak-complete budget: **≤ 2 s** under QEMU/OVMF
-  (enforced in `ci.yml`).
+- Boot-to-soak-complete budget: **≤ 2 s** on Firecracker / Cloud
+  Hypervisor — asserted as part of the hardware soak run
+  (`docs/22-remaining-hardware-gated-work.md`).  CI records QEMU/OVMF
+  boot latency for information only; firmware POST on shared runners is
+  not a representative measurement.
 - Continuous 30-day soak driven by `cargo xtask soak --hours 720`; the
   resulting manifest is committed under `artifacts/soak/` as a durable
   record of stability.
@@ -199,8 +245,17 @@ docker-compose with NVIDIA GPU passthrough.  Useful for local development
 when iterating on cognition without rebuilding the UEFI kernel each time:
 
 ```sh
-docker compose up --build                       # inference stack + operator console
-docker compose --profile training up --build    # also build the trainer
+# Zero-dependency MVP — full lifecycle + console against the deterministic
+# mock backend.  No GPU, no model downloads; works on any Docker host.
+docker compose -f docker-compose.mock.yml up --build
+
+# Real inference:
+docker compose up --build                       # NVIDIA GPU + Ollama stack
+docker compose -f docker-compose.yml \
+               -f docker-compose.cpu.yml up --build   # CPU-only Ollama
+docker compose -f docker-compose.apple.yml up --build # Apple Silicon (host Ollama)
+
+docker compose --profile training up --build    # also build the Unsloth trainer
 ```
 
 The `hosted` service runs `anima-hosted serve` and publishes the operator

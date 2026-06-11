@@ -34,8 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
+# Download-then-execute rather than `curl | sh`: in a pipeline the RUN step's
+# exit status is `sh`'s, so a curl failure (proxy, TLS, DNS) would silently
+# produce a layer with no toolchain and only surface later as `cargo: not
+# found` (exit 127).  `curl -f` + a separate execution step fails loudly at
+# the point of error.
+RUN curl --proto '=https' --tlsv1.2 -fsSf -o /tmp/rustup-init.sh https://sh.rustup.rs \
+    && sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal \
+    && rm /tmp/rustup-init.sh
 
 WORKDIR /src
 COPY . .
@@ -57,10 +63,18 @@ FROM debian:bookworm-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Pre-create ~/.anima (and the audit dir inside it) owned by the anima user.
+# Compose mounts the named `anima-data` volume at /home/anima/.anima; a named
+# volume inherits ownership from the image's directory on first use, but if
+# the directory does not exist in the image the mount point is created
+# root-owned and the uid-1000 process cannot write its identity store or
+# audit log.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /bin/bash --uid 1000 anima
+    && useradd --create-home --shell /bin/bash --uid 1000 anima \
+    && mkdir -p /home/anima/.anima/audit \
+    && chown -R anima:anima /home/anima/.anima
 
 COPY --from=builder /usr/local/bin/anima-hosted /usr/local/bin/anima-hosted
 COPY --from=builder /usr/local/bin/anima-console /usr/local/bin/anima-console
