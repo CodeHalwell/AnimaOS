@@ -69,8 +69,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 # the directory does not exist in the image the mount point is created
 # root-owned and the uid-1000 process cannot write its identity store or
 # audit log.
+#
+# curl ships in the runtime image for the container HEALTHCHECK below (and
+# for exec-debugging against the console from inside the network namespace).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash --uid 1000 anima \
     && mkdir -p /home/anima/.anima/audit \
@@ -98,6 +102,13 @@ ENV ANIMA_BACKEND=ollama \
 
 # The operator console (only published to host loopback by compose).
 EXPOSE 8088
+
+# Liveness: the console dashboard answers GET / once the agent is up.  The
+# console binds 0.0.0.0:8088 by default (see ANIMA_CONSOLE_ADDR above), so
+# loopback inside the container always reaches it.  Irrelevant for one-shot
+# subcommand containers, which exit before the start period elapses.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -sf http://127.0.0.1:8088/ || exit 1
 
 ENTRYPOINT ["anima-hosted"]
 # Default to the operator-console server. Override for one-shot subcommands,

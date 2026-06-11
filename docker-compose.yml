@@ -112,6 +112,7 @@ services:
       dockerfile: docker/Dockerfile
     image: animaos/hosted:dev
     container_name: anima-hosted
+    restart: unless-stopped
     # Run the operator-console server: a single long-lived agent that exposes
     # telemetry (SSE) + a guidance ingress.  The agent starts idle and is woken
     # by operator guidance.  Override for one-shot subcommands, e.g.
