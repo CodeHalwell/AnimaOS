@@ -27,7 +27,42 @@ lost behind the table above:
 
 | Item | Epic | State today | What closes it |
 |---|---|---|---|
-| **`vita` in the microVM** | E4.5 follow-on | ⬜ `vita` is `no_std`-attributed but effectively std-only; the kernel links `corpus` + `scheduler` + `memory` + `interoception` + `console-proto` and runs the E4.5 soak **without the lifecycle director**. `praxis`, `anima-self`, and `senses` build for `no_std` but are not yet linked. | Port `vita`'s somatic execution loop off `std` (timers, channels, audit sink behind traits), link it plus the remaining `no_std` crates into `kernels/microvm`, and extend the boot soak to drive a full wake→sleep cycle in-kernel. This is the highest-leverage *software* item: it is what makes the bare-metal target an organism rather than a substrate. |
+| **`vita` in the microVM** | E4.5 follow-on | ⬜ Effectively std-only; the kernel links `corpus` + `scheduler` + `memory` + `interoception` + `console-proto` and runs the E4.5 soak **without the lifecycle director**. | Port `vita` off `std` and extend the boot soak to a full in-kernel wake→sleep cycle. This is the highest-leverage *software* item: it makes the bare-metal target an organism rather than a substrate. The gap has now been **measured** (UEFI-target probe build) — see the checklist below. |
+
+#### `vita` no_std gap map (measured 2026-06-11)
+
+A probe build of the kernel with `vita = { default-features = false }` against
+`build-std = [core, alloc]` pinned the work to:
+
+1. **Crate attribute missing** — `vita/src/lib.rs` has feature-gated
+   `std`/`alloc` imports but no `#![cfg_attr(not(feature = "std"), no_std)]`;
+   without it the crate silently requires `std` regardless of features.
+2. **Cargo plumbing** — vita's deps are pulled with default (std) features.
+   Each needs `default-features = false` + forwarding through vita's `std`
+   feature: `scheduler`, `memory` (`libm` for no_std float math),
+   `interoception`, `senses`, `serde`/`serde_json`
+   (`default-features = false, features = ["alloc"]`), and the three below.
+3. **Small dependency ports** — `kv-controller` (1 `use std::` site; no
+   `std` feature yet; `vita::kv_gate` imports it unconditionally),
+   `defence` (3 sites), `skills` (2 sites; `std` feature already exists and
+   vita's import is already gated).
+4. **Mutex gap** — `LifecycleManager.task_cancel`/`motivated_gate` are
+   `Arc<Mutex<…>>` with `Mutex` imported only under `std`; needs a no_std
+   lock (e.g. a `spin`-backed shim preserving the `.lock().unwrap()` call
+   shape) or gating.
+5. **Stranded IPC types** — `vita::router` (no_std) imports `ToolSpec` /
+   `InvokeMemoryScope` / `InvokeRequest` from the wholly std-gated
+   `cortex_bridge`; the plain-data types must move to an always-compiled
+   module (alloc-only).
+6. **Audit sink** — `vita::audit` has 12 `use std::` sites (JSONL file sink,
+   HMAC sidecar); no_std needs the in-memory ring + a serial-writer seam so
+   the kernel can frame entries onto COM1 via `console-proto`.
+7. **Kernel posture decision (recorded)** — stay on
+   `build-std = [core, alloc]`. The alternative (UEFI's Tier-2 partial
+   `std`) was probed and rejected: the prebuilt sysroot `std` collides with
+   build-std (`E0152` duplicate lang items), would fight the kernel's own
+   `#[global_allocator]`/`panic_handler`, and risks the ≤ 1 MiB image
+   budget.
 
 ### Close-out checklist (for whoever has the hardware)
 
