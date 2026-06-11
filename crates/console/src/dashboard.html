@@ -5,118 +5,383 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AnimaOS · Operator Console</title>
 <style>
+  /* ── Design tokens ────────────────────────────────────────────────── */
   :root {
-    --bg: #0b0e14; --panel: #141925; --ink: #e6e9ef; --muted: #8a93a6;
-    --line: #232a3a; --accent: #5cc8ff; --ok: #54d685; --warn: #ffcf5c;
-    --crit: #ff6b6b; --msg: #b794f6;
+    --bg0: #07090f; --bg1: #0b0e16; --panel: rgba(20, 25, 38, .72);
+    --panel-solid: #131825; --line: #222a3d; --line-soft: #1a2133;
+    --ink: #e8ebf2; --muted: #8a93a8; --faint: #5a6378;
+    --accent: #5cc8ff; --accent2: #8b7cf6; --ok: #4ade80; --warn: #fbbf24;
+    --crit: #f87171; --msg: #c4b5fd;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --r: 14px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  header { display: flex; align-items: center; gap: 12px; padding: 12px 18px;
-    border-bottom: 1px solid var(--line); }
-  header h1 { font-size: 15px; margin: 0; letter-spacing: .04em; }
-  header .sub { color: var(--muted); font-size: 12px; }
-  #conn { margin-left: auto; font-size: 12px; padding: 3px 10px; border-radius: 999px;
-    border: 1px solid var(--line); }
-  #conn.up { color: var(--ok); border-color: var(--ok); }
-  #conn.down { color: var(--crit); border-color: var(--crit); }
-  main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 14px 16px; }
-  .panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .12em;
-    color: var(--muted); margin: 0 0 12px; }
-  .vital { margin-bottom: 10px; }
-  .vital .row { display: flex; justify-content: space-between; font-size: 12px; }
-  .bar { height: 7px; background: #0a0d13; border-radius: 4px; overflow: hidden; margin-top: 3px; }
-  .bar > span { display: block; height: 100%; background: var(--accent); transition: width .4s; }
-  .state-line { display: flex; justify-content: space-between; padding: 4px 0;
-    border-bottom: 1px dashed var(--line); }
-  .state-line:last-child { border-bottom: 0; }
-  .state-line b { color: var(--accent); }
-  #feed { height: 52vh; overflow-y: auto; display: flex; flex-direction: column-reverse; }
-  .ev { padding: 5px 8px; border-left: 3px solid var(--line); margin: 3px 0;
-    border-radius: 0 6px 6px 0; background: #10141e; white-space: pre-wrap; word-break: break-word; }
-  .ev .tag { font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
-    color: var(--muted); margin-right: 8px; }
-  .ev.msg { border-left-color: var(--msg); } .ev.msg .tag { color: var(--msg); }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--ink); font: 14px/1.55 var(--sans);
+    background:
+      radial-gradient(1100px 500px at 85% -10%, rgba(92, 200, 255, .07), transparent 60%),
+      radial-gradient(900px 600px at -10% 110%, rgba(139, 124, 246, .06), transparent 60%),
+      linear-gradient(var(--bg1), var(--bg0));
+    background-attachment: fixed;
+  }
+  ::selection { background: rgba(92, 200, 255, .25); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #232b40; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* ── Header ───────────────────────────────────────────────────────── */
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 14px 22px;
+    border-bottom: 1px solid var(--line-soft);
+    backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 5;
+    background: rgba(9, 12, 19, .8);
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand h1 { font-size: 17px; margin: 0; letter-spacing: .06em; font-weight: 700; }
+  .brand h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .brand .sub { color: var(--faint); font-size: 11.5px; }
+  .spacer { flex: 1; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+    padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--muted); background: rgba(10, 13, 20, .6); white-space: nowrap;
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  #conn.up .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  #conn.down .dot { background: var(--crit); animation: blink 1.2s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  #lifechip b { font-weight: 600; color: var(--ink); }
+  #lifechip.sleep { border-color: rgba(139, 124, 246, .5); }
+  #lifechip.sleep .dot { background: var(--accent2); animation: breathe 3.2s ease-in-out infinite; }
+  #lifechip.awake .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  @keyframes breathe { 0%, 100% { box-shadow: 0 0 2px var(--accent2); opacity: .5; } 50% { box-shadow: 0 0 12px var(--accent2); opacity: 1; } }
+
+  /* stress ring */
+  .ring { position: relative; width: 40px; height: 40px; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 4; }
+  .ring .track { stroke: #1c2336; }
+  .ring .val { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .6s, stroke .6s; }
+  .ring .num { position: absolute; inset: 0; display: grid; place-items: center; font: 600 10.5px var(--mono); color: var(--muted); }
+
+  /* ── Layout ───────────────────────────────────────────────────────── */
+  main {
+    display: grid; gap: 18px; padding: 18px 22px;
+    grid-template-columns: 308px minmax(420px, 1fr) 360px;
+    height: calc(100vh - 69px);
+  }
+  .col { display: flex; flex-direction: column; gap: 18px; min-height: 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 16px 18px; backdrop-filter: blur(6px);
+  }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .14em;
+    color: var(--muted); margin: 0 0 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* ── Organism column ─────────────────────────────────────────────── */
+  .kv { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; font-size: 13px; }
+  .kv span { color: var(--muted); }
+  .kv b { font-weight: 600; font-family: var(--mono); font-size: 12.5px; }
+
+  .phases { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
+  .phase {
+    text-align: center; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--faint); padding: 7px 2px 6px; border-radius: 8px;
+    border: 1px solid var(--line-soft); background: rgba(10, 13, 20, .5);
+    transition: all .4s;
+  }
+  .phase.active {
+    color: var(--accent2); border-color: rgba(139, 124, 246, .6);
+    background: rgba(139, 124, 246, .12); animation: breathe-bg 2.6s ease-in-out infinite;
+  }
+  .phase.done { color: var(--muted); border-color: var(--line); }
+  @keyframes breathe-bg { 50% { background: rgba(139, 124, 246, .22); } }
+
+  .vital { margin-bottom: 11px; }
+  .vital .row { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .vital .row b { font-family: var(--mono); font-size: 11.5px; color: var(--ink); font-weight: 500; }
+  .bar { height: 6px; background: #0a0d15; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .bar > span { display: block; height: 100%; width: 0; border-radius: 4px; background: var(--accent); transition: width .5s, background .5s; }
+
+  #gatecard .verdict { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  #gatecard .badge { font: 600 10.5px var(--mono); letter-spacing: .08em; padding: 3px 9px; border-radius: 6px; }
+  #gatecard .badge.invoke { color: var(--ok); background: rgba(74, 222, 128, .12); border: 1px solid rgba(74, 222, 128, .35); }
+  #gatecard .badge.block { color: var(--warn); background: rgba(251, 191, 36, .1); border: 1px solid rgba(251, 191, 36, .3); }
+  #gatecard .cost { color: var(--muted); font-size: 12px; }
+  .duel { position: relative; height: 8px; background: #0a0d15; border-radius: 4px; margin: 8px 0 4px; }
+  .duel .v { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 4px; transition: width .5s; }
+  .duel .t { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); border-radius: 2px; transition: left .5s; }
+  #gatecard .why { color: var(--muted); font-size: 12px; margin-top: 8px; max-height: 72px; overflow-y: auto; }
+
+  /* ── Conversation column ─────────────────────────────────────────── */
+  #chatpanel { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
+  #chatpanel h2 { padding: 16px 18px 0; margin-bottom: 6px; }
+  #chat { flex: 1; overflow-y: auto; padding: 10px 18px; display: flex; flex-direction: column; gap: 10px; scroll-behavior: smooth; }
+  .bubble { max-width: 78%; padding: 10px 14px; border-radius: 14px; font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+  .bubble .meta { display: block; font: 500 10px var(--mono); letter-spacing: .06em; color: var(--faint); margin-bottom: 4px; text-transform: uppercase; }
+  .bubble.op { align-self: flex-end; background: linear-gradient(135deg, rgba(92, 200, 255, .16), rgba(139, 124, 246, .16)); border: 1px solid rgba(92, 200, 255, .25); border-bottom-right-radius: 4px; }
+  .bubble.agent { align-self: flex-start; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bubble.agent .meta { color: var(--msg); }
+  .notice { align-self: center; text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 14px; border-radius: 999px; border: 1px dashed var(--line); max-width: 90%; }
+  .notice.veto { color: var(--crit); border-color: rgba(248, 113, 113, .4); border-style: solid; }
+  .typing { align-self: flex-start; display: inline-flex; gap: 5px; padding: 12px 16px; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; }
+  .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: tdot 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
+  @keyframes tdot { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+  #composer { display: flex; gap: 9px; padding: 14px 18px; border-top: 1px solid var(--line-soft); background: rgba(10, 13, 20, .5); }
+  #composer input[type=text] {
+    flex: 1; background: #0a0e17; border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 14px; border-radius: 10px; font: inherit; outline: none; transition: border-color .25s, box-shadow .25s;
+  }
+  #composer input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(92, 200, 255, .12); }
+  #composer select, #composer button {
+    background: #0a0e17; border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 13px; border-radius: 10px; font: inherit; cursor: pointer;
+  }
+  #composer button {
+    background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #04121c;
+    font-weight: 700; border: 0; padding: 11px 20px; transition: transform .12s, filter .2s;
+  }
+  #composer button:hover { filter: brightness(1.1); }
+  #composer button:active { transform: scale(.97); }
+  #composer button:disabled { filter: saturate(.2) brightness(.7); cursor: default; }
+  .hint { color: var(--faint); font-size: 11px; padding: 0 18px 12px; }
+
+  /* ── Telemetry column ────────────────────────────────────────────── */
+  #feedpanel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .filters button {
+    font: 500 10.5px var(--mono); letter-spacing: .05em; text-transform: uppercase;
+    color: var(--muted); background: rgba(10, 13, 20, .5); border: 1px solid var(--line-soft);
+    border-radius: 999px; padding: 3px 11px; cursor: pointer; transition: all .2s;
+  }
+  .filters button.on { color: var(--accent); border-color: rgba(92, 200, 255, .45); background: rgba(92, 200, 255, .08); }
+  #feed { flex: 1; overflow-y: auto; display: flex; flex-direction: column-reverse; font-family: var(--mono); }
+  .ev { padding: 6px 9px; border-left: 2px solid var(--line); margin: 2.5px 0; border-radius: 0 8px 8px 0; background: rgba(13, 17, 27, .7); white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5; }
+  .ev .tag { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-right: 8px; }
+  .ev .t { float: right; color: var(--faint); font-size: 9.5px; }
+  .ev.msg  { border-left-color: var(--msg); }   .ev.msg .tag { color: var(--msg); }
   .ev.gate { border-left-color: var(--accent); } .ev.gate .tag { color: var(--accent); }
-  .ev.task { border-left-color: var(--ok); } .ev.task .tag { color: var(--ok); }
+  .ev.task { border-left-color: var(--ok); }    .ev.task .tag { color: var(--ok); }
   .ev.audit { border-left-color: var(--warn); } .ev.audit .tag { color: var(--warn); }
-  .ev.veto { border-left-color: var(--crit); } .ev.veto .tag { color: var(--crit); }
-  form { display: flex; gap: 8px; margin-top: 14px; }
-  input[type=text] { flex: 1; background: #0a0d13; border: 1px solid var(--line);
-    color: var(--ink); padding: 9px 12px; border-radius: 8px; font: inherit; }
-  select, button { background: #0a0d13; border: 1px solid var(--line); color: var(--ink);
-    padding: 9px 12px; border-radius: 8px; font: inherit; cursor: pointer; }
-  button { background: var(--accent); color: #04121c; font-weight: 600; border: 0; }
-  .hint { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .ev.veto { border-left-color: var(--crit); }  .ev.veto .tag { color: var(--crit); }
+
+  /* ── Responsive ──────────────────────────────────────────────────── */
+  @media (max-width: 1180px) {
+    main { grid-template-columns: 280px 1fr; }
+    .col.right { display: none; }
+  }
+  @media (max-width: 780px) {
+    main { grid-template-columns: 1fr; height: auto; }
+    .col.left { order: 2; }
+    #chatpanel { height: 70vh; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>ANIMA<span style="color:var(--accent)">OS</span></h1>
-  <span class="sub">operator console · the human is a sense, not the driver</span>
-  <span id="conn" class="down">connecting…</span>
+  <div class="brand">
+    <h1>ANIMA<em>OS</em></h1>
+    <span class="sub">operator console · the human is a sense, not the driver</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="ring" title="aggregate stress" aria-label="aggregate stress">
+    <svg width="40" height="40" viewBox="0 0 40 40">
+      <circle class="track" cx="20" cy="20" r="16"></circle>
+      <circle class="val" id="stressring" cx="20" cy="20" r="16" stroke-dasharray="100.5" stroke-dashoffset="100.5" pathLength="100.5"></circle>
+    </svg>
+    <span class="num" id="stressnum">—</span>
+  </div>
+  <span class="chip" id="lifechip"><span class="dot"></span><b id="lifecycle">—</b><span id="phaseinline"></span></span>
+  <span class="chip" id="uptimechip" title="agent uptime">⏱ <span id="uptime">—</span></span>
+  <span class="chip down" id="conn"><span class="dot"></span><span id="conntext">connecting…</span></span>
 </header>
+
 <main>
-  <section>
+  <!-- ── Organism ── -->
+  <div class="col left">
     <div class="panel">
-      <h2>Vital signs <span id="stress" style="float:right;color:var(--ink)"></span></h2>
+      <h2>Lifecycle</h2>
+      <div class="kv"><span>state</span><b id="lifecycle2">—</b></div>
+      <div class="kv"><span>agenda depth</span><b id="agenda">—</b></div>
+      <div class="phases" id="phases" title="sleep-cycle phases">
+        <div class="phase" data-p="MemoryPruning">Prune</div>
+        <div class="phase" data-p="GenerativeReplay">Replay</div>
+        <div class="phase" data-p="DreamExploration">Dream</div>
+        <div class="phase" data-p="PolicyCompilation">Compile</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Vital signs</h2>
       <div id="vitals"></div>
     </div>
-    <div class="panel" style="margin-top:16px">
-      <h2>Lifecycle</h2>
-      <div class="state-line"><span>state</span><b id="lifecycle">—</b></div>
-      <div class="state-line"><span>sleep phase</span><b id="phase">—</b></div>
-      <div class="state-line"><span>agenda depth</span><b id="agenda">—</b></div>
-      <div class="state-line"><span>uptime</span><b id="uptime">—</b></div>
+    <div class="panel" id="gatecard">
+      <h2>Striatal gate <span id="gatecount" style="font-weight:400"></span></h2>
+      <div class="verdict"><span class="badge block" id="gatebadge">—</span><span class="cost" id="gatecost"></span></div>
+      <div class="duel"><div class="v" id="gateval" style="width:0%"></div><div class="t" id="gatethr" style="left:0%"></div></div>
+      <div class="kv" style="padding:0"><span>value vs threshold</span><b id="gatenums">—</b></div>
+      <div class="why" id="gatewhy">No gate decisions yet — the agent is idle until a sense wakes it.</div>
     </div>
-  </section>
-  <section class="panel">
-    <h2>Event stream</h2>
-    <div id="feed"></div>
-    <form id="send">
-      <input id="text" type="text" placeholder="send guidance to the agent…  (it is gated, not executed)" autocomplete="off" />
-      <select id="priority">
-        <option>Low</option><option selected>Normal</option><option>High</option><option>Critical</option>
-      </select>
-      <button type="submit">Send</button>
-    </form>
-    <div class="hint">Guidance enters the agent's sensory queue and is arbitrated by the Striatal Gate — it cannot preempt the kernel.</div>
-  </section>
+  </div>
+
+  <!-- ── Conversation ── -->
+  <div class="col">
+    <div class="panel" id="chatpanel">
+      <h2>Conversation</h2>
+      <div id="chat" aria-live="polite"></div>
+      <form id="composer">
+        <input id="text" type="text" placeholder="Send guidance to the agent…" autocomplete="off" aria-label="guidance text" />
+        <select id="priority" aria-label="priority">
+          <option>Low</option><option selected>Normal</option><option>High</option><option>Critical</option>
+        </select>
+        <button type="submit" id="sendbtn">Send</button>
+      </form>
+      <div class="hint">Guidance enters the sensory queue and is arbitrated by the Striatal Gate — it cannot preempt the kernel.</div>
+    </div>
+  </div>
+
+  <!-- ── Telemetry ── -->
+  <div class="col right">
+    <div class="panel" id="feedpanel">
+      <h2>Telemetry <span id="evcount" style="font-weight:400"></span></h2>
+      <div class="filters" id="filters">
+        <button data-f="all" class="on">All</button>
+        <button data-f="gate">Gate</button>
+        <button data-f="task">Tasks</button>
+        <button data-f="audit">Audit</button>
+        <button data-f="veto">Vetoes</button>
+        <button data-f="msg">Agent</button>
+      </div>
+      <div id="feed"></div>
+    </div>
+  </div>
 </main>
+
 <script>
 (function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  /* ── Vitals ─────────────────────────────────────────────────────── */
   const VITALS = [
     ["thermal_load", "thermal"], ["compute_pressure", "compute"],
     ["memory_pressure", "memory"], ["power_budget", "power"],
     ["financial_budget", "budget"], ["attention_demand", "attention"],
   ];
-  const vitalsEl = document.getElementById("vitals");
+  // For budgets, *low* is bad; invert for colour.
+  const INVERT = new Set(["power_budget", "financial_budget", "attention_demand"]);
   const bars = {};
   for (const [key, label] of VITALS) {
-    const wrap = document.createElement("div"); wrap.className = "vital";
-    wrap.innerHTML = `<div class="row"><span>${label}</span><span data-v="${key}">—</span></div>
-      <div class="bar"><span data-b="${key}" style="width:0%"></span></div>`;
-    vitalsEl.appendChild(wrap);
-    bars[key] = { v: wrap.querySelector(`[data-v="${key}"]`), b: wrap.querySelector(`[data-b="${key}"]`) };
+    const wrap = document.createElement("div");
+    wrap.className = "vital";
+    wrap.innerHTML =
+      '<div class="row"><span>' + label + '</span><b data-v="' + key + '">—</b></div>' +
+      '<div class="bar"><span data-b="' + key + '"></span></div>';
+    $("vitals").appendChild(wrap);
+    bars[key] = { v: wrap.querySelector("[data-v]"), b: wrap.querySelector("[data-b]") };
   }
-  const $ = (id) => document.getElementById(id);
-  const conn = $("conn");
-
   function colorFor(v) { return v > 0.85 ? "var(--crit)" : v > 0.6 ? "var(--warn)" : "var(--accent)"; }
 
+  /* ── Telemetry feed ─────────────────────────────────────────────── */
+  let filter = "all", evTotal = 0;
+  $("filters").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    filter = b.dataset.f;
+    for (const x of $("filters").children) x.classList.toggle("on", x === b);
+    for (const ev of $("feed").children)
+      ev.style.display = (filter === "all" || ev.classList.contains(filter)) ? "" : "none";
+  });
   function addFeed(cls, tag, body) {
+    evTotal++;
+    $("evcount").textContent = evTotal;
     const el = document.createElement("div");
     el.className = "ev " + cls;
-    el.innerHTML = `<span class="tag">${tag}</span>${escapeHtml(body)}`;
+    const time = new Date().toLocaleTimeString([], { hour12: false });
+    el.innerHTML = '<span class="t">' + time + '</span><span class="tag">' + esc(tag) + "</span>" + esc(body);
+    if (filter !== "all" && !el.classList.contains(filter)) el.style.display = "none";
     const feed = $("feed");
     feed.prepend(el);
-    while (feed.childNodes.length > 300) feed.removeChild(feed.lastChild);
+    while (feed.childNodes.length > 400) feed.removeChild(feed.lastChild);
   }
-  function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+  function esc(s) { const d = document.createElement("div"); d.textContent = String(s); return d.innerHTML; }
 
+  /* ── Conversation ───────────────────────────────────────────────── */
+  const chat = $("chat");
+  const typing = new Map(); // task_id -> typing element
+  function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80; }
+  function scrollChat(force) { if (force || nearBottom()) chat.scrollTop = chat.scrollHeight; }
+  function bubble(cls, meta, text, force) {
+    const stick = nearBottom();
+    const el = document.createElement("div");
+    el.className = "bubble " + cls;
+    el.innerHTML = '<span class="meta">' + esc(meta) + "</span>" + esc(text);
+    chat.appendChild(el);
+    while (chat.childNodes.length > 250) chat.removeChild(chat.firstChild);
+    scrollChat(force || stick);
+    return el;
+  }
+  function notice(text, veto) {
+    const stick = nearBottom();
+    const el = document.createElement("div");
+    el.className = "notice" + (veto ? " veto" : "");
+    el.textContent = text;
+    chat.appendChild(el);
+    scrollChat(stick);
+  }
+  function showTyping(taskId) {
+    if (typing.has(taskId)) return;
+    const stick = nearBottom();
+    const el = document.createElement("div");
+    el.className = "typing"; el.innerHTML = "<i></i><i></i><i></i>";
+    chat.appendChild(el); typing.set(taskId, el);
+    scrollChat(stick);
+  }
+  function clearTyping(taskId) {
+    const el = typing.get(taskId);
+    if (el) { el.remove(); typing.delete(taskId); }
+  }
+
+  /* ── State handling ─────────────────────────────────────────────── */
+  const PHASE_SEQ = ["MemoryPruning", "GenerativeReplay", "DreamExploration", "PolicyCompilation"];
+  function setLifecycle(ev) {
+    const lc = ev.lifecycle || "—";
+    $("lifecycle").textContent = lc;
+    $("lifecycle2").textContent = lc + (ev.sleep_phase ? " · " + ev.sleep_phase : "");
+    $("agenda").textContent = ev.agenda_depth;
+    $("phaseinline").textContent = ev.sleep_phase ? " · " + ev.sleep_phase.replace(/([A-Z])/g, " $1").trim() : "";
+    const chipEl = $("lifechip");
+    chipEl.classList.toggle("sleep", lc === "Sleep");
+    chipEl.classList.toggle("awake", lc === "Awake");
+    const idx = PHASE_SEQ.indexOf(ev.sleep_phase);
+    for (const el of $("phases").children) {
+      const i = PHASE_SEQ.indexOf(el.dataset.p);
+      el.classList.toggle("active", lc === "Sleep" && el.dataset.p === ev.sleep_phase);
+      el.classList.toggle("done", lc === "Sleep" && idx >= 0 && i < idx);
+    }
+  }
+
+  function setGate(ev) {
+    const badge = $("gatebadge");
+    badge.textContent = ev.invoke ? "INVOKE" : "BLOCK";
+    badge.className = "badge " + (ev.invoke ? "invoke" : "block");
+    $("gatecost").textContent = (ev.cost_class || "") + (ev.override_active ? " · OVERRIDE" : "");
+    $("gateval").style.width = (ev.value_score * 100).toFixed(0) + "%";
+    $("gatethr").style.left = "calc(" + (ev.threshold * 100).toFixed(0) + "% - 1px)";
+    $("gatenums").textContent = ev.value_score.toFixed(2) + " / " + ev.threshold.toFixed(2);
+    $("gatewhy").textContent = ev.reasoning || "";
+  }
+
+  /* ── Event dispatch ─────────────────────────────────────────────── */
+  let gateCount = 0;
   function handle(ev) {
     switch (ev.type) {
       case "Vitals":
@@ -124,48 +389,68 @@
           const v = ev[key] ?? 0;
           bars[key].v.textContent = v.toFixed(2);
           bars[key].b.style.width = (v * 100).toFixed(0) + "%";
-          bars[key].b.style.background = colorFor(key === "power_budget" || key === "financial_budget" ? 1 - v : v);
+          bars[key].b.style.background = colorFor(INVERT.has(key) ? 1 - v : v);
         }
-        $("stress").textContent = "stress " + (ev.aggregate_stress ?? 0).toFixed(2);
+        { const s = ev.aggregate_stress ?? 0;
+          $("stressnum").textContent = s.toFixed(2).replace(/^0/, "");
+          const ring = $("stressring");
+          ring.style.strokeDashoffset = (100.5 * (1 - s)).toFixed(1);
+          ring.style.stroke = colorFor(s); }
         break;
-      case "State":
-        $("lifecycle").textContent = ev.lifecycle;
-        $("phase").textContent = ev.sleep_phase || "—";
-        $("agenda").textContent = ev.agenda_depth;
-        break;
+      case "State": setLifecycle(ev); break;
       case "Gate":
+        gateCount++; $("gatecount").textContent = gateCount;
+        setGate(ev);
         addFeed("gate", "gate",
-          `${ev.invoke ? "INVOKE" : "block"} ${ev.cost_class || ""} · value ${ev.value_score.toFixed(2)} vs threshold ${ev.threshold.toFixed(2)}${ev.override_active ? " · OVERRIDE" : ""}\n${ev.reasoning}`);
+          (ev.invoke ? "INVOKE" : "block") + " " + (ev.cost_class || "") +
+          " · value " + ev.value_score.toFixed(2) + " vs " + ev.threshold.toFixed(2) +
+          (ev.override_active ? " · OVERRIDE" : "") + "\n" + ev.reasoning);
+        if (!ev.invoke) notice("gate held this back · value " + ev.value_score.toFixed(2) + " < threshold " + ev.threshold.toFixed(2));
         break;
-      case "TaskStarted": addFeed("task", "task→", `#${ev.task_id} ${ev.prompt}`); break;
-      case "AgentMessage": addFeed("msg", "agent", `#${ev.task_id} (${ev.tokens} tok) ${ev.text}`); break;
+      case "TaskStarted":
+        addFeed("task", "task→", "#" + ev.task_id + " " + ev.prompt);
+        showTyping(ev.task_id);
+        break;
+      case "AgentMessage":
+        clearTyping(ev.task_id);
+        bubble("agent", "anima · " + ev.tokens + " tok", ev.text);
+        addFeed("msg", "agent", "#" + ev.task_id + " (" + ev.tokens + " tok) " + ev.text);
+        break;
       case "Audit":
+        if (ev.kind === "OperatorGuidance") {
+          // detail shape: "[Priority] text" — render as an operator bubble.
+          const m = /^\[(\w+)\]\s*([\s\S]*)$/.exec(ev.detail || "");
+          bubble("op", "operator · " + (m ? m[1].toLowerCase() : "guidance"), m ? m[2] : ev.detail);
+        }
+        if (ev.kind === "DefenceVeto") notice("defence veto · " + ev.detail, true);
         addFeed(ev.kind === "DefenceVeto" || ev.kind === "AttentionDemandEscalated" ? "veto" : "audit", ev.kind, ev.detail);
         break;
       case "Heartbeat": $("uptime").textContent = fmtUptime(ev.uptime_secs); break;
     }
   }
   function fmtUptime(s) {
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-    return `${h}h ${m}m ${sec}s`;
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    return (d ? d + "d " : "") + h + "h " + m + "m " + (s % 60) + "s";
   }
 
-  // EventSource carries the optional token via ?token= (set by the page URL).
+  /* ── Transport ──────────────────────────────────────────────────── */
   const token = new URLSearchParams(location.search).get("token");
   const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
-  let es;
   function connect() {
-    es = new EventSource(url);
-    es.onopen = () => { conn.textContent = "connected"; conn.className = "up"; };
-    es.onerror = () => { conn.textContent = "reconnecting…"; conn.className = "down"; };
-    es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch (e) {} };
+    const es = new EventSource(url);
+    es.onopen = () => { $("conntext").textContent = "live"; $("conn").className = "chip up"; };
+    es.onerror = () => { $("conntext").textContent = "reconnecting…"; $("conn").className = "chip down"; };
+    es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch (e) { /* tolerate partial lines */ } };
   }
   connect();
 
-  $("send").addEventListener("submit", async (e) => {
+  /* ── Composer ───────────────────────────────────────────────────── */
+  $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = $("text").value.trim();
     if (!text) return;
+    const btn = $("sendbtn");
+    btn.disabled = true;
     const headers = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = "Bearer " + token;
     try {
@@ -173,10 +458,22 @@
         method: "POST", headers,
         body: JSON.stringify({ text, priority: $("priority").value }),
       });
-      if (r.ok) { $("text").value = ""; }
-      else { const j = await r.json().catch(() => ({})); addFeed("veto", "rejected", j.error || ("HTTP " + r.status)); }
-    } catch (err) { addFeed("veto", "error", String(err)); }
+      if (r.ok) {
+        $("text").value = "";
+        // The bubble is rendered from the echoed OperatorGuidance audit event,
+        // so every ingress channel (web, CLI, comms) appears identically.
+      } else {
+        const j = await r.json().catch(() => ({}));
+        notice("guidance rejected · " + (j.error || "HTTP " + r.status), true);
+      }
+    } catch (err) {
+      notice("send failed · " + String(err), true);
+    } finally {
+      btn.disabled = false;
+      $("text").focus();
+    }
   });
+  $("text").focus();
 })();
 </script>
 </body>
