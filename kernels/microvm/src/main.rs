@@ -87,11 +87,11 @@
 
 extern crate alloc;
 
-mod operator_console;
 mod net;
+mod operator_console;
 mod sleep_soak;
-mod vita_soak;
 mod tls;
+mod vita_soak;
 
 use alloc::vec::Vec;
 use corpus::{BumpAllocator, FrameAllocator};

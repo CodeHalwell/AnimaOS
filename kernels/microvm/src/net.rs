@@ -74,8 +74,8 @@ struct KernelHal;
 // mmio_phys_to_virt is the identity; share/unshare need no bounce buffers.
 unsafe impl Hal for KernelHal {
     fn dma_alloc(pages: usize, _direction: BufferDirection) -> (PhysAddr, NonNull<u8>) {
-        let layout = core::alloc::Layout::from_size_align(pages * 4096, 4096)
-            .expect("virtio dma layout");
+        let layout =
+            core::alloc::Layout::from_size_align(pages * 4096, 4096).expect("virtio dma layout");
         // SAFETY: layout is non-zero; alloc_zeroed satisfies the trait's
         // "zero-initialised" requirement; the bump allocator never reuses
         // the region, so the device owns it for its whole lifetime.
@@ -151,10 +151,7 @@ fn probe_virtio_net(serial: &impl Fn(&str)) -> Option<Net> {
 
     // OVMF has already assigned BARs; make sure memory space + bus mastering
     // are on so the device can DMA the rings we hand it.
-    root.set_command(
-        df,
-        Command::MEMORY_SPACE | Command::BUS_MASTER,
-    );
+    root.set_command(df, Command::MEMORY_SPACE | Command::BUS_MASTER);
 
     let transport = PciTransport::new::<KernelHal, _>(&mut root, df).ok()?;
     VirtIONet::new(transport, NET_BUF_LEN).ok()
@@ -208,7 +205,9 @@ impl Device for VirtioSmolDev {
     }
 
     fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
-        self.net.can_send().then_some(VirtioTx { net: &mut self.net })
+        self.net
+            .can_send()
+            .then_some(VirtioTx { net: &mut self.net })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
