@@ -54,11 +54,18 @@
 //! controller+TurboQuant retention priority replaces the gate score alone.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 pub mod controller;
+#[cfg(feature = "std")]
 pub mod eval;
 pub mod features;
+#[cfg(feature = "std")]
 pub mod trace;
+#[cfg(feature = "std")]
 pub mod training;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
@@ -67,12 +74,15 @@ pub use controller::{
     AlwaysFaultGate, BlockGate, ControllerState, ControllerWeights, GateError, KvController,
     KvGateDecision, LinearGate, NoQuantizer, Quantizer,
 };
+#[cfg(feature = "std")]
 pub use eval::{
     run_controller_benchmark, run_controller_benchmark_on_features, run_lru_benchmark,
     run_lru_benchmark_on_features, NeedleBenchmarkConfig, NeedleRecallResult,
 };
 pub use features::{BlockFeatures, BlockRole};
+#[cfg(feature = "std")]
 pub use trace::{
     BlockTraceRecord, InvocationTrace, ProvenanceCounts, TraceCapture, TraceConfig, TraceProvenance,
 };
+#[cfg(feature = "std")]
 pub use training::{compile_training_pairs, TrainingCorpus, TrainingPair};

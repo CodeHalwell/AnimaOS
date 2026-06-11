@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 //! Afferent sensory input vector: parses text + PCM streams into typed packets.
 //!
@@ -14,8 +15,19 @@
 //! [`SensoryBridge::packetize_pcm_checked`]).  The unchecked variants are
 //! retained for internal and test use and assign [`SensoryPriority::Normal`].
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
+#[cfg(feature = "std")]
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+#[cfg(feature = "std")]
+use std::sync::Arc;
+
+pub mod sync;
+
+use sync::Mutex;
 
 // ── Priority ──────────────────────────────────────────────────────────────────
 
