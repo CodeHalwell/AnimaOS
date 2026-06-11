@@ -55,7 +55,26 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
+/// Key→value map used across identity records.
+///
+/// `HashMap` under std; `BTreeMap` in the bare-metal kernel (alloc has no
+/// hash map). Both serialise identically as JSON objects, so the on-disk
+/// identity store is interchangeable between targets.
+#[cfg(feature = "std")]
+pub type Map = std::collections::HashMap<String, String>;
+#[cfg(not(feature = "std"))]
+pub type Map = alloc::collections::BTreeMap<String, String>;
+#[cfg(feature = "std")]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -78,7 +97,7 @@ pub struct UserPreferences {
     pub timezone: Option<String>,
     /// Extra arbitrary preference key/value pairs.
     #[serde(default)]
-    pub extra: HashMap<String, String>,
+    pub extra: Map,
 }
 
 /// A recurring task template stored in identity memory.
@@ -119,7 +138,7 @@ pub struct SystemPolicies {
     pub blocklisted_hosts: Vec<String>,
     /// Extra arbitrary policy constraints.
     #[serde(default)]
-    pub extra: HashMap<String, String>,
+    pub extra: Map,
 }
 
 /// The agent's self-model — stable facts about the agent itself.
@@ -136,7 +155,7 @@ pub struct AgentSelfModel {
     pub preferred_backend: Option<String>,
     /// Extra arbitrary self-model fields.
     #[serde(default)]
-    pub extra: HashMap<String, String>,
+    pub extra: Map,
 }
 
 // ── Schema version ─────────────────────────────────────────────────────────
@@ -170,7 +189,7 @@ pub struct IdentityDocument {
     pub agent_self_model: AgentSelfModel,
     /// Free-form key/value facts dictionary (targeted by `anima identity set`).
     #[serde(default)]
-    pub facts: HashMap<String, String>,
+    pub facts: Map,
 }
 
 impl Default for IdentityDocument {
@@ -182,7 +201,7 @@ impl Default for IdentityDocument {
             observed_patterns: Vec::new(),
             system_policies: SystemPolicies::default(),
             agent_self_model: AgentSelfModel::default(),
-            facts: HashMap::new(),
+            facts: Map::new(),
         }
     }
 }
@@ -214,8 +233,8 @@ pub enum IdentityError {
     ParseError(String),
 }
 
-impl std::fmt::Display for IdentityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for IdentityError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(s) => write!(f, "identity I/O error: {s}"),
             Self::ParseError(s) => write!(f, "identity parse error: {s}"),
@@ -223,6 +242,7 @@ impl std::fmt::Display for IdentityError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for IdentityError {}
 
 // ── IdentityMemory ─────────────────────────────────────────────────────────
@@ -240,7 +260,14 @@ pub struct IdentityMemory {
     ///
     /// The sentinel value `:memory:` indicates an in-memory-only store; no
     /// I/O is performed.
+    #[cfg(feature = "std")]
     pub path: PathBuf,
+    /// In-memory marker path (always `":memory:"`).
+    ///
+    /// The bare-metal kernel has no filesystem, so every store is
+    /// memory-only and carries the `:memory:` sentinel.
+    #[cfg(not(feature = "std"))]
+    pub path: String,
     /// In-memory identity document.
     document: IdentityDocument,
 }
@@ -251,6 +278,7 @@ impl IdentityMemory {
     /// If the file already exists it is parsed.  If it does not exist a fresh
     /// `IdentityDocument` is written immediately so the file is always present
     /// after `open` returns.
+    #[cfg(feature = "std")]
     pub fn open(path: &Path) -> Result<Self, IdentityError> {
         if path.exists() {
             let contents =
@@ -277,7 +305,7 @@ impl IdentityMemory {
     /// Used in tests and ephemeral contexts.
     pub fn in_memory() -> Self {
         Self {
-            path: PathBuf::from(":memory:"),
+            path: ":memory:".into(),
             document: IdentityDocument::default(),
         }
     }
@@ -296,6 +324,7 @@ impl IdentityMemory {
     }
 
     /// Persists any mutations made via [`document_mut`](Self::document_mut).
+    #[cfg(feature = "std")]
     pub fn flush_document(&self) -> Result<(), IdentityError> {
         self.flush()
     }
@@ -321,6 +350,7 @@ impl IdentityMemory {
     ) -> Result<(), IdentityError> {
         let old_value = self.document.facts.get(key).cloned();
         self.document.facts.insert(key.to_owned(), value.to_owned());
+        #[cfg(feature = "std")]
         self.flush()?;
         log.push(AuditEntry::IdentityUpdated {
             agent_id: agent_id.to_owned(),
@@ -340,6 +370,7 @@ impl IdentityMemory {
     /// Returns the default identity file path for an agent.
     ///
     /// Path: `~/.anima/<agent_id>/identity.json`.
+    #[cfg(feature = "std")]
     pub fn default_path(agent_id: &str) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
         PathBuf::from(home)
@@ -353,6 +384,7 @@ impl IdentityMemory {
     /// Write the in-memory document to `path` atomically.
     ///
     /// In-memory stores (sentinel path `:memory:`) are silently skipped.
+    #[cfg(feature = "std")]
     fn flush(&self) -> Result<(), IdentityError> {
         if self.path == Path::new(":memory:") {
             return Ok(());

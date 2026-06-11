@@ -50,9 +50,14 @@
 #![forbid(unsafe_code)]
 
 #[cfg(not(feature = "std"))]
-use alloc::format;
-#[cfg(not(feature = "std"))]
-use alloc::string::ToString;
+#[allow(unused_imports)]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use interoception::InteroceptiveSignals;
 use motivation::{

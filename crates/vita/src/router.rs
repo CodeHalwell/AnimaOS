@@ -56,6 +56,15 @@ use crate::{
     AuditEntry, AuditLog, CostClass, HomeostaticSignals, InvokeMemoryScope, InvokeRequest,
     SemanticClass, ToolSpec,
 };
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 // ── Route ID ──────────────────────────────────────────────────────────────────
 
@@ -87,8 +96,8 @@ impl RouteId {
     }
 }
 
-impl std::fmt::Display for RouteId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RouteId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }
@@ -398,8 +407,8 @@ pub enum RouteError {
     },
 }
 
-impl std::fmt::Display for RouteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             RouteError::EmptyRouteId => write!(f, "route has empty ID"),
             RouteError::IdentityMemoryDisabled { route_id } => write!(
@@ -428,6 +437,7 @@ impl std::fmt::Display for RouteError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for RouteError {}
 
 // ── Validation helper ─────────────────────────────────────────────────────────

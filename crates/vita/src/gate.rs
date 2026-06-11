@@ -54,6 +54,15 @@
 #![forbid(unsafe_code)]
 
 use crate::{AuditEntry, AuditLog};
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 // ── Event features ────────────────────────────────────────────────────────────
 

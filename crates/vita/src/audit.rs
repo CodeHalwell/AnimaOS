@@ -23,10 +23,23 @@
 //! `$ANIMA_AUDIT_DIR/<agent_id>.jsonl` automatically.
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 #[cfg(feature = "std")]
 use std::io::Write;
 #[cfg(feature = "std")]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+#[cfg(feature = "std")]
+use senses::sync::Mutex;
 
 // ── Tamper-evidence chain (EX.4 / threat T-8) ───────────────────────────────
 //
@@ -1849,8 +1862,8 @@ pub struct AuditLog {
     integrity: Option<Arc<Mutex<IntegrityChain>>>,
 }
 
-impl std::fmt::Debug for AuditLog {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AuditLog {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("AuditLog");
         d.field("entries", &self.entries.len());
         #[cfg(feature = "std")]

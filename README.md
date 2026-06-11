@@ -147,7 +147,7 @@ anima-os/
 - Embassy async executor (raw, no-arch, `__pender` no-op) + spin-poll loop
 - `smoltcp` 0.11 TCP/IP loopback — three-way handshake, client/server exchange
 - TLS 1.3 in bare-metal: P-256 ECDHE, AES-128-GCM, SHA-256/HKDF, ECDSA CertificateVerify (RustCrypto), smoltcp transport
-- `no_std`-capable ports of `scheduler`, `memory`, `praxis`, `anima-self`, `interoception`, `senses`; the kernel currently links `scheduler` + `memory` + `interoception` (`vita` remains std-only — the in-kernel lifecycle is the top software tail, see `docs/22` §1a)
+- `no_std` ports across the somatic spine — and **`vita` itself runs in-kernel** (E4.5b): the real `LifecycleManager`/`somatic_execution_loop` drive guidance → MLFQ dispatch → an audited four-phase sleep cycle on the Embassy executor, CI-gated by the `E4.5B_VITA_DONE` serial marker
 - Sleep-cycle soak: VCM pressure, MLFQ boost, L1 pruning, stress index, `run_dream_walk_no_std`
 - CI: `microvm-boot` greps COM1 serial for `E4.1_*` … `E4.5_SOAK_DONE`; Miri + Kani in nightly CI
 

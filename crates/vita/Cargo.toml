@@ -11,22 +11,39 @@ license.workspace = true
 default = ["std"]
 # E12: motivation/std follows vita/std so the Striatal Gate ↔ drive integration
 # (motivation_gate) is available in the hosted kernel while staying no_std-clean.
-std = ["dep:sha2", "dep:actuators", "dep:llm-backends", "dep:anima-finetune", "motivation/std"]
+std = [
+  "dep:sha2",
+  "dep:actuators",
+  "dep:llm-backends",
+  "dep:anima-finetune",
+  "dep:defence",
+  "dep:skills",
+  "motivation/std",
+  "scheduler/std",
+  "memory/std",
+  "interoception/std",
+  "senses/std",
+  "kv-controller/std",
+  "serde/std",
+  "serde_json/std",
+]
+# Bare-metal float math for the no_std path (kernel enables vita/libm).
+libm = ["memory/libm", "kv-controller/libm"]
 
 [dependencies]
-memory = { path = "../memory" }
-interoception = { path = "../interoception" }
+memory = { path = "../memory", default-features = false }
+interoception = { path = "../interoception", default-features = false }
 # E12 — Motivation: drive hierarchy feeds the Striatal Gate value score via
 # motivation_gate. default-features = false keeps the no_std path clean; the
 # `std` feature is pulled in transitively through vita's own `std` feature.
 motivation = { path = "../motivation", default-features = false }
-scheduler = { path = "../scheduler" }
-senses = { path = "../senses" }
-kv-controller = { path = "../kv-controller" }
-defence = { path = "../defence" }
-skills = { path = "../skills" }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+scheduler = { path = "../scheduler", default-features = false }
+senses = { path = "../senses", default-features = false }
+kv-controller = { path = "../kv-controller", default-features = false }
+defence = { path = "../defence", optional = true }
+skills = { path = "../skills", optional = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 # Optional, std-only: HMAC-SHA256 tamper-evidence sidecar for the audit log
 # (EX.4 / threat T-8). default-features = false keeps the (future) no_std path
 # clean, and the dep is pulled in only by the `std` feature so the microVM

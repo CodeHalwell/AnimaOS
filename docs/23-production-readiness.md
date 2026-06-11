@@ -44,10 +44,10 @@ QEMU/OVMF brings the same marker sequence up green on a stock dev box,
 so kernel work (the tails below) does not depend on CI round-trips.
 
 **Remaining** (tracked in detail in `docs/22`):
-- [ ] **`vita` in the kernel** (`docs/22` §1a) — port the lifecycle director
-      off `std` and extend the boot soak to a full in-kernel wake→sleep
-      cycle. The single highest-leverage software item: it makes the
-      bare-metal target an organism rather than a substrate.
+- [x] **`vita` in the kernel** (`docs/22` §1a) — DONE: the lifecycle
+      director runs in-kernel (E4.5b phase: guidance → MLFQ dispatch →
+      audited four-phase sleep), CI-gated via `E4.5B_VITA_DONE`. The
+      bare-metal target is now an organism, not a substrate.
 - [ ] **virtio-net driver** — unblocks in-kernel networking: live LLM calls,
       networked console (E6 S6.5), real outbound TLS.
 - [ ] **30-day soak** on Firecracker / Cloud Hypervisor; commit the manifest

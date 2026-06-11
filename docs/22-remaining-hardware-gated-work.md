@@ -27,9 +27,9 @@ lost behind the table above:
 
 | Item | Epic | State today | What closes it |
 |---|---|---|---|
-| **`vita` in the microVM** | E4.5 follow-on | ⬜ Effectively std-only; the kernel links `corpus` + `scheduler` + `memory` + `interoception` + `console-proto` and runs the E4.5 soak **without the lifecycle director**. | Port `vita` off `std` and extend the boot soak to a full in-kernel wake→sleep cycle. This is the highest-leverage *software* item: it makes the bare-metal target an organism rather than a substrate. The gap has now been **measured** (UEFI-target probe build) — see the checklist below. |
+| **`vita` in the microVM** | E4.5 follow-on | ✅ **Closed.** `vita` (with `senses` and `kv-controller`) compiles for `x86_64-unknown-uefi` under `build-std = [core, alloc]`, and the kernel's Phase 9 (E4.5b) runs the real `LifecycleManager` + `somatic_execution_loop` on the Embassy executor: policy-checked guidance → MLFQ dispatch to a no_std backend → audited sleep cycle (pruning real; replay/dream/compilation as hosted-only stubs). `E4.5B_VITA_DONE` is CI-gated in `microvm-boot`; release EFI 225 KiB. | Remaining in-kernel refinements ride on virtio-net (live backends) and a wall-clock source (timestamps are boot-relative; identity/episodic stores are in-memory in no_std). |
 
-#### `vita` no_std gap map (measured 2026-06-11)
+#### `vita` no_std gap map (measured 2026-06-11 — executed the same day)
 
 A probe build of the kernel with `vita = { default-features = false }` against
 `build-std = [core, alloc]` pinned the work to:
