@@ -472,6 +472,12 @@ jobs:
             echo "✅ E4.5 exit criterion met: sleep-cycle soak completed" || \
             { echo "❌ E4.5_SOAK_DONE not found in serial output"; exit 1; }
 
+          # E4.5b exit criterion: the lifecycle director itself ran in-kernel —
+          # guidance → wake → MLFQ dispatch → audited sleep cycle (vita).
+          grep -q "E4.5B_VITA_DONE" /tmp/qemu-serial.txt && \
+            echo "✅ E4.5b exit criterion met: in-kernel vita lifecycle arc complete" || \
+            { echo "❌ E4.5B_VITA_DONE not found in serial output"; exit 1; }
+
           # E4.1 exit criterion (carried forward): panic handler reached.
           grep -q "ANIMA_PANIC" /tmp/qemu-serial.txt && \
             echo "✅ E4.1 exit criterion met: panic handler reached" || \

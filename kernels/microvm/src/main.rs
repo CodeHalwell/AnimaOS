@@ -89,6 +89,7 @@ extern crate alloc;
 
 mod operator_console;
 mod sleep_soak;
+mod vita_soak;
 mod tls;
 
 use alloc::vec::Vec;
@@ -414,6 +415,23 @@ async fn kernel_boot_task() {
 
     operator_console::run_operator_console_demo(serial_write)
         .expect("E6.4 operator-console serial framing failed");
+
+    // ------------------------------------------------------------------
+    // Phase 9 — In-kernel lifecycle director (E4.5b)
+    //
+    // The real vita LifecycleManager + somatic_execution_loop run on this
+    // executor: guidance enters through the SensoryBridge, the agent wakes,
+    // dispatches through the MLFQ scheduler to a no_std backend, and
+    // re-enters sleep through the maintenance sequencer. The audited arc is
+    // asserted before the marker is written.
+    // ------------------------------------------------------------------
+    serial_write("\n[E4.5b] kernel_boot_task: Phase 9 — in-kernel lifecycle director\n");
+    embassy_futures::yield_now().await;
+
+    vita_soak::run_vita_lifecycle_soak(serial_write)
+        .await
+        .expect("E4.5b in-kernel lifecycle soak failed");
+    serial_write("E4.5B_VITA_DONE\n");
 
     // Deliberate panic — triggers the panic handler which writes
     // "ANIMA_PANIC" to COM1, satisfying the final CI assertion.
