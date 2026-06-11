@@ -140,7 +140,13 @@ def write_manifest(out_dir: Path, args, pairs_n: int, counts: dict, digest: str,
                    produced: dict) -> Path:
     created_ns = time.time_ns()
     adapter_id = hashlib.sha256(
-        f"{args.base}|{digest}|{args.rank}|{args.alpha}|{args.epochs}".encode()
+        "|".join(
+            str(x)
+            for x in (
+                args.base, digest, args.rank, args.alpha, args.epochs,
+                args.lr, args.max_seq, args.batch, args.cot_in_response,
+            )
+        ).encode()
     ).hexdigest()[:16]
     manifest = {
         "schema": "anima-trainer-manifest/v1",
@@ -196,7 +202,9 @@ def train(args, pairs: list[dict]) -> dict:
 
     if not torch.cuda.is_available() and not args.cpu:
         print("✗ CUDA is not available (pass --cpu to force a CPU smoke run)", file=sys.stderr)
-        raise SystemExit(2)
+        # Runtime/environment failure, not a usage error: exit 1 (matching
+        # the workspace CLI convention of 2 = usage, 1 = runtime).
+        raise SystemExit(1)
 
     from unsloth import FastLanguageModel  # noqa: PLC0415
     from datasets import Dataset  # noqa: PLC0415
@@ -270,9 +278,9 @@ def train(args, pairs: list[dict]) -> dict:
         ggufs = sorted(gguf_dir.glob("*.gguf"))
         if ggufs:
             produced["gguf"] = str(ggufs[0])
-            produced["weights_digest"] = "sha256:" + hashlib.sha256(
-                ggufs[0].read_bytes()
-            ).hexdigest()
+            h = hashlib.sha256()
+            _hash_file_chunked(h, ggufs[0])
+            produced["weights_digest"] = "sha256:" + h.hexdigest()
             modelfile = write_modelfile(args.out, ggufs[0].relative_to(args.out).as_posix(),
                                         args.base)
             produced["modelfile"] = str(modelfile)
@@ -283,9 +291,17 @@ def train(args, pairs: list[dict]) -> dict:
         digest = hashlib.sha256()
         for f in sorted(adapter_dir.rglob("*")):
             if f.is_file():
-                digest.update(f.read_bytes())
+                _hash_file_chunked(digest, f)
         produced["weights_digest"] = "sha256:" + digest.hexdigest()
     return produced
+
+
+def _hash_file_chunked(h, path: Path, chunk_size: int = 1024 * 1024) -> None:
+    """Feed `path` into hash `h` in chunks — model artifacts are multi-GB,
+    so a whole-file read_bytes() would OOM a memory-limited container."""
+    with path.open("rb") as fh:
+        while chunk := fh.read(chunk_size):
+            h.update(chunk)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

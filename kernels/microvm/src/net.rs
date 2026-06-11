@@ -279,9 +279,14 @@ pub fn run_net_phase(serial: impl Fn(&str)) -> Result<(), &'static str> {
     let mut line: Vec<u8> = Vec::new();
     let mut guidance_ok = false;
     // Coarse clock: smoltcp only needs monotonic millis for retransmit
-    // timers; one poll loop ≈ tens of µs under QEMU, so tick 1 ms per loop.
-    for now_ms in 0..120_000i64 {
-        let ts = Instant::from_millis(now_ms);
+    // timers, but a 1 ms tick per poll would run the fake clock ~50-100×
+    // faster than wall time under QEMU — host-side latency of a couple of
+    // real seconds would then look like minutes and fire premature TCP
+    // retransmits/aborts. Tick 1 ms every 64 polls instead (fake time ≤
+    // real time on every host measured) and budget ~30 fake-seconds; the
+    // loop still returns the moment the exchange completes.
+    for poll in 0..1_920_000u32 {
+        let ts = Instant::from_millis(i64::from(poll / 64));
         iface.poll(ts, &mut dev, &mut sockets);
         let socket = sockets.get_mut::<tcp::Socket>(handle);
 

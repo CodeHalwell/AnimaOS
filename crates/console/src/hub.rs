@@ -114,8 +114,9 @@ impl ConsoleHub {
     ///
     /// Dead subscribers (receiver dropped) are reaped lazily here.
     pub fn publish(&self, event: OperatorEvent) {
-        let seq = self.inner.lock().expect("hub poisoned").seq;
-        self.publish_at(seq, event);
+        let mut inner = self.inner.lock().expect("hub poisoned");
+        let seq = inner.seq;
+        Self::publish_locked(&mut inner, seq, event);
     }
 
     /// Publish an event with a caller-supplied sequence number.
@@ -129,6 +130,14 @@ impl ConsoleHub {
     /// `publish` calls (e.g. auth-lockout audits) stay monotonic.
     pub fn publish_at(&self, seq: u64, event: OperatorEvent) {
         let mut inner = self.inner.lock().expect("hub poisoned");
+        Self::publish_locked(&mut inner, seq, event);
+    }
+
+    /// Publish under an already-held lock — sequence allocation and delivery
+    /// happen in one critical section, so concurrent publishers (audit
+    /// tailer, HTTP server, serial bridge) can never mint duplicate or
+    /// out-of-order SSE ids.
+    fn publish_locked(inner: &mut HubInner, seq: u64, event: OperatorEvent) {
         inner.seq = inner.seq.max(seq + 1);
 
         // Keep the latest snapshot of the two "current value" event kinds.

@@ -371,10 +371,12 @@ impl ConsoleServer {
     /// sequence number. EventSource clients echo the last id they saw as a
     /// `Last-Event-ID` header on automatic reconnect; snapshot entries at or
     /// below that cursor are skipped so a network blip does not duplicate
-    /// chat bubbles and feed lines on an already-rendered page. (After a
-    /// server restart the sequence starts over; a stale large cursor then
-    /// suppresses the whole replay, which is the right behaviour for a page
-    /// that already holds the history.)
+    /// chat bubbles and feed lines on an already-rendered page. Ids are the
+    /// audit-file byte offsets of the events' source lines, so they remain
+    /// stable across server restarts (the freshly-started tailer re-reads
+    /// the same file and republishes the same lines with the same ids) —
+    /// a reconnecting page is replayed only what it has not seen, whether
+    /// the gap was a network blip or a full agent restart.
     fn serve_events(&self, mut out: TcpStream, last_event_id: Option<u64>) -> std::io::Result<()> {
         let head = "HTTP/1.1 200 OK\r\n\
              Content-Type: text/event-stream\r\n\
@@ -401,6 +403,15 @@ impl ConsoleServer {
         loop {
             match sub.rx.recv_timeout(Duration::from_secs(15)) {
                 Ok((seq, event)) => {
+                    // The same cursor filter as the snapshot: after a restart
+                    // the tailer re-reads the audit file from offset 0 and
+                    // republishes history through this live path; a client
+                    // that reconnected mid-catch-up must not see lines it
+                    // already rendered. In steady state live seqs are always
+                    // above the cursor, so this never filters fresh events.
+                    if last_event_id.is_some_and(|last| seq <= last) {
+                        continue;
+                    }
                     if write_sse(&mut out, Some(seq), &event).is_err() {
                         break;
                     }
@@ -1028,6 +1039,58 @@ mod tests {
         assert!(
             resumed.contains("gamma"),
             "events after the cursor must still replay: {resumed}"
+        );
+    }
+
+    #[test]
+    fn live_path_also_respects_last_event_id_cursor() {
+        // After a process restart the audit tailer re-reads the file from
+        // offset 0 and republishes history through the LIVE path; a client
+        // that reconnected mid-catch-up must not see lines it already
+        // rendered (Codex review, PR #114).
+        let (addr, hub, _bridge) = start();
+
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nLast-Event-ID: 10\r\n\r\n")
+            .unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Historical re-read (seq below the cursor) vs genuinely new line.
+        hub.publish_at(
+            5,
+            OperatorEvent::AgentMessage {
+                task_id: 1,
+                tokens: 1,
+                text: "historical-replay".into(),
+            },
+        );
+        hub.publish_at(
+            11,
+            OperatorEvent::AgentMessage {
+                task_id: 2,
+                tokens: 1,
+                text: "fresh-line".into(),
+            },
+        );
+
+        let mut text = String::new();
+        let mut buf = [0u8; 2048];
+        for _ in 0..10 {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            !text.contains("historical-replay"),
+            "live events at or below the cursor must be filtered: {text}"
+        );
+        assert!(
+            text.contains("fresh-line"),
+            "live events above the cursor must flow: {text}"
         );
     }
 

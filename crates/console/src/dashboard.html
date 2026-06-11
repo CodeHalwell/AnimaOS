@@ -321,7 +321,10 @@
     feed.prepend(el);
     while (feed.childNodes.length > 400) feed.removeChild(feed.lastChild);
   }
-  function esc(s) { const d = document.createElement("div"); d.textContent = String(s); return d.innerHTML; }
+  // One reused element: esc() runs for every feed line and chat bubble, so
+  // a per-call createElement would be needless GC churn.
+  const escEl = document.createElement("div");
+  function esc(s) { escEl.textContent = String(s); return escEl.innerHTML; }
 
   /* ── Conversation ───────────────────────────────────────────────── */
   const chat = $("chat");
@@ -383,9 +386,11 @@
     badge.textContent = ev.invoke ? "INVOKE" : "BLOCK";
     badge.className = "badge " + (ev.invoke ? "invoke" : "block");
     $("gatecost").textContent = (ev.cost_class || "") + (ev.override_active ? " · OVERRIDE" : "");
-    $("gateval").style.width = (ev.value_score * 100).toFixed(0) + "%";
-    $("gatethr").style.left = "calc(" + (ev.threshold * 100).toFixed(0) + "% - 1px)";
-    $("gatenums").textContent = ev.value_score.toFixed(2) + " / " + ev.threshold.toFixed(2);
+    const val = ev.value_score ?? 0;
+    const thr = ev.threshold ?? 0;
+    $("gateval").style.width = (val * 100).toFixed(0) + "%";
+    $("gatethr").style.left = "calc(" + (thr * 100).toFixed(0) + "% - 1px)";
+    $("gatenums").textContent = val.toFixed(2) + " / " + thr.toFixed(2);
     $("gatewhy").textContent = ev.reasoning || "";
   }
 
@@ -420,9 +425,9 @@
         setGate(ev);
         addFeed("gate", "gate",
           (ev.invoke ? "INVOKE" : "block") + " " + (ev.cost_class || "") +
-          " · value " + ev.value_score.toFixed(2) + " vs " + ev.threshold.toFixed(2) +
+          " · value " + (ev.value_score ?? 0).toFixed(2) + " vs " + (ev.threshold ?? 0).toFixed(2) +
           (ev.override_active ? " · OVERRIDE" : "") + "\n" + ev.reasoning);
-        if (!ev.invoke) notice("gate held this back · value " + ev.value_score.toFixed(2) + " < threshold " + ev.threshold.toFixed(2));
+        if (!ev.invoke) notice("gate held this back · value " + (ev.value_score ?? 0).toFixed(2) + " < threshold " + (ev.threshold ?? 0).toFixed(2));
         break;
       case "TaskStarted":
         addFeed("task", "task→", "#" + (ev.task_key || ev.task_id) + " " + ev.prompt);
