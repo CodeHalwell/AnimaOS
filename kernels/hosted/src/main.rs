@@ -6164,6 +6164,29 @@ fn cmd_serve() {
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
 
+    // E3.8 → E8: persist the sleep-phase training corpus so the containerised
+    // trainer (`trainer/sleep_phase.py`, sharing the ~/.anima volume) can
+    // consume it.  Defaults inside the persisted volume; ANIMA_CORPUS_DIR
+    // overrides the location, ANIMA_CORPUS_DIR=off disables file output
+    // (compilation then runs in-memory only).
+    let corpus_dir = std::env::var("ANIMA_CORPUS_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{home}/.anima/training_corpus")
+    });
+    if corpus_dir != "off" {
+        manager.compilation_config = Some(memory::CompilationConfig {
+            output_dir: std::path::PathBuf::from(&corpus_dir),
+            formats: vec![
+                memory::TrainingFormat::Alpaca,
+                memory::TrainingFormat::Conversation,
+                memory::TrainingFormat::ChainOfThought,
+            ],
+            // Accumulate across sleep cycles: the trainer consumes the corpus
+            // on its own cadence, so each cycle must not erase the last.
+            append: true,
+        });
+    }
+
     // E12: optionally enable drive-augmented arbitration (motivation) on the
     // serving agent.  Off by default; opt in via ANIMA_MOTIVATION=1 so the
     // existing gate behaviour is unchanged unless requested.
@@ -6200,6 +6223,9 @@ fn cmd_serve() {
         frontier_b.id()
     );
     println!("  audit log : {}", audit_path.display());
+    if corpus_dir != "off" {
+        println!("  corpus    : {corpus_dir} (sleep-phase training pairs)");
+    }
     println!(
         "\nThe agent starts idle and sleeps until a sense wakes it. Send guidance —\n\
          it enters the sensory queue and is arbitrated by the gate, never executed directly:\n  \

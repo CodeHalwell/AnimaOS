@@ -166,10 +166,17 @@ services:
       # and cause the root-running build context to write checkpoints back to
       # the host tree as root. Rebuild the image to pick up code changes.
       - ollama-models:/models
+      # Read-only view of the agent's persisted state: the sleep-phase
+      # compiler (E3.8) writes training_corpus/*.jsonl here, which
+      # sleep_phase.py consumes for the QLoRA pass.
+      - anima-data:/anima-data:ro
     environment:
       # Where Unsloth caches HF downloads / writes adapter checkpoints.
       HF_HOME: /models/hf-cache
       TRANSFORMERS_CACHE: /models/hf-cache
+      # Where the agent's compiled sleep-phase corpus lands (see the hosted
+      # service's ANIMA_CORPUS_DIR default of ~/.anima/training_corpus).
+      TRAINER_CORPUS_DIR: /anima-data/training_corpus
       # Base model for sleep-phase QLoRA.  bnb-4bit variant is the right
       # format for Unsloth's `FastLanguageModel.from_pretrained`; this is
       # the *training* sibling of the GGUF instinct model the inference

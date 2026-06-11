@@ -3,11 +3,11 @@ import the Unsloth toolchain.  Run from compose with:
 
     docker compose --profile training run --rm trainer python /app/check.py
 
-A real fine-tuning loop is a follow-up: the sleep-phase pipeline should load
-a base model from the shared `ollama-models` volume, run a QLoRA pass over
-the replay buffer produced by `vita::sleep`, export the adapted weights as a
-GGUF file, and signal Ollama to reload the model.  This script only proves
-the runtime environment is correctly wired.
+The real fine-tuning loop lives in `sleep_phase.py`: it consumes the corpus
+the agent's PolicyCompilation sleep phase writes to the shared volume, runs
+a QLoRA pass with Unsloth, and exports a GGUF + Modelfile back into the
+`ollama-models` volume.  This script only proves the runtime environment is
+correctly wired — run it first on a new GPU host.
 """
 
 from __future__ import annotations
