@@ -120,3 +120,57 @@ jobs:
           args: >-
             --package corpus
             --package scheduler
+
+  # ---------------------------------------------------------------------------
+  # Coverage — cargo-llvm-cov over the workspace test suite (docs/04 §3.1)
+  #
+  # Coverage is advisory by design: falling below the floor emits a GitHub
+  # warning annotation but never fails the job — the intent is to surface
+  # regressions, not to enforce a quota by means that encourage gaming.
+  # The full lcov report is uploaded as an artifact for inspection.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: "coverage — cargo-llvm-cov workspace report (docs/04 §3.1)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install llvm-tools component
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@d31232495ad76f47aad66e3501e47780b49f0f3e # v2.57.4
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo registry (coverage)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-llvm-cov-
+
+      - name: Measure workspace line coverage
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+
+      - name: Check advisory coverage floor (warn-only)
+        run: |
+          TOTAL=$(awk '/^TOTAL/ { sub(/%/, "", $10); print $10 }' coverage-summary.txt)
+          echo "Workspace line coverage: ${TOTAL}%"
+          FLOOR=80
+          if awk -v t="$TOTAL" -v f="$FLOOR" 'BEGIN { exit !(t < f) }'; then
+            echo "::warning title=Coverage below advisory floor::Workspace line coverage ${TOTAL}% is below the ${FLOOR}% advisory floor (docs/04 §3.1). This is a warning, not a gate."
+          fi
+
+      - name: Upload lcov report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workspace-lcov
+          path: lcov.info
+          retention-days: 14

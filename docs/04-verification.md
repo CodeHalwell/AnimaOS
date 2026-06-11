@@ -32,12 +32,16 @@ This is checked by the compiler. A PR introducing `unsafe` to `vita`, `scheduler
 The `corpus` crate may use `unsafe`, but every `unsafe` block requires:
 
 1. A `SAFETY:` doc comment explaining the invariant being upheld.
-2. Inclusion in the `corpus/unsafe_audit.md` file with a brief justification.
+2. Inclusion in the [`crates/corpus/unsafe_audit.md`](../crates/corpus/unsafe_audit.md) file with a brief justification.
 3. Sign-off from a second reviewer at PR time.
 
 ### 2.2 Clippy Configuration
 
-The workspace `.clippy.toml` enables the full set of warnings under `clippy::pedantic`, with a small number of explicit exceptions documented in the file. The CI build treats all clippy warnings as errors.
+CI runs `cargo clippy --workspace --all-targets -- -D warnings`: the default
+clippy lint set with all warnings treated as errors. Adopting
+`clippy::pedantic` workspace-wide remains an open item — it is deliberately
+not enabled until the resulting lint debt across the 35-crate workspace can
+be paid down in a dedicated change rather than suppressed wholesale.
 
 ### 2.3 Format & Lint in CI
 
@@ -53,11 +57,19 @@ Each crate maintains unit tests for its public surface. Coverage targets:
 - **`vita`, `scheduler`, `memory`**: 90%+ line coverage.
 - **`praxis`, `self`, `interoception`, `senses`**: 85%+ line coverage.
 
-Coverage is measured by `cargo llvm-cov` and reported in CI. Falling below the target on a PR produces a warning but does not block merge — the intent is to surface regressions, not to enforce a quota by means that encourage gaming.
+Coverage is measured by `cargo llvm-cov` in the nightly CI pipeline
+(`nightly.yml` `coverage` job): the workspace lcov report is uploaded as an
+artifact and a warning annotation is emitted if total line coverage falls
+below the 80% advisory floor. Coverage never blocks a merge — the intent is
+to surface regressions, not to enforce a quota by means that encourage
+gaming. The per-crate targets above are review guidance, not gates.
 
 ### 3.2 Integration Tests
 
-Cross-crate integration tests live in `tests/` at the workspace root. They cover:
+Cross-crate integration tests live inside the crates that own the seam —
+inline `#[cfg(test)]` modules in `vita`, `kernels/hosted`, and the subsystem
+crates — rather than in a workspace-root `tests/` directory, so each test
+compiles against exactly the features its seam exports. They cover:
 
 - **Memory tier transitions.** Items flow correctly through L1 → L2 → L3 and back under realistic load.
 - **Lifecycle state transitions.** The state machine in `vita` reaches every state and every transition is exercised.
@@ -117,31 +129,44 @@ We do not attempt to formally verify the whole system. Specifically out of scope
 
 ## 5. Level 4: Behavioural Testing
 
-### 5.1 Property Testing
+> **Status.** Level 4 is the least-built layer of the taxonomy. §5.1 and
+> §5.2 are design intent that has **not yet been implemented** — there are
+> no proptest or cargo-fuzz targets in the workspace today. They are kept
+> here as the agreed scope for that work. §5.3 exists in the form described
+> in its status note.
 
-`proptest` is used at key subsystem boundaries to find inputs that break invariants. Initial targets:
+### 5.1 Property Testing (open — not yet implemented)
+
+`proptest` is to be used at key subsystem boundaries to find inputs that break invariants. Initial targets:
 
 - **Memory pruning preserves the semantic floor.** No matter what activation values, arousal levels, or surprise scores are generated, no entry above the floor is evicted.
 - **Stress index stays in $[0, 1]$.** Across all possible (latency, token count) inputs.
 - **Length-robust tool filter is monotonic in score.** A tool with a higher score than another tool in the same query is never filtered out while the other is admitted.
 
-Property tests run on every PR with a small default iteration count (256) and on nightly with a larger count (10,000).
+The named invariants are currently exercised by example-based unit tests in
+`memory`, `interoception`, and `praxis`; the property-testing generalisation
+remains open.
 
-### 5.2 Fuzzing
+### 5.2 Fuzzing (open — not yet implemented)
 
-`cargo-fuzz` targets are maintained for parsing surfaces:
+`cargo-fuzz` targets are to be maintained for parsing surfaces:
 
 - The `senses` text parser.
 - The `senses` voice frame parser.
 - The `praxis` MCP message decoder.
 - The `praxis` A2A message decoder.
-- The `postcard` and `rkyv` deserialisers for inter-crate messages.
-
-Fuzz targets run continuously in a dedicated CI job and report crashes to the issue tracker automatically.
+- The `console-proto` NDJSON frame parser.
 
 ### 5.3 End-to-End Harness
 
-A test harness in `tests/harness/` boots the full system in the hosted target, drives synthetic human input, and asserts on observable outcomes. Scenarios include:
+> **Status.** Implemented as inline integration tests rather than a separate
+> `tests/harness/` tree: the somatic-loop and sleep-cycle scenarios live in
+> `vita`'s and `kernels/hosted`'s test modules, and the containerised
+> round-trip (console up → guidance in → `AgentMessage` out over SSE against
+> the mock backend) is asserted by the Docker workflow's smoke-test step on
+> every image build.
+
+The harness boots the full system in the hosted target, drives synthetic human input, and asserts on observable outcomes. Scenarios include:
 
 - **Baseline conversation.** Send N turns, verify responses, verify L1/L2/L3 state evolution.
 - **Sleep cycle.** Force the stress index low, verify transition to sleep, verify each phase runs, verify wake on input.
@@ -157,55 +182,72 @@ The microVM target is verified separately from the hosted target because it exer
 
 ### 6.1 Boot Smoke Test
 
-A microVM image is built on every PR. The image is booted under Firecracker in a CI runner. The boot smoke test asserts:
-
-- The image boots to the agent's main loop within 5 seconds.
-- The agent emits a "ready" event on its telemetry stream.
-- A single test request is handled correctly.
-- A graceful shutdown completes within 2 seconds.
+A microVM image is built on every PR (with the ≤ 1 MiB release-EFI budget
+enforced) and booted under QEMU/OVMF in the `microvm-boot` CI job. The boot
+smoke test asserts the full marker sequence on COM1 serial: `E4.1_*` (boot +
+panic handler), `E4.2_TASK_DONE` (Embassy executor), `E4.3_TCP_DONE`
+(smoltcp), `E4.4_TLS_DONE` (TLS 1.3), `E4.5_SOAK_DONE` (sleep-cycle soak),
+and `E6.4_CONSOLE_DONE` (operator-console Phase 0). Boot latency is recorded
+for information only — the 2 s budget applies to Firecracker / Cloud
+Hypervisor and is asserted on real hardware as part of the soak run
+(`docs/22` §1). Firecracker-in-CI remains open: GitHub-hosted runners do not
+expose KVM reliably.
 
 ### 6.2 Long-Running Soak Test
 
-Nightly, a microVM image is booted and driven with synthetic load for 6 hours. The soak test asserts:
-
-- No memory growth beyond the initial steady-state envelope.
-- No descent into emergency consolidation under sustained nominal load.
-- Sleep cycles trigger appropriately and complete cleanly.
-- L3 grows by a bounded amount per hour (catches dream-walk runaway).
+The soak harness is `cargo xtask soak`: it drives a QEMU boot loop, records
+per-iteration boot latency and outcome (`ok` / `timeout` /
+`unscheduled_exit`), and writes a resumable JSON manifest plus a JSONL log.
+`.github/workflows/soak.yml` runs a short live soak plus a dry-run
+schema self-test on manual dispatch. The 30-day production run
+(720 hours, on Firecracker / Cloud Hypervisor hardware) has **not yet been
+executed**; its manifest is to be committed under `artifacts/soak/` when it
+completes (`docs/22` §1). A recurring 6-hour nightly soak with
+synthetic-load assertions (memory envelope, consolidation behaviour, L3
+growth bounds) remains open design intent.
 
 ## 7. CI Pipeline Overview
 
 ```
-PR opened
+PR opened (ci.yml, bench.yml, docker.yml on relevant paths)
    │
-   ├─► Level 1: fmt, clippy, unsafe quarantine
+   ├─► Level 1: fmt, clippy -D warnings, unsafe quarantine (compiler-enforced)
    │   (must pass to proceed)
    │
-   ├─► Level 2: cargo test (hosted target, all crates)
-   │   coverage report
+   ├─► Level 2: cargo build + test (hosted target, all crates)
    │
-   ├─► Level 4 (sampled): proptest, e2e harness scenarios
+   ├─► Supply chain: RustSec audit + cargo-deny (licences, bans, sources)
    │
-   └─► MicroVM boot smoke test
+   ├─► MicroVM: UEFI build (≤ 1 MiB release-EFI budget) +
+   │   QEMU/OVMF boot with serial-marker assertions (E4.2–E4.5, E6.4)
+   │
+   ├─► Benchmarks: criterion vs bench/baselines/ (warning-only on PRs)
+   │
+   └─► Docker: hosted image build + mock-backend console smoke test
+       (on Dockerfile / manifest changes)
 
-Nightly (default branch)
+Nightly (nightly.yml; bench gate hard on schedule)
    │
-   ├─► Everything above
+   ├─► Level 3: kani proofs (15), miri on corpus
    │
-   ├─► Level 3: kani proofs, miri on corpus
+   ├─► Level 2½: cargo-llvm-cov workspace coverage (advisory floor 80%,
+   │   lcov artifact uploaded)
    │
-   ├─► Level 4 (full): proptest 10k iters, full fuzz run
-   │
-   └─► MicroVM soak test (6h)
+   └─► Benchmarks: regression gate is hard (continue-on-error: false)
 
-Release candidate
+Manual / hardware-gated
    │
-   ├─► Everything above
+   ├─► soak.yml: short live soak + manifest schema self-test (dispatch)
    │
-   ├─► Manual audit of unsafe_audit.md changes since last release
+   ├─► 30-day production soak on Firecracker / Cloud Hypervisor
+   │   (operator-driven; manifest committed to artifacts/soak/)
    │
-   └─► Performance regression benchmark against last release
+   └─► Release: audit of crates/corpus/unsafe_audit.md changes +
+       benchmark comparison against the last release
 ```
+
+Level 4 (property tests, fuzzing) is not yet wired into any pipeline — see
+the status note at the top of §5.
 
 ## 8. What "Verified" Means in Anima
 
