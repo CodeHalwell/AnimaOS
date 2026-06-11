@@ -406,7 +406,15 @@
           ring.style.strokeDashoffset = (100.5 * (1 - s)).toFixed(1);
           ring.style.stroke = colorFor(s); }
         break;
-      case "State": setLifecycle(ev); break;
+      case "State":
+        setLifecycle(ev);
+        // Anything still "typing" when the agent returns to sleep has no
+        // completion coming (its task ended without an AgentMessage).
+        if (ev.lifecycle === "Sleep" && typing.size) {
+          for (const el of typing.values()) el.remove();
+          typing.clear();
+        }
+        break;
       case "Gate":
         gateCount++; $("gatecount").textContent = gateCount;
         setGate(ev);
@@ -417,13 +425,13 @@
         if (!ev.invoke) notice("gate held this back · value " + ev.value_score.toFixed(2) + " < threshold " + ev.threshold.toFixed(2));
         break;
       case "TaskStarted":
-        addFeed("task", "task→", "#" + ev.task_id + " " + ev.prompt);
-        showTyping(ev.task_id);
+        addFeed("task", "task→", "#" + (ev.task_key || ev.task_id) + " " + ev.prompt);
+        showTyping(ev.task_key || String(ev.task_id));
         break;
       case "AgentMessage":
-        clearTyping(ev.task_id);
+        clearTyping(ev.task_key || String(ev.task_id));
         bubble("agent", "anima · " + ev.tokens + " tok", ev.text);
-        addFeed("msg", "agent", "#" + ev.task_id + " (" + ev.tokens + " tok) " + ev.text);
+        addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (" + ev.tokens + " tok) " + ev.text);
         break;
       case "Audit":
         if (ev.kind === "OperatorGuidance") {
@@ -432,7 +440,15 @@
           bubble("op", "operator · " + (m ? m[1].toLowerCase() : "guidance"), m ? m[2] : ev.detail);
         }
         if (ev.kind === "DefenceVeto") notice("defence veto · " + ev.detail, true);
-        addFeed(ev.kind === "DefenceVeto" || ev.kind === "AttentionDemandEscalated" ? "veto" : "audit", ev.kind, ev.detail);
+        if (ev.kind === "TaskFailed" || ev.kind === "CortexFault") {
+          // "task <id> failed: …" / "task <id>: …" — the matching typing
+          // indicator will never see an AgentMessage; retire it and tell the
+          // operator in the conversation, not just the telemetry feed.
+          const t = /task (\d+)/.exec(ev.detail || "");
+          if (t) clearTyping(t[1]);
+          notice(ev.kind + " · " + ev.detail, true);
+        }
+        addFeed(["DefenceVeto", "AttentionDemandEscalated", "TaskFailed", "CortexFault"].includes(ev.kind) ? "veto" : "audit", ev.kind, ev.detail);
         break;
       case "Heartbeat": $("uptime").textContent = fmtUptime(ev.uptime_secs); break;
     }
@@ -449,7 +465,17 @@
     const es = new EventSource(url);
     es.onopen = () => { $("conntext").textContent = "live"; $("conn").className = "chip up"; };
     es.onerror = () => { $("conntext").textContent = "reconnecting…"; $("conn").className = "chip down"; };
-    es.onmessage = (m) => { try { handle(JSON.parse(m.data)); } catch (e) { /* tolerate partial lines */ } };
+    es.onmessage = (m) => {
+      try {
+        const ev = JSON.parse(m.data);
+        // task_id is a u64; values above 2^53 lose precision in JSON.parse
+        // (and consecutive ids can collide after rounding). Recover the exact
+        // digits from the raw frame and carry them as a string key.
+        const raw = /"task_id":\s*(\d+)/.exec(m.data);
+        if (raw) ev.task_key = raw[1];
+        handle(ev);
+      } catch (e) { /* tolerate partial lines */ }
+    };
   }
   connect();
 

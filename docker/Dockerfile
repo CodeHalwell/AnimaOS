@@ -103,12 +103,14 @@ ENV ANIMA_BACKEND=ollama \
 # The operator console (only published to host loopback by compose).
 EXPOSE 8088
 
-# Liveness: the console dashboard answers GET / once the agent is up.  The
+# Liveness: /healthz is the console's dedicated probe — it is exempt from
+# bearer-token auth, so the check keeps working when ANIMA_CONSOLE_TOKEN is
+# set (GET / would return 401 and mark a healthy container unhealthy).  The
 # console binds 0.0.0.0:8088 by default (see ANIMA_CONSOLE_ADDR above), so
 # loopback inside the container always reaches it.  Irrelevant for one-shot
 # subcommand containers, which exit before the start period elapses.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -sf http://127.0.0.1:8088/ || exit 1
+  CMD curl -sf http://127.0.0.1:8088/healthz || exit 1
 
 ENTRYPOINT ["anima-hosted"]
 # Default to the operator-console server. Override for one-shot subcommands,

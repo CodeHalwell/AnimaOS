@@ -308,8 +308,10 @@ def main() -> int:
     ap.add_argument("--cpu", action="store_true", help="permit a (slow) CPU smoke run")
     ap.add_argument("--min-pairs", type=int, default=4,
                     help="refuse to train on fewer unique pairs than this")
-    ap.add_argument("--cot-in-response", action="store_true", default=True,
-                    help="include chain_of_thought text in the training target")
+    ap.add_argument("--cot-in-response", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="include chain_of_thought text in the training target "
+                         "(disable with --no-cot-in-response)")
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--alpha", type=int, default=32)
     ap.add_argument("--epochs", type=float, default=1.0)

@@ -220,6 +220,7 @@ impl ConsoleServer {
         // ── Headers ───────────────────────────────────────────────────────
         let mut content_length = 0usize;
         let mut auth_header: Option<String> = None;
+        let mut last_event_id: Option<u64> = None;
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line)? == 0 {
@@ -235,6 +236,9 @@ impl ConsoleServer {
                 match key.as_str() {
                     "content-length" => content_length = value.parse().unwrap_or(0),
                     "authorization" => auth_header = Some(value.to_string()),
+                    // Sent automatically by EventSource on reconnect; lets the
+                    // snapshot replay skip events the client already rendered.
+                    "last-event-id" => last_event_id = value.parse().ok(),
                     _ => {}
                 }
             }
@@ -312,7 +316,7 @@ impl ConsoleServer {
                 "text/html; charset=utf-8",
                 crate::DASHBOARD_HTML.as_bytes(),
             ),
-            ("GET", "/events") => self.serve_events(out),
+            ("GET", "/events") => self.serve_events(out, last_event_id),
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
             // E21 — Prometheus metrics endpoint
             ("GET", "/metrics") => {
@@ -362,7 +366,16 @@ impl ConsoleServer {
 
     /// Stream the live event feed as Server-Sent Events. Blocks this
     /// connection's thread until the client disconnects.
-    fn serve_events(&self, mut out: TcpStream) -> std::io::Result<()> {
+    ///
+    /// Every event is written with an `id:` line carrying the hub's publish
+    /// sequence number. EventSource clients echo the last id they saw as a
+    /// `Last-Event-ID` header on automatic reconnect; snapshot entries at or
+    /// below that cursor are skipped so a network blip does not duplicate
+    /// chat bubbles and feed lines on an already-rendered page. (After a
+    /// server restart the sequence starts over; a stale large cursor then
+    /// suppresses the whole replay, which is the right behaviour for a page
+    /// that already holds the history.)
+    fn serve_events(&self, mut out: TcpStream, last_event_id: Option<u64>) -> std::io::Result<()> {
         let head = "HTTP/1.1 200 OK\r\n\
              Content-Type: text/event-stream\r\n\
              Cache-Control: no-cache\r\n\
@@ -373,9 +386,13 @@ impl ConsoleServer {
         out.flush()?;
 
         let sub = self.hub.subscribe();
-        // Replay the snapshot so a freshly-opened dashboard has immediate state.
-        for event in &sub.snapshot {
-            if write_sse(&mut out, event).is_err() {
+        // Replay the snapshot so a freshly-opened dashboard has immediate
+        // state, skipping anything a reconnecting client already rendered.
+        for (seq, event) in &sub.snapshot {
+            if last_event_id.is_some_and(|last| *seq <= last) {
+                continue;
+            }
+            if write_sse(&mut out, Some(*seq), event).is_err() {
                 self.hub.unsubscribe(sub.id());
                 return Ok(());
             }
@@ -383,17 +400,19 @@ impl ConsoleServer {
 
         loop {
             match sub.rx.recv_timeout(Duration::from_secs(15)) {
-                Ok(event) => {
-                    if write_sse(&mut out, &event).is_err() {
+                Ok((seq, event)) => {
+                    if write_sse(&mut out, Some(seq), &event).is_err() {
                         break;
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Idle keep-alive so proxies and the client don't time out.
+                    // No `id:` line — heartbeats are synthesised per-connection
+                    // and must not advance the client's replay cursor.
                     let beat = OperatorEvent::Heartbeat {
                         uptime_secs: self.hub.uptime_secs(),
                     };
-                    if write_sse(&mut out, &beat).is_err() {
+                    if write_sse(&mut out, None, &beat).is_err() {
                         break;
                     }
                 }
@@ -549,7 +568,10 @@ fn constant_time_str_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn write_sse(out: &mut TcpStream, event: &OperatorEvent) -> std::io::Result<()> {
+fn write_sse(out: &mut TcpStream, id: Option<u64>, event: &OperatorEvent) -> std::io::Result<()> {
+    if let Some(id) = id {
+        out.write_all(format!("id: {id}\n").as_bytes())?;
+    }
     let line = json::event_to_line(event);
     out.write_all(b"data: ")?;
     out.write_all(line.as_bytes())?;
@@ -954,6 +976,58 @@ mod tests {
         assert!(
             text.contains("hello from the agent"),
             "should receive the published event: {text}"
+        );
+        assert!(
+            text.contains("id: "),
+            "events must carry SSE ids for reconnect replay-skipping: {text}"
+        );
+    }
+
+    #[test]
+    fn reconnect_with_last_event_id_skips_already_seen_snapshot() {
+        let (addr, hub, _bridge) = start();
+
+        // Three feed events land in the replay ring as seqs 0, 1, 2.
+        for (i, word) in ["alpha", "beta", "gamma"].iter().enumerate() {
+            hub.publish(OperatorEvent::AgentMessage {
+                task_id: i as u64,
+                tokens: 1,
+                text: (*word).into(),
+            });
+        }
+
+        let read_stream = |req: &str| {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(400)))
+                .unwrap();
+            let mut text = String::new();
+            let mut buf = [0u8; 2048];
+            for _ in 0..10 {
+                match s.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(_) => break, // read timeout — snapshot fully drained
+                }
+            }
+            text
+        };
+
+        // A fresh client (no Last-Event-ID) is replayed the whole ring.
+        let fresh = read_stream("GET /events HTTP/1.1\r\nHost: x\r\n\r\n");
+        for word in ["alpha", "beta", "gamma"] {
+            assert!(fresh.contains(word), "fresh client missing {word}: {fresh}");
+        }
+
+        // A reconnecting client that already saw seq 1 gets only seq 2.
+        let resumed = read_stream("GET /events HTTP/1.1\r\nHost: x\r\nLast-Event-ID: 1\r\n\r\n");
+        assert!(
+            !resumed.contains("alpha") && !resumed.contains("beta"),
+            "events at or below the cursor must be skipped: {resumed}"
+        );
+        assert!(
+            resumed.contains("gamma"),
+            "events after the cursor must still replay: {resumed}"
         );
     }
 

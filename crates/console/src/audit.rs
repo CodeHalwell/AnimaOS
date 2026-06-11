@@ -292,7 +292,9 @@ impl AuditTailer {
                             }
                             *last_vitals = Some(now);
                         }
-                        self.hub.publish(event);
+                        // The line's end offset is the event's stable sequence
+                        // number — see `ConsoleHub::publish_at`.
+                        self.hub.publish_at(consumed, event);
                     }
                 }
                 Err(_) => break,
@@ -412,7 +414,7 @@ mod tests {
         .unwrap();
         f.flush().unwrap();
 
-        let ev = sub.rx.recv_timeout(Duration::from_secs(2)).expect("event");
+        let (_, ev) = sub.rx.recv_timeout(Duration::from_secs(2)).expect("event");
         assert!(matches!(ev, OperatorEvent::TaskStarted { task_id: 1, .. }));
 
         let _ = std::fs::remove_dir_all(&dir);
