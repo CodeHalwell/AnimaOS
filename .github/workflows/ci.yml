@@ -24,6 +24,33 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # Unsafe quarantine (docs/04 §2.1): every workspace library crate except
+  # the corpus TCB must declare #![forbid(unsafe_code)] at the crate root.
+  # The compiler enforces the attribute wherever it is declared; this job
+  # enforces that it is declared everywhere it must be, so the audit surface
+  # in crates/corpus/unsafe_audit.md stays exhaustive by construction.
+  unsafe-quarantine:
+    name: unsafe quarantine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Assert forbid(unsafe_code) in all non-TCB library crates
+        run: |
+          missing=0
+          for lib in crates/*/src/lib.rs llm-backends/src/lib.rs; do
+            case "$lib" in
+              crates/corpus/src/lib.rs) continue ;;  # TCB: unsafe permitted, audited
+            esac
+            if ! grep -q '^#!\[forbid(unsafe_code)\]' "$lib"; then
+              echo "::error file=${lib}::missing #![forbid(unsafe_code)] at crate root"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "0" ]; then
+            echo "✅ all non-TCB library crates forbid unsafe_code"
+          fi
+          exit "$missing"
+
   build-and-test:
     name: build + test
     runs-on: ubuntu-latest

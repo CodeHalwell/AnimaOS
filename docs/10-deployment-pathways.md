@@ -185,9 +185,10 @@ phases linked):
 | Pre-E4.7 release (`opt-s` + `abort`) | 247 296      | —             |
 | E4.7 release (LTO + CU=1 + strip)    | 166 400      | **−32.7 %**   |
 
-The `microvm-build` CI job records the size of the EFI artefact on every
-run, so any regression past the 2 s boot budget can be caught at the PR
-boundary.
+The `microvm-build` CI job enforces the EFI image-size budgets on every
+run, so size regressions are caught at the PR boundary.  Boot latency is
+recorded informationally by `microvm-boot`; the 2 s budget itself is
+asserted on Firecracker / Cloud Hypervisor hardware (see `docs/22` §1).
 
 ## Doc-flip readiness checklist (E4.7)
 

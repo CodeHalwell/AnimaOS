@@ -6,8 +6,14 @@ invariant it relies on. A PR that adds, removes, or changes an `unsafe` block
 in `corpus` (or the microVM kernel binary, which is part of the same TCB)
 must update this file in the same change.
 
-Every non-TCB crate in the workspace declares `#![forbid(unsafe_code)]`; the
-compiler enforces that this list is exhaustive for the workspace.
+Every non-TCB crate in the workspace declares `#![forbid(unsafe_code)]`.
+Two mechanisms keep the quarantine exhaustive: the compiler rejects `unsafe`
+inside any crate that declares the attribute, and the `unsafe-quarantine` CI
+job (`ci.yml`) asserts the attribute is present at the root of every non-TCB
+library crate — so workspace `unsafe` is confined to the TCB files listed
+below. What no tool can check is that *this markdown file* documents every
+unsafe site within the TCB: that remains a review/process requirement
+(§4) enforced at PR time.
 
 ## Audit summary
 

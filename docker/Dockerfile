@@ -63,10 +63,18 @@ FROM debian:bookworm-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Pre-create ~/.anima (and the audit dir inside it) owned by the anima user.
+# Compose mounts the named `anima-data` volume at /home/anima/.anima; a named
+# volume inherits ownership from the image's directory on first use, but if
+# the directory does not exist in the image the mount point is created
+# root-owned and the uid-1000 process cannot write its identity store or
+# audit log.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /bin/bash --uid 1000 anima
+    && useradd --create-home --shell /bin/bash --uid 1000 anima \
+    && mkdir -p /home/anima/.anima/audit \
+    && chown -R anima:anima /home/anima/.anima
 
 COPY --from=builder /usr/local/bin/anima-hosted /usr/local/bin/anima-hosted
 COPY --from=builder /usr/local/bin/anima-console /usr/local/bin/anima-console

@@ -33,8 +33,9 @@ lost behind the table above:
 
 1. **Soak** — provision one Firecracker or Cloud-Hypervisor VM; build the
    release EFI (§2); launch the soak driver; let it run 30 days; commit the
-   manifest. CI already enforces the ≤1 MiB image and ≤2 s boot budgets that
-   the soak presupposes.
+   manifest. CI already enforces the ≤1 MiB image budget; the ≤2 s boot
+   budget is *recorded* informationally in CI (QEMU+OVMF is not
+   representative) and is asserted by this soak run on microVM hardware.
 2. **virtio-net** — this unblocks E6 S6.5 *and* any future in-microVM network
    inference; it is the highest-leverage hardware item.
 3. **Native FFI / GPU training** — independent of the microVM; can be done on
@@ -63,9 +64,10 @@ cd kernels/microvm
 cargo +nightly build --release          # -> target/x86_64-unknown-uefi/release/anima-microvm.efi
 ```
 
-CI gates the release EFI at **≤ 1 MiB** and boot-to-soak-complete at **≤ 2 s**
-(see `.github/workflows/ci.yml`), so a clean release build should land inside
-those budgets.
+CI gates the release EFI at **≤ 1 MiB** and records QEMU/OVMF
+boot-to-soak-complete latency informationally (see
+`.github/workflows/ci.yml`); the **≤ 2 s** boot budget applies to
+Firecracker / Cloud Hypervisor and is asserted by the soak run below.
 
 ### Verify the boot locally (QEMU/OVMF)
 
