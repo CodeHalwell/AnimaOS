@@ -281,8 +281,16 @@ def main() -> None:
                 "type": "error",
                 "message": traceback.format_exc(),
             })
-        except Exception:
-            pass
+        except Exception as send_exc:
+            # The peer is likely gone (closed socket / broken pipe) during
+            # shutdown, so we cannot deliver the error frame. Don't re-raise
+            # from cleanup, but make the failure observable rather than
+            # silently swallowing it.
+            print(
+                f"[transformers_worker] failed to send error frame during "
+                f"shutdown: {send_exc!r}",
+                file=sys.stderr,
+            )
     finally:
         sock.close()
 
