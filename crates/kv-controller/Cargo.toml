@@ -15,11 +15,20 @@ std = ["dep:serde_json", "serde/std"]
 # f32::exp for bare-metal builds (mirrors memory's libm feature; std builds
 # use libc's libm and must NOT enable this).
 libm = ["dep:libm"]
+# turboquant: genuine E2.7 TurboQuant integration (TurboQuantizer). The
+# turboquant module in the `memory` crate is std-only (it pulls in serde_json
+# and the L2/L3 archive types), so this feature implies `std` and is OFF by
+# default — the no_std gate build (and the std-only default) are unaffected.
+turboquant = ["std", "dep:memory"]
 
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", optional = true }
 libm = { version = "0.2", optional = true, default-features = false }
+# memory: provides the real TurboQuant vector-quantisation substrate (E2.7).
+# Only needed for the `turboquant` feature; uses memory's default std build
+# (turboquant::* is gated behind memory's own `std` feature).
+memory = { path = "../memory", optional = true }
 
 [dev-dependencies]
 serde_json = { version = "1" }

@@ -49,9 +49,16 @@
 //!
 //! The [`controller::Quantizer`] trait is the integration seam for the
 //! TurboQuant substrate from Epic E2.7. The default [`controller::NoQuantizer`]
-//! is a transparent pass-through (similarity always = 1.0). When E2.7 merges,
-//! `TurboQuantizer` will implement [`controller::Quantizer`] and the combined
-//! controller+TurboQuant retention priority replaces the gate score alone.
+//! is a transparent pass-through (similarity always = 1.0).
+//!
+//! With the `turboquant` feature enabled, [`turboquant::TurboQuantizer`]
+//! implements [`controller::Quantizer`] backed by the real
+//! [`memory::turboquant::TurboQuant`] vector quantiser: the controller's gate
+//! score is multiplied by a normalised cosine similarity between the query and
+//! the stored quantised block representation, giving the combined
+//! controller+TurboQuant retention priority. Because `memory::turboquant` is
+//! std-only, the `turboquant` feature implies `std` and is OFF by default, so
+//! the no_std gate build is unaffected.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -65,6 +72,8 @@ pub mod eval;
 pub mod features;
 #[cfg(feature = "std")]
 pub mod trace;
+#[cfg(feature = "turboquant")]
+pub mod turboquant;
 #[cfg(feature = "std")]
 pub mod training;
 
@@ -86,3 +95,5 @@ pub use trace::{
 };
 #[cfg(feature = "std")]
 pub use training::{compile_training_pairs, TrainingCorpus, TrainingPair};
+#[cfg(feature = "turboquant")]
+pub use turboquant::TurboQuantizer;
