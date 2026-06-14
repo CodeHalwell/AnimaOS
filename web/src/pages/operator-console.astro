@@ -1,8 +1,14 @@
 ---
 import Layout from '../layouts/Layout.astro';
 import PageHero from '../components/PageHero.astro';
+import OperatorConsole from '../components/OperatorConsole';
+import type { SeedFeed, SeedVital } from '../components/OperatorConsole';
 
-const vitals = [
+// These arrays are the offline *seed* data: the live island renders them until
+// (and unless) a running console crate at PUBLIC_ANIMA_CONSOLE_URL streams real
+// telemetry over SSE. With no server reachable — e.g. the static documentation
+// build — they remain on screen exactly as before.
+const vitals: SeedVital[] = [
   { label: 'thermal', v: 0.12 },
   { label: 'compute', v: 0.34 },
   { label: 'memory', v: 0.21 },
@@ -10,15 +16,13 @@ const vitals = [
   { label: 'budget', v: 0.88 },
   { label: 'attention', v: 0.5 },
 ];
-const feed = [
+const feed: SeedFeed[] = [
   { cls: 'gate', tag: 'gate', body: 'INVOKE Frontier · value 0.82 vs threshold 0.40 — user-facing, high urgency' },
   { cls: 'task', tag: 'task→', body: '#9223372036854775808 summarise the overnight telemetry' },
   { cls: 'msg', tag: 'agent', body: '#9223372036854775808 (412 tok) Overnight: 2 builds, 1 thermal excursion at 03:14…' },
   { cls: 'audit', tag: 'MemoryPressureEvent', body: 'HighWater (6144/8192 tokens)' },
   { cls: 'veto', tag: 'DefenceVeto', body: 'PromptInjectionDetector blocked "ignore previous instructions"' },
 ];
-function pct(v: number) { return Math.round(v * 100); }
-function barColor(v: number) { return v > 0.85 ? '#ff6b6b' : v > 0.6 ? '#ffcf5c' : '#5cc8ff'; }
 ---
 
 <Layout
@@ -78,50 +82,13 @@ function barColor(v: number) { return v > 0.85 ? '#ff6b6b' : v > 0.6 ? '#ffcf5c'
         <p class="lede">
           The browser dashboard ships embedded in the agent and is served at
           <code>GET /</code>; a pure-ANSI terminal UI (<code>anima-console tui</code>)
-          renders the same stream over SSH. Below is a static snapshot.
+          renders the same stream over SSH. The snapshot below renders live from a
+          running console if one is reachable (set <code>PUBLIC_ANIMA_CONSOLE_URL</code>,
+          default <code>http://127.0.0.1:8088</code>) and falls back to sample data otherwise.
         </p>
       </div>
 
-      <div class="console-mock">
-        <div class="cm-head">
-          <span class="cm-brand">ANIMA<span style="color:#5cc8ff">OS</span></span>
-          <span class="cm-sub">operator console</span>
-          <span class="cm-conn">● connected</span>
-        </div>
-        <div class="cm-body">
-          <div class="cm-left">
-            <div class="cm-panel">
-              <h4>Vital signs <span style="float:right;color:#e6e9ef">stress 0.18</span></h4>
-              {vitals.map((row) => (
-                <div class="cm-vital">
-                  <div class="cm-row"><span>{row.label}</span><span>{row.v.toFixed(2)}</span></div>
-                  <div class="cm-bar"><span style={`width:${pct(row.v)}%;background:${barColor(row.v)}`}></span></div>
-                </div>
-              ))}
-            </div>
-            <div class="cm-panel">
-              <h4>Lifecycle</h4>
-              <div class="cm-sl"><span>state</span><b>Awake</b></div>
-              <div class="cm-sl"><span>sleep phase</span><b>—</b></div>
-              <div class="cm-sl"><span>agenda depth</span><b>1</b></div>
-              <div class="cm-sl"><span>uptime</span><b>0h 12m 04s</b></div>
-            </div>
-          </div>
-          <div class="cm-right cm-panel">
-            <h4>Event stream</h4>
-            <div class="cm-feed">
-              {feed.map((e) => (
-                <div class={`cm-ev ${e.cls}`}><span class="cm-tag">{e.tag}</span>{e.body}</div>
-              ))}
-            </div>
-            <div class="cm-input">
-              <span class="cm-prompt mono">send guidance ▸</span>
-              <span class="cm-caret">summarise the overnight logs</span>
-              <span class="cm-pill mono">High</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <OperatorConsole client:load vitals={vitals} feed={feed} seedStress={0.18} />
     </div>
   </section>
 
@@ -177,56 +144,7 @@ function barColor(v: number) { return v > 0.85 ? '#ff6b6b' : v > 0.6 ? '#ffcf5c'
   .chan p { color: var(--fg-2); line-height: 1.65; margin: 0; }
   .footnote { color: var(--fg-3); font-size: 0.85rem; margin-top: 1.5rem; }
 
-  /* Dashboard mock */
-  .console-mock {
-    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
-    background: #0b0e14; font-family: var(--mono); font-size: 0.8rem; color: #e6e9ef;
-  }
-  .cm-head {
-    display: flex; align-items: center; gap: 0.75rem;
-    padding: 0.7rem 1rem; border-bottom: 1px solid #232a3a;
-  }
-  .cm-brand { font-weight: 700; letter-spacing: 0.04em; }
-  .cm-sub { color: #8a93a6; font-size: 0.72rem; }
-  .cm-conn { margin-left: auto; color: #54d685; font-size: 0.72rem; }
-  .cm-body { display: grid; grid-template-columns: 280px 1fr; gap: 1rem; padding: 1rem; }
-  @media (max-width: 760px) { .cm-body { grid-template-columns: 1fr; } }
-  .cm-panel {
-    background: #141925; border: 1px solid #232a3a; border-radius: 10px; padding: 0.9rem 1rem;
-  }
-  .cm-left { display: flex; flex-direction: column; gap: 1rem; }
-  .cm-panel h4 {
-    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.12em;
-    color: #8a93a6; margin: 0 0 0.75rem;
-  }
-  .cm-vital { margin-bottom: 0.55rem; }
-  .cm-row { display: flex; justify-content: space-between; font-size: 0.72rem; }
-  .cm-bar { height: 6px; background: #0a0d13; border-radius: 4px; overflow: hidden; margin-top: 3px; }
-  .cm-bar > span { display: block; height: 100%; }
-  .cm-sl { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px dashed #232a3a; }
-  .cm-sl:last-child { border-bottom: 0; }
-  .cm-sl b { color: #5cc8ff; }
-  .cm-feed { display: flex; flex-direction: column; gap: 0.3rem; }
-  .cm-ev {
-    padding: 0.35rem 0.55rem; border-left: 3px solid #232a3a; border-radius: 0 6px 6px 0;
-    background: #10141e; font-size: 0.74rem; line-height: 1.5;
-  }
-  .cm-tag {
-    font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em;
-    color: #8a93a6; margin-right: 0.5rem;
-  }
-  .cm-ev.msg { border-left-color: #b794f6; } .cm-ev.msg .cm-tag { color: #b794f6; }
-  .cm-ev.gate { border-left-color: #5cc8ff; } .cm-ev.gate .cm-tag { color: #5cc8ff; }
-  .cm-ev.task { border-left-color: #54d685; } .cm-ev.task .cm-tag { color: #54d685; }
-  .cm-ev.audit { border-left-color: #ffcf5c; } .cm-ev.audit .cm-tag { color: #ffcf5c; }
-  .cm-ev.veto { border-left-color: #ff6b6b; } .cm-ev.veto .cm-tag { color: #ff6b6b; }
-  .cm-input {
-    display: flex; align-items: center; gap: 0.6rem; margin-top: 0.9rem;
-    background: #0a0d13; border: 1px solid #232a3a; border-radius: 8px; padding: 0.55rem 0.75rem;
-  }
-  .cm-prompt { color: #8a93a6; font-size: 0.72rem; }
-  .cm-caret { color: #e6e9ef; flex: 1; }
-  .cm-pill {
-    color: #04121c; background: #5cc8ff; border-radius: 6px; padding: 0.1rem 0.5rem; font-size: 0.7rem;
-  }
+  /* The dashboard mock now lives in the <OperatorConsole> island (with its own
+     scoped `.cm-*` styles) so the same markup renders whether it is showing live
+     SSE telemetry or the offline sample data. */
 </style>

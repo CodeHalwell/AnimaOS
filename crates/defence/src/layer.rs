@@ -13,10 +13,25 @@
 //! 3. [`RewardHackingDetector`]  — completion claims without evidence
 //! 4. [`GoalDriftMonitor`]       — divergence from original objective
 //!
-//! The caller is responsible for translating the returned [`ScreeningOutcome`]
-//! into audit entries (using `vita::AuditEntry::DefenceVeto` once that
-//! variant is added in a later PR) and for surfacing attention-demand events
-//! to the user.
+//! # Wiring
+//!
+//! [`DefenceLayer::screen`] is invoked by the cortex bridges in `vita`
+//! (`PythonCortexBridge`, `MockCortexBridge`, and the native bridge) at two
+//! points:
+//!
+//! 1. **Per `ToolCall`, before dispatch** — each proposed tool call is screened
+//!    as an [`ActionKind::ToolCall`](crate::types::ActionKind::ToolCall); a veto
+//!    blocks that tool from executing and is surfaced back to the cortex as a
+//!    tool error (the invocation continues so the agent can adapt).
+//! 2. **On the final `InvokeComplete` output** — screened as an
+//!    [`ActionKind::CompletionClaim`](crate::types::ActionKind::CompletionClaim)
+//!    before recording completion; a veto here aborts the invocation with a
+//!    `CortexError`.
+//!
+//! In both cases the returned [`ScreeningOutcome`] is translated into audit
+//! entries by `vita::push_defence_outcome` (emitting `AuditEntry::DefenceVeto`,
+//! `AuditEntry::ConstitutionVeto`, and `AuditEntry::AttentionDemandEscalated`);
+//! allowed actions produce no audit entry.
 
 use std::time::{Duration, Instant};
 

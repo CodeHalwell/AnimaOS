@@ -929,6 +929,7 @@ dependencies = [
  "config",
  "consent",
  "console",
+ "corpus",
  "diagnostics",
  "feedback",
  "interoception",
@@ -1263,6 +1264,7 @@ name = "kv-controller"
 version = "0.1.0"
 dependencies = [
  "libm",
+ "memory",
  "serde",
  "serde_json",
 ]

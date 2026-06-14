@@ -39,7 +39,8 @@ pub use audit::{AuditEntry, AuditLog};
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
-    CortexInvocationResult, FnDispatcher, MockCortexBridge, PythonCortexBridge, ToolDispatcher,
+    CortexInvocationResult, CortexPlanner, FnDispatcher, LlmBackendPlanner, LlmPlanRequest,
+    LlmPlanResponse, MockCortexBridge, PlanStep, PythonCortexBridge, ToolDispatcher,
     DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TURNS,
 };
 #[cfg(feature = "std")]

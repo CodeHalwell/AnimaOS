@@ -20,5 +20,5 @@ pub mod syscall;
 
 pub use frame_allocator::{FrameAllocation, FrameAllocator, FrameAllocatorError};
 pub use heap_allocator::BumpAllocator;
-pub use pcb::{AgentPcb, AgentPid, AgentState};
-pub use syscall::{SyscallEnum, SyscallError};
+pub use pcb::{AgentPcb, AgentPid, AgentState, TransitionError};
+pub use syscall::{dispatch, SyscallEnum, SyscallError, SyscallHandler, SyscallOutcome};

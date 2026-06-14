@@ -39,6 +39,7 @@
 //! ```
 
 pub mod constitution;
+pub mod embedding;
 pub mod goal_drift;
 pub mod injection;
 pub mod layer;
@@ -47,6 +48,7 @@ pub mod reward_hacking;
 pub mod types;
 
 pub use constitution::ConstitutionGuard;
+pub use embedding::EmbeddingSimilarity;
 pub use goal_drift::{GoalDriftMonitor, ObjectiveSimilarity, TermOverlapSimilarity};
 pub use injection::{HeuristicClassifier, InjectionClassifier, PromptInjectionDetector};
 pub use layer::{DefenceLayer, ScreeningOutcome};

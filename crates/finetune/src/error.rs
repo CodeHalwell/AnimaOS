@@ -36,6 +36,20 @@ pub enum FineTuneError {
         /// Name of the rejected method.
         method: String,
     },
+    /// The external training process (the out-of-process Unsloth/PEFT
+    /// entrypoint, S8.4.5/6) failed: it could not be spawned, exited non-zero,
+    /// or produced output the Rust side could not interpret.
+    ///
+    /// Returned by [`crate::backend::unsloth::UnslothFineTuner`] in `live`
+    /// builds when the runtime *is* present but the run did not complete
+    /// successfully. The `message` carries the captured cause (exit status +
+    /// stderr excerpt, a spawn error, or a result-parse failure).
+    ExternalBackend {
+        /// Identifier of the backend whose external process failed.
+        backend: String,
+        /// Human-readable explanation (spawn/exit/parse failure detail).
+        message: String,
+    },
 }
 
 impl fmt::Display for FineTuneError {
@@ -55,6 +69,9 @@ impl fmt::Display for FineTuneError {
                     f,
                     "adaptation method `{method}` not supported by this trainer"
                 )
+            }
+            FineTuneError::ExternalBackend { backend, message } => {
+                write!(f, "external training backend `{backend}` failed: {message}")
             }
         }
     }
