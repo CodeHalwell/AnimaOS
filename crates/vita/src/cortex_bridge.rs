@@ -186,6 +186,184 @@ impl<F: Fn(&str, &str) -> Result<String, String> + Send + Sync> ToolDispatcher f
     }
 }
 
+// ── Cortex LLM planning (E7 S7.4 — real LLM Plan/Revise over IPC) ─────────────
+
+/// A single step in a cortex plan, mirroring the Python-side
+/// `{tool_name, args, description}` shape.
+///
+/// `args` is the raw JSON-string argument blob the cortex will hand to the tool
+/// (kept as a `String` so a planner may emit arbitrary tool payloads without
+/// this crate needing each tool's schema).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanStep {
+    /// Name of the tool to invoke for this step.
+    pub tool_name: String,
+    /// JSON-string arguments for the tool.
+    pub args: String,
+    /// Human-readable description of what the step accomplishes.
+    pub description: String,
+}
+
+/// A planning request lifted from an inbound `LlmRequest` IPC frame.
+///
+/// This is a plain, dependency-free vita-owned struct so [`CortexPlanner`] can
+/// be implemented (and the bridge can handle `LlmRequest` frames) without the
+/// `llm-backends` dependency — the concrete [`LlmBackendPlanner`] adapter that
+/// *does* use `llm-backends` lives behind the `std` feature but the trait and
+/// these structs do not name any `llm-backends` type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmPlanRequest {
+    /// Backend hint the cortex selected (e.g. `"anthropic"`, `"ollama"`).
+    pub backend: String,
+    /// Either `"plan"` (initial planning) or `"revise"` (re-plan after observing).
+    pub purpose: String,
+    /// The task objective / description to plan for.
+    pub description: String,
+    /// Available tools, as `(name, description)` pairs.
+    pub tools: Vec<(String, String)>,
+    /// For `"revise"`: observations gathered so far. Empty for `"plan"`.
+    pub observations: Vec<String>,
+    /// For `"revise"`: the plan steps still pending. Empty for `"plan"`.
+    pub remaining_plan: Vec<PlanStep>,
+    /// Identity snapshot the cortex carries (opaque JSON).
+    pub identity: serde_json::Value,
+}
+
+/// A planning response sent back to the cortex as an `LlmResponse` IPC frame.
+///
+/// Carries EITHER a structured [`plan`](Self::plan) (a list of [`PlanStep`]) or
+/// free-form [`content`](Self::content) (a model string). A planner should set
+/// exactly one; if both are `None` the bridge treats it as an empty/failed
+/// response (see [`PythonCortexBridge`] `LlmRequest` handling).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmPlanResponse {
+    /// A structured plan (list of steps). Preferred for `"plan"`/`"revise"`.
+    pub plan: Option<Vec<PlanStep>>,
+    /// A free-form model string. Used when no structured plan is available.
+    pub content: Option<String>,
+}
+
+impl LlmPlanResponse {
+    /// Construct a response carrying a structured plan.
+    pub fn plan(steps: Vec<PlanStep>) -> Self {
+        Self {
+            plan: Some(steps),
+            content: None,
+        }
+    }
+
+    /// Construct a response carrying free-form content.
+    pub fn content(text: impl Into<String>) -> Self {
+        Self {
+            plan: None,
+            content: Some(text.into()),
+        }
+    }
+}
+
+/// A vita-side planner that answers cortex `LlmRequest` frames.
+///
+/// Object-safe so it can be stored as `Arc<dyn CortexPlanner>`. The trait and
+/// its request/response types are deliberately free of any `llm-backends` type
+/// so they compile in the default build; the concrete [`LlmBackendPlanner`]
+/// adapter over an `llm-backends` chat model is provided separately and is only
+/// compiled when the `llm-backends` dependency is available (the `std` feature).
+pub trait CortexPlanner: Send + Sync {
+    /// Produce a plan (or free-form content) for the given request.
+    fn respond(&self, req: &LlmPlanRequest) -> LlmPlanResponse;
+}
+
+/// Parse an inbound `LlmRequest` IPC frame into an [`LlmPlanRequest`].
+fn parse_llm_request(msg: &serde_json::Value) -> LlmPlanRequest {
+    let tools = msg["tools"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|t| {
+                    let name = t["name"].as_str().unwrap_or("").to_owned();
+                    let description = t["description"].as_str().unwrap_or("").to_owned();
+                    (name, description)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let observations = msg["observations"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|o| o.as_str().unwrap_or("").to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let remaining_plan = msg["remaining_plan"]
+        .as_array()
+        .map(|arr| arr.iter().map(parse_plan_step).collect())
+        .unwrap_or_default();
+
+    LlmPlanRequest {
+        backend: msg["backend"].as_str().unwrap_or("").to_owned(),
+        purpose: msg["purpose"].as_str().unwrap_or("plan").to_owned(),
+        description: msg["description"].as_str().unwrap_or("").to_owned(),
+        tools,
+        observations,
+        remaining_plan,
+        identity: msg["identity"].clone(),
+    }
+}
+
+/// Parse a single `{tool_name, args, description}` step from a JSON value.
+///
+/// `args` may arrive either as a JSON string (passed through verbatim) or as a
+/// JSON object (re-serialised to a string), matching the latitude the cortex
+/// side allows.
+fn parse_plan_step(v: &serde_json::Value) -> PlanStep {
+    let args = match &v["args"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "{}".to_owned(),
+        other => other.to_string(),
+    };
+    PlanStep {
+        tool_name: v["tool_name"].as_str().unwrap_or("").to_owned(),
+        args,
+        description: v["description"].as_str().unwrap_or("").to_owned(),
+    }
+}
+
+/// Serialise an [`LlmPlanResponse`] into an `LlmResponse` IPC frame, echoing the
+/// originating `request_id` when present.
+fn llm_response_frame(
+    request_id: Option<&serde_json::Value>,
+    response: &LlmPlanResponse,
+) -> serde_json::Value {
+    let mut frame = serde_json::json!({ "type": "LlmResponse" });
+    let obj = frame.as_object_mut().expect("json object");
+    if let Some(rid) = request_id {
+        obj.insert("request_id".to_owned(), rid.clone());
+    }
+    if let Some(plan) = &response.plan {
+        let steps: Vec<serde_json::Value> = plan
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "tool_name": s.tool_name,
+                    "args": s.args,
+                    "description": s.description,
+                })
+            })
+            .collect();
+        obj.insert("plan".to_owned(), serde_json::Value::Array(steps));
+    }
+    if let Some(content) = &response.content {
+        obj.insert(
+            "content".to_owned(),
+            serde_json::Value::String(content.clone()),
+        );
+    }
+    frame
+}
+
 // ── IPC wire helpers ──────────────────────────────────────────────────────────
 
 /// Maximum IPC frame body accepted from the cortex subprocess.
@@ -383,6 +561,12 @@ pub struct PythonCortexBridge {
     /// screened for injection, reward hacking, and goal drift; vetoed proposals
     /// are recorded via [`push_defence_outcome`] before returning an error.
     pub defence: Option<Arc<Mutex<DefenceLayer>>>,
+    /// Optional cortex planner. When `Some`, inbound `LlmRequest` frames (real
+    /// LLM Plan/Revise) are answered in-process via [`CortexPlanner::respond`]
+    /// and an `LlmResponse` frame is returned to the cortex. When `None`, an
+    /// `LlmRequest` is answered with an empty [`LlmPlanResponse`] (no `plan` and
+    /// no `content`), which lets the cortex fail cleanly rather than hang.
+    pub planner: Option<Arc<dyn CortexPlanner>>,
 }
 
 impl PythonCortexBridge {
@@ -393,12 +577,20 @@ impl PythonCortexBridge {
             state_dir,
             llm_backend: "mock".to_string(),
             defence: None,
+            planner: None,
         }
     }
 
     /// Attaches a defence layer that screens every `InvokeComplete` output.
     pub fn with_defence(mut self, layer: DefenceLayer) -> Self {
         self.defence = Some(Arc::new(Mutex::new(layer)));
+        self
+    }
+
+    /// Attaches a cortex planner that answers inbound `LlmRequest` frames so
+    /// real LLM Plan/Revise works end-to-end.
+    pub fn with_planner(mut self, planner: Arc<dyn CortexPlanner>) -> Self {
+        self.planner = Some(planner);
         self
     }
 
@@ -422,6 +614,150 @@ impl PythonCortexBridge {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| CortexError::SpawnFailed(e.to_string()))
+    }
+
+    /// Drives the post-connect IPC message loop on an already-connected
+    /// `stream`: sends the `InvokeRequest`, then handles `ToolCall`,
+    /// `InvokeComplete`, `LlmRequest` and `CortexError` frames until the cortex
+    /// completes (or faults).
+    ///
+    /// Returns the [`CortexInvocationResult`] together with the accumulated
+    /// observable evidence (successful tool results), which the caller feeds to
+    /// the reward-hacking detector during final-output screening.
+    ///
+    /// Factored out of [`invoke`](CortexBackend::invoke) so the loop — including
+    /// the `LlmRequest` Plan/Revise handling — can be exercised hermetically over
+    /// a plain socket pair in tests, without spawning the Python subprocess. The
+    /// process spawn, connect handshake, `ChildGuard` lifecycle, audit entries,
+    /// and final-output defence screening all remain in `invoke`.
+    fn run_message_loop(
+        &self,
+        stream: &mut UnixStream,
+        request: &InvokeRequest,
+        dispatch_tool: &dyn ToolDispatcher,
+        audit: &mut AuditLog,
+        start: Instant,
+    ) -> Result<(CortexInvocationResult, Vec<String>), CortexError> {
+        let task_id = request.task_id.clone();
+
+        // Send InvokeRequest.
+        let req_val = serde_json::json!({
+            "type": "InvokeRequest",
+            "task_id": request.task_id,
+            "description": request.description,
+            "tools": request.tools,
+            "identity": request.identity,
+        });
+        send_ipc(stream, &req_val)?;
+
+        // Message loop.
+        let mut first_action_latency = Duration::ZERO;
+        let mut tool_calls_made = 0usize;
+        // Accumulate tool call results as observable evidence for the reward-
+        // hacking detector: a non-empty list proves the cortex exercised tools
+        // rather than simply claiming work is done.
+        let mut observable_evidence: Vec<String> = Vec::new();
+        let result = loop {
+            let msg = recv_ipc(stream)?;
+            let msg = msg.ok_or(CortexError::UnexpectedEof)?;
+            let msg_type = msg["type"].as_str().unwrap_or("").to_owned();
+
+            match msg_type.as_str() {
+                "ToolCall" => {
+                    if tool_calls_made == 0 {
+                        first_action_latency = start.elapsed();
+                    }
+                    tool_calls_made += 1;
+
+                    let call_id = msg["call_id"].as_str().unwrap_or("").to_owned();
+                    let tool_name = msg["tool_name"].as_str().unwrap_or("").to_owned();
+                    let args = msg["args"].as_str().unwrap_or("{}").to_owned();
+
+                    // Screen the tool call BEFORE dispatch. On veto we do NOT
+                    // execute the tool; instead we send a ToolResponse error so
+                    // the cortex observes the block and may adapt (a single tool
+                    // veto does not abort the whole invocation — unlike the
+                    // final-output veto below).
+                    let (result_str, error_val): (String, serde_json::Value) = match screen_tool_call(
+                        &self.defence,
+                        audit,
+                        &request.agent_id,
+                        &task_id,
+                        &request.description,
+                        &tool_name,
+                        &args,
+                    )? {
+                        ToolScreening::Veto(reason) => {
+                            (String::new(), serde_json::Value::String(reason))
+                        }
+                        ToolScreening::Allow => match dispatch_tool.dispatch(&tool_name, &args) {
+                            Ok(r) => (r, serde_json::Value::Null),
+                            Err(e) => (String::new(), serde_json::Value::String(e)),
+                        },
+                    };
+
+                    // Record successful tool results as observable evidence.
+                    if !result_str.is_empty() {
+                        observable_evidence.push(format!("{tool_name}: {result_str}"));
+                    }
+
+                    send_ipc(
+                        stream,
+                        &serde_json::json!({
+                            "type": "ToolResponse",
+                            "call_id": call_id,
+                            "result": result_str,
+                            "error": error_val,
+                        }),
+                    )?;
+                }
+
+                "InvokeComplete" => {
+                    let output = msg["output"].as_str().unwrap_or("").to_owned();
+                    let summary = msg["episode_summary"].as_str().unwrap_or("").to_owned();
+                    break CortexInvocationResult {
+                        task_id: task_id.clone(),
+                        output,
+                        episode_summary: summary,
+                        tool_calls_made,
+                        latency_to_first_action: first_action_latency,
+                    };
+                }
+
+                "LlmRequest" => {
+                    // Real LLM Plan/Revise: the cortex delegates planning to vita.
+                    // Parse the frame, ask the attached planner (if any), and send
+                    // back an `LlmResponse` echoing `request_id`. With no planner
+                    // attached we reply with an empty `LlmResponse` (no `plan`, no
+                    // `content`) so the cortex observes the absence and fails
+                    // cleanly rather than blocking forever waiting for a reply.
+                    let request_id = msg.get("request_id");
+                    let plan_req = parse_llm_request(&msg);
+                    let plan_resp = match &self.planner {
+                        Some(planner) => planner.respond(&plan_req),
+                        None => LlmPlanResponse::default(),
+                    };
+                    let frame = llm_response_frame(request_id, &plan_resp);
+                    send_ipc(stream, &frame)?;
+                }
+
+                "CortexError" => {
+                    let msg_str = msg["message"].as_str().unwrap_or("unknown").to_owned();
+                    audit.push(AuditEntry::CortexFault {
+                        task_id: task_id.clone(),
+                        error: msg_str.clone(),
+                    });
+                    return Err(CortexError::CortexFault(msg_str));
+                }
+
+                other => {
+                    // Unknown message — log and ignore (forward compatibility).
+                    let _ = other;
+                }
+            }
+        };
+
+        Ok((result, observable_evidence))
     }
 }
 
@@ -519,106 +855,10 @@ impl CortexBackend for PythonCortexBridge {
         // and veto paths to consume the guard and do an explicit wait() instead.
         let guard = ChildGuard::new(child, socket_path.clone());
 
-        // Send InvokeRequest.
-        let req_val = serde_json::json!({
-            "type": "InvokeRequest",
-            "task_id": request.task_id,
-            "description": request.description,
-            "tools": request.tools,
-            "identity": request.identity,
-        });
-        send_ipc(&mut stream, &req_val)?;
-
-        // Message loop.
-        let mut first_action_latency = Duration::ZERO;
-        let mut tool_calls_made = 0usize;
-        // Accumulate tool call results as observable evidence for the reward-
-        // hacking detector: a non-empty list proves the cortex exercised tools
-        // rather than simply claiming work is done.
-        let mut observable_evidence: Vec<String> = Vec::new();
-        let result = loop {
-            let msg = recv_ipc(&mut stream)?;
-            let msg = msg.ok_or(CortexError::UnexpectedEof)?;
-            let msg_type = msg["type"].as_str().unwrap_or("").to_owned();
-
-            match msg_type.as_str() {
-                "ToolCall" => {
-                    if tool_calls_made == 0 {
-                        first_action_latency = start.elapsed();
-                    }
-                    tool_calls_made += 1;
-
-                    let call_id = msg["call_id"].as_str().unwrap_or("").to_owned();
-                    let tool_name = msg["tool_name"].as_str().unwrap_or("").to_owned();
-                    let args = msg["args"].as_str().unwrap_or("{}").to_owned();
-
-                    // Screen the tool call BEFORE dispatch. On veto we do NOT
-                    // execute the tool; instead we send a ToolResponse error so
-                    // the cortex observes the block and may adapt (a single tool
-                    // veto does not abort the whole invocation — unlike the
-                    // final-output veto below).
-                    let (result_str, error_val): (String, serde_json::Value) = match screen_tool_call(
-                        &self.defence,
-                        audit,
-                        &request.agent_id,
-                        &task_id,
-                        &request.description,
-                        &tool_name,
-                        &args,
-                    )? {
-                        ToolScreening::Veto(reason) => {
-                            (String::new(), serde_json::Value::String(reason))
-                        }
-                        ToolScreening::Allow => match dispatch_tool.dispatch(&tool_name, &args) {
-                            Ok(r) => (r, serde_json::Value::Null),
-                            Err(e) => (String::new(), serde_json::Value::String(e)),
-                        },
-                    };
-
-                    // Record successful tool results as observable evidence.
-                    if !result_str.is_empty() {
-                        observable_evidence.push(format!("{tool_name}: {result_str}"));
-                    }
-
-                    send_ipc(
-                        &mut stream,
-                        &serde_json::json!({
-                            "type": "ToolResponse",
-                            "call_id": call_id,
-                            "result": result_str,
-                            "error": error_val,
-                        }),
-                    )?;
-                }
-
-                "InvokeComplete" => {
-                    let output = msg["output"].as_str().unwrap_or("").to_owned();
-                    let summary = msg["episode_summary"].as_str().unwrap_or("").to_owned();
-                    break CortexInvocationResult {
-                        task_id: task_id.clone(),
-                        output,
-                        episode_summary: summary,
-                        tool_calls_made,
-                        latency_to_first_action: first_action_latency,
-                    };
-                }
-
-                "CortexError" => {
-                    let msg_str = msg["message"].as_str().unwrap_or("unknown").to_owned();
-                    audit.push(AuditEntry::CortexFault {
-                        task_id: task_id.clone(),
-                        error: msg_str.clone(),
-                    });
-                    // guard.drop() will kill + wait + cleanup automatically.
-                    return Err(CortexError::CortexFault(msg_str));
-                }
-
-                other => {
-                    // Unknown message — log and ignore (forward compatibility).
-                    let _ = other;
-                }
-            }
-        };
+        // Drive the post-connect IPC message loop. On any error the `guard`
+        // drops here, killing + reaping the child and removing the socket.
+        let (result, observable_evidence) =
+            self.run_message_loop(&mut stream, &request, dispatch_tool, audit, start)?;
 
         audit.push(AuditEntry::CortexInvoked {
             task_id: task_id.clone(),
@@ -1172,6 +1412,152 @@ impl CortexBackend for ChatCortexBridge {
             tool_calls_made,
             latency_to_first_action: first_action_latency,
         })
+    }
+}
+
+// ── LlmBackendPlanner — CortexPlanner over an llm-backends chat model ─────────
+
+/// A [`CortexPlanner`] implemented over an E8 [`ChatBackend`].
+///
+/// This is the concrete adapter that makes real LLM planning work end-to-end:
+/// when the Python cortex sends an `LlmRequest`, [`PythonCortexBridge`] parses
+/// it into an [`LlmPlanRequest`] and calls [`CortexPlanner::respond`], which
+/// this type implements by:
+///
+/// 1. Building a chat prompt — a system message (planner framing) plus a user
+///    message embedding the objective, the available tools, and, for `revise`,
+///    the observations gathered so far and the remaining plan.
+/// 2. Advertising each available tool to the model as an
+///    [`LlmToolSpec`](llm_backends::chat::ToolSpec) so the model can answer with
+///    structured tool calls.
+/// 3. Calling [`ChatBackend::chat_complete`](llm_backends::chat::ChatBackend::chat_complete)
+///    and converting the result: if the model emitted tool calls they become a
+///    structured [`plan`](LlmPlanResponse::plan); otherwise its text is returned
+///    as [`content`](LlmPlanResponse::content).
+///
+/// The adapter is provider-agnostic — it holds any `Arc<dyn ChatBackend>`, so in
+/// tests a scripted backend drives it without any network traffic. It is part of
+/// the `llm-backends`-using `cortex_bridge` module, so it is built only under
+/// vita's `std` feature (which enables the optional `llm-backends` dependency),
+/// keeping the default/no_std build unaffected.
+pub struct LlmBackendPlanner {
+    /// The chat/tool-calling backend used to produce plans.
+    backend: Arc<dyn ChatBackend>,
+}
+
+impl LlmBackendPlanner {
+    /// Construct a planner over the given chat backend.
+    pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Build the system + user chat messages for a plan/revise request.
+    fn build_messages(req: &LlmPlanRequest) -> Vec<ChatMessage> {
+        let tool_list = if req.tools.is_empty() {
+            "(none)".to_owned()
+        } else {
+            req.tools
+                .iter()
+                .map(|(name, desc)| format!("- {name}: {desc}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let identity_blurb = if req.identity.is_null() {
+            String::new()
+        } else {
+            format!("\n\nIdentity context:\n{}", req.identity)
+        };
+
+        let system = ChatMessage::system(format!(
+            "You are the planner for an autonomous agent. Given the objective and \
+             the available tools, produce a short ordered plan as a sequence of \
+             tool calls. Call only tools from the provided list. If no tool is \
+             needed, reply with a concise plain-text answer instead.{identity_blurb}"
+        ));
+
+        let mut user_body = format!(
+            "Objective:\n{}\n\nAvailable tools:\n{}",
+            req.description, tool_list
+        );
+
+        if req.purpose == "revise" {
+            if !req.observations.is_empty() {
+                user_body.push_str("\n\nObservations so far:");
+                for obs in &req.observations {
+                    user_body.push_str(&format!("\n- {obs}"));
+                }
+            }
+            if !req.remaining_plan.is_empty() {
+                user_body.push_str("\n\nRemaining plan:");
+                for step in &req.remaining_plan {
+                    user_body.push_str(&format!(
+                        "\n- {} ({}) args={}",
+                        step.tool_name, step.description, step.args
+                    ));
+                }
+            }
+            user_body.push_str(
+                "\n\nRevise the remaining plan in light of the observations and \
+                 reply with the updated sequence of tool calls.",
+            );
+        }
+
+        vec![system, ChatMessage::user(user_body)]
+    }
+
+    /// Map the request's `(name, description)` tools to llm-backends tool specs.
+    fn map_tools(req: &LlmPlanRequest) -> Vec<LlmToolSpec> {
+        req.tools
+            .iter()
+            .map(|(name, description)| LlmToolSpec {
+                name: name.clone(),
+                description: description.clone(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": true,
+                }),
+            })
+            .collect()
+    }
+
+    /// Convert a chat response into an [`LlmPlanResponse`].
+    ///
+    /// Prefers the model's structured tool calls (→ a [`PlanStep`] plan); if the
+    /// response carries no tool calls, the model's text becomes `content`.
+    fn convert_response(resp: llm_backends::chat::ChatResponse) -> LlmPlanResponse {
+        if resp.tool_calls.is_empty() {
+            return LlmPlanResponse::content(resp.content);
+        }
+        let steps = resp
+            .tool_calls
+            .into_iter()
+            .map(|call| PlanStep {
+                tool_name: call.name,
+                args: if call.arguments.is_empty() {
+                    "{}".to_owned()
+                } else {
+                    call.arguments
+                },
+                description: String::new(),
+            })
+            .collect();
+        LlmPlanResponse::plan(steps)
+    }
+}
+
+impl CortexPlanner for LlmBackendPlanner {
+    fn respond(&self, req: &LlmPlanRequest) -> LlmPlanResponse {
+        let messages = Self::build_messages(req);
+        let tools = Self::map_tools(req);
+        let cancel = CancellationToken::new();
+        match self.backend.chat_complete(&messages, &tools, &cancel) {
+            Ok(resp) => Self::convert_response(resp),
+            // On a backend failure return an empty response: the bridge relays an
+            // empty `LlmResponse`, letting the cortex fail cleanly rather than
+            // hang. (Errors are not silently turned into a fake plan.)
+            Err(_) => LlmPlanResponse::default(),
+        }
     }
 }
 
@@ -2057,5 +2443,273 @@ mod tests {
                 .any(|e| matches!(e, AuditEntry::DefenceVeto { .. })),
             "no veto entry expected for a clean tool call"
         );
+    }
+
+    // ── E7 S7.4 — PythonCortexBridge LlmRequest Plan/Revise over the socket ────
+    //
+    // These drive the real socket message loop ([`PythonCortexBridge::run_message_loop`])
+    // hermetically over a `UnixStream::pair()`, simulating the cortex peer in the
+    // test by writing `LlmRequest`/`ToolCall` frames and reading vita's replies —
+    // no Python subprocess and no network. This proves vita answers inbound
+    // `LlmRequest` frames so real LLM planning works end-to-end.
+
+    /// A stub [`CortexPlanner`] returning a canned plan (or content), and
+    /// recording the requests it received so tests can assert the frame was
+    /// parsed correctly.
+    struct StubPlanner {
+        response: LlmPlanResponse,
+        seen: Mutex<Vec<LlmPlanRequest>>,
+    }
+
+    impl StubPlanner {
+        fn with_plan(steps: Vec<PlanStep>) -> Self {
+            Self {
+                response: LlmPlanResponse::plan(steps),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CortexPlanner for StubPlanner {
+        fn respond(&self, req: &LlmPlanRequest) -> LlmPlanResponse {
+            self.seen.lock().expect("seen poisoned").push(req.clone());
+            self.response.clone()
+        }
+    }
+
+    fn python_bridge() -> PythonCortexBridge {
+        PythonCortexBridge::new(
+            std::env::temp_dir(),
+            std::env::temp_dir().join("anima-llmreq-test-state"),
+        )
+    }
+
+    /// vita answers an inbound `LlmRequest` with an `LlmResponse` carrying the
+    /// planner's canned plan (echoing `request_id`), then completes when the
+    /// cortex sends `InvokeComplete`.
+    #[test]
+    fn python_bridge_answers_llm_request_with_planned_response() {
+        let planner = Arc::new(StubPlanner::with_plan(vec![PlanStep {
+            tool_name: "clock".to_string(),
+            args: "{}".to_string(),
+            description: "read the clock".to_string(),
+        }]));
+        let bridge = python_bridge().with_planner(planner.clone());
+
+        let (mut peer, mut bridge_side) = UnixStream::pair().expect("socketpair");
+        let request = two_tool_request();
+
+        // Run the bridge loop on a thread; the test thread acts as the cortex.
+        let handle = std::thread::spawn(move || {
+            let dispatcher = InProcessDispatcher;
+            let mut audit = AuditLog::new();
+            let res = bridge.run_message_loop(
+                &mut bridge_side,
+                &request,
+                &dispatcher,
+                &mut audit,
+                Instant::now(),
+            );
+            (res.map(|(r, _)| r), bridge)
+        });
+
+        // The bridge first sends InvokeRequest; consume it.
+        let first = recv_ipc(&mut peer).expect("recv InvokeRequest").expect("frame");
+        assert_eq!(first["type"], "InvokeRequest");
+
+        // Cortex → vita: LlmRequest (plan) carrying a request_id.
+        send_ipc(
+            &mut peer,
+            &serde_json::json!({
+                "type": "LlmRequest",
+                "request_id": "req-42",
+                "backend": "anthropic",
+                "purpose": "plan",
+                "description": "do the thing",
+                "tools": [{"name": "clock", "description": "the clock"}],
+                "identity": {"name": "Test"},
+            }),
+        )
+        .expect("send LlmRequest");
+
+        // vita → cortex: LlmResponse echoing request_id and carrying the plan.
+        let resp = recv_ipc(&mut peer).expect("recv LlmResponse").expect("frame");
+        assert_eq!(resp["type"], "LlmResponse");
+        assert_eq!(resp["request_id"], "req-42", "request_id must be echoed");
+        let plan = resp["plan"].as_array().expect("plan array");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0]["tool_name"], "clock");
+        assert_eq!(plan[0]["args"], "{}");
+        assert_eq!(plan[0]["description"], "read the clock");
+
+        // Cortex → vita: InvokeComplete to end the loop.
+        send_ipc(
+            &mut peer,
+            &serde_json::json!({
+                "type": "InvokeComplete",
+                "output": "all done",
+                "episode_summary": "summary",
+            }),
+        )
+        .expect("send InvokeComplete");
+
+        let (res, _bridge) = handle.join().expect("loop thread");
+        let result = res.expect("loop must complete");
+        assert_eq!(result.output, "all done");
+        assert_eq!(result.episode_summary, "summary");
+
+        // The planner received a faithfully parsed request.
+        let seen = planner.seen.lock().expect("seen poisoned");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].backend, "anthropic");
+        assert_eq!(seen[0].purpose, "plan");
+        assert_eq!(seen[0].description, "do the thing");
+        assert_eq!(
+            seen[0].tools,
+            vec![("clock".to_string(), "the clock".to_string())]
+        );
+    }
+
+    /// With NO planner attached, an inbound `LlmRequest` is answered with an
+    /// empty `LlmResponse` (no `plan`, no `content`) — the documented clean
+    /// failure: the cortex receives a reply (so it does not hang) but no plan, so
+    /// it can fail cleanly.
+    #[test]
+    fn python_bridge_no_planner_answers_llm_request_with_empty_response() {
+        let bridge = python_bridge(); // no .with_planner(...)
+
+        let (mut peer, mut bridge_side) = UnixStream::pair().expect("socketpair");
+        let request = two_tool_request();
+
+        let handle = std::thread::spawn(move || {
+            let dispatcher = InProcessDispatcher;
+            let mut audit = AuditLog::new();
+            bridge
+                .run_message_loop(
+                    &mut bridge_side,
+                    &request,
+                    &dispatcher,
+                    &mut audit,
+                    Instant::now(),
+                )
+                .map(|(r, _)| r)
+        });
+
+        let _invoke = recv_ipc(&mut peer).expect("recv InvokeRequest").expect("frame");
+
+        send_ipc(
+            &mut peer,
+            &serde_json::json!({
+                "type": "LlmRequest",
+                "request_id": "req-none",
+                "backend": "ollama",
+                "purpose": "plan",
+                "description": "no planner here",
+                "tools": [],
+                "identity": null,
+            }),
+        )
+        .expect("send LlmRequest");
+
+        let resp = recv_ipc(&mut peer).expect("recv LlmResponse").expect("frame");
+        assert_eq!(resp["type"], "LlmResponse");
+        assert_eq!(resp["request_id"], "req-none", "request_id still echoed");
+        assert!(
+            resp.get("plan").is_none(),
+            "empty response carries no plan, got {resp}"
+        );
+        assert!(
+            resp.get("content").is_none(),
+            "empty response carries no content, got {resp}"
+        );
+
+        // End the loop cleanly.
+        send_ipc(
+            &mut peer,
+            &serde_json::json!({
+                "type": "InvokeComplete",
+                "output": "",
+                "episode_summary": "s",
+            }),
+        )
+        .expect("send InvokeComplete");
+
+        let result = handle.join().expect("loop thread").expect("loop completes");
+        assert_eq!(result.task_id, "test-task-1");
+    }
+
+    // ── LlmBackendPlanner output → LlmPlanResponse conversion (no network) ─────
+
+    /// When the backend emits structured tool calls, the planner converts them
+    /// into a [`PlanStep`] plan.
+    #[test]
+    fn llm_backend_planner_tool_calls_become_plan() {
+        let backend = Arc::new(MockChatBackend::scripted(vec![tool_response(
+            "c1",
+            "clock",
+            r#"{"tz":"utc"}"#,
+        )]));
+        let planner = LlmBackendPlanner::new(backend);
+
+        let req = LlmPlanRequest {
+            backend: "mock".to_string(),
+            purpose: "plan".to_string(),
+            description: "what time is it".to_string(),
+            tools: vec![("clock".to_string(), "the clock".to_string())],
+            observations: vec![],
+            remaining_plan: vec![],
+            identity: serde_json::Value::Null,
+        };
+
+        let resp = planner.respond(&req);
+        let plan = resp.plan.expect("structured tool calls become a plan");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].tool_name, "clock");
+        assert_eq!(plan[0].args, r#"{"tz":"utc"}"#);
+        assert!(resp.content.is_none());
+    }
+
+    /// When the backend emits only text, the planner returns it as `content`.
+    #[test]
+    fn llm_backend_planner_text_becomes_content() {
+        let backend = Arc::new(MockChatBackend::scripted(vec![text_response(
+            "no tools needed; the answer is 42",
+        )]));
+        let planner = LlmBackendPlanner::new(backend);
+
+        let req = LlmPlanRequest {
+            backend: "mock".to_string(),
+            purpose: "plan".to_string(),
+            description: "trivial".to_string(),
+            tools: vec![],
+            observations: vec![],
+            remaining_plan: vec![],
+            identity: serde_json::Value::Null,
+        };
+
+        let resp = planner.respond(&req);
+        assert_eq!(
+            resp.content.as_deref(),
+            Some("no tools needed; the answer is 42")
+        );
+        assert!(resp.plan.is_none());
+    }
+
+    /// A backend failure yields an empty response (clean failure, not a fake
+    /// plan), matching the bridge's no-planner / empty-response contract.
+    #[test]
+    fn llm_backend_planner_backend_error_yields_empty_response() {
+        let planner = LlmBackendPlanner::new(Arc::new(MockChatBackend::faulty()));
+        let req = LlmPlanRequest {
+            backend: "mock".to_string(),
+            purpose: "plan".to_string(),
+            description: "boom".to_string(),
+            tools: vec![],
+            observations: vec![],
+            remaining_plan: vec![],
+            identity: serde_json::Value::Null,
+        };
+        let resp = planner.respond(&req);
+        assert!(resp.plan.is_none() && resp.content.is_none());
     }
 }
