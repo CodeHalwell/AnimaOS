@@ -45,15 +45,17 @@ use senses::{SensoryBridge, SensoryPacket};
 ///
 /// Returns `true` to admit the syscall, `false` to deny it with
 /// [`SyscallError::PermissionDenied`].  This is the integration point for the
-/// object-capability token system: a future implementation resolves the running
-/// agent's capability set and only admits syscalls the agent holds a token for.
-pub type CapabilityPolicy = fn(&SyscallEnum) -> bool;
+/// object-capability token system: the scheduler builds a closure that captures
+/// the running agent's resolved capability set and only admits syscalls the
+/// agent holds a token for.  A boxed `Fn` (rather than a bare `fn` pointer) is
+/// required precisely so the policy can close over that per-agent state.
+pub type CapabilityPolicy = Box<dyn Fn(&SyscallEnum) -> bool + Send + Sync>;
 
 /// Default capability policy: admit every syscall.
 ///
-/// Replaced by a token-aware predicate once the object-capability system lands.
-pub fn allow_all(_syscall: &SyscallEnum) -> bool {
-    true
+/// Replaced by a token-aware closure once the object-capability system lands.
+pub fn allow_all() -> CapabilityPolicy {
+    Box::new(|_syscall| true)
 }
 
 /// Routes [`corpus`] syscalls to the live hosted-kernel subsystems.
@@ -90,7 +92,7 @@ impl<'a> KernelSyscallHandler<'a> {
         senses: &'a SensoryBridge,
         tools: &'a praxis::ToolRegistry,
     ) -> Self {
-        Self::with_policy(scheduler, agenda, frames, senses, tools, allow_all)
+        Self::with_policy(scheduler, agenda, frames, senses, tools, allow_all())
     }
 
     /// Constructs a handler with an explicit capability policy.
@@ -473,10 +475,6 @@ mod tests {
 
     // ── Capability seam ──────────────────────────────────────────────────────
 
-    fn deny_all(_syscall: &SyscallEnum) -> bool {
-        false
-    }
-
     #[test]
     fn capability_policy_denies_every_syscall() {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
@@ -487,7 +485,7 @@ mod tests {
             &frames,
             &senses,
             &tools,
-            deny_all,
+            Box::new(|_| false),
         );
         for sc in [
             SyscallEnum::Yield,
@@ -500,21 +498,20 @@ mod tests {
         }
     }
 
-    fn deny_senses(syscall: &SyscallEnum) -> bool {
-        !matches!(syscall, SyscallEnum::ReadSensoryPacket)
-    }
-
     #[test]
     fn capability_policy_can_deny_selectively() {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
         senses.packetize_text("hello");
+        // A closure that captures per-agent state (here a denied-syscall set)
+        // — exactly what a bare `fn` pointer could not express.
+        let denied = [SyscallEnum::ReadSensoryPacket];
         let mut h = KernelSyscallHandler::with_policy(
             &mut sched,
             &mut agenda,
             &frames,
             &senses,
             &tools,
-            deny_senses,
+            Box::new(move |sc| !denied.contains(sc)),
         );
         // Sensory read is denied by policy...
         assert_eq!(

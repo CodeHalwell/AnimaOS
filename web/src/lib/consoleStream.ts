@@ -311,7 +311,12 @@ export function subscribeConsole(opts: SubscribeOptions): Subscription {
     if (closed) return;
     const ev = parseFrame(m.data);
     if (!ev) return; // tolerate partial / unknown lines
-    snapshot = reduceEvent(snapshot, ev);
+    const next = reduceEvent(snapshot, ev);
+    // reduceEvent returns the same reference when nothing changed (Heartbeat /
+    // unknown frames); skip the callback so heartbeats don't trigger needless
+    // React state updates / rerenders.
+    if (next === snapshot) return;
+    snapshot = next;
     opts.onSnapshot(snapshot);
   };
 

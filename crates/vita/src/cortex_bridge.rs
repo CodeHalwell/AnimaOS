@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{push_defence_outcome, AuditEntry, AuditLog};
-use defence::{ActionKind, CortexProposal, DefenceLayer};
+use defence::{ActionKind, CortexProposal, DefenceLayer, VetoResult};
 
 // E7 S7.4 — Rust-native cortex tool-calling loop. These types come from the E8
 // chat/tool-calling abstraction in the `llm-backends` crate (std-only). They are
@@ -483,12 +483,20 @@ enum ToolScreening {
 /// screened payload.
 ///
 /// When `defence` is `None` this is a no-op returning [`ToolScreening::Allow`],
-/// so behaviour is identical to the pre-screening path. The screening outcome is
-/// always recorded via [`push_defence_outcome`] under the proposal type
-/// `"ToolCall"`, with the tool name as the blocked action.
+/// so behaviour is identical to the pre-screening path. Only a veto (and any
+/// attention escalation it triggers) is recorded via [`push_defence_outcome`]
+/// under the proposal type `"ToolCall"`, with the tool name as the blocked
+/// action; allowed tool calls produce no audit entry.
+///
+/// `tool_calls_completed` is the number of tool calls already completed in this
+/// invocation, forwarded to [`CortexProposal`] so the reward-hacking detector
+/// retains its proxy for observable work done so far.
 ///
 /// Returns `Err` only if the defence layer mutex is poisoned (mirrors the
 /// final-output screening error handling).
+// The parameters are all distinct screening inputs forwarded from the bridge
+// loops; bundling them into a struct would not improve clarity here.
+#[allow(clippy::too_many_arguments)]
 fn screen_tool_call(
     defence: &Option<Arc<Mutex<DefenceLayer>>>,
     audit: &mut AuditLog,
@@ -497,6 +505,7 @@ fn screen_tool_call(
     intent: &str,
     tool_name: &str,
     args: &str,
+    tool_calls_completed: usize,
 ) -> Result<ToolScreening, CortexError> {
     let Some(dl) = defence else {
         return Ok(ToolScreening::Allow);
@@ -513,18 +522,24 @@ fn screen_tool_call(
             tool_id: tool_name.to_owned(),
             payload: args.to_owned(),
         },
-        // The tool has not executed yet, so no new evidence is available and
-        // the count reflects only what completed before this call.
-        tool_calls_completed: 0,
+        // The tool about to be screened has not executed yet, so it contributes
+        // no evidence; the count reflects tool calls completed before this one.
+        tool_calls_completed,
         observable_evidence: Vec::new(),
     };
 
     let outcome = layer.screen(&proposal);
     let vetoed = outcome.is_vetoed();
-    let veto_reason = format!(
-        "tool call '{tool_name}' blocked by defence detector '{}'",
-        outcome.detector
-    );
+    // Include the detector's VetoReason detail so the error surfaced to the
+    // cortex is actionable (matched pattern, unsafe action, etc.).
+    let veto_reason = match &outcome.veto {
+        VetoResult::Veto(reason) => format!(
+            "tool call '{tool_name}' blocked by defence detector '{}': {}",
+            outcome.detector,
+            reason.description()
+        ),
+        VetoResult::Allow => String::new(),
+    };
     push_defence_outcome(
         audit,
         &outcome,
@@ -687,6 +702,8 @@ impl PythonCortexBridge {
                             &request.description,
                             &tool_name,
                             &args,
+                            // This call was already counted (incremented above).
+                            tool_calls_made.saturating_sub(1),
                         )? {
                             ToolScreening::Veto(reason) => {
                                 (String::new(), serde_json::Value::String(reason))
@@ -1016,6 +1033,8 @@ impl CortexBackend for MockCortexBridge {
                 &request.description,
                 tool_name,
                 args,
+                // Mock increments after screening, so this is the completed count.
+                tool_calls_made,
             )? {
                 ToolScreening::Veto(reason) => format!("[error: {reason}]"),
                 ToolScreening::Allow => dispatch_tool
@@ -1317,6 +1336,8 @@ impl CortexBackend for ChatCortexBridge {
                     &request.description,
                     &call.name,
                     &call.arguments,
+                    // This call was already counted (incremented above).
+                    tool_calls_made.saturating_sub(1),
                 )? {
                     ToolScreening::Veto(reason) => format!("[tool blocked: {reason}]"),
                     ToolScreening::Allow => {
@@ -1557,8 +1578,15 @@ impl CortexPlanner for LlmBackendPlanner {
             Ok(resp) => Self::convert_response(resp),
             // On a backend failure return an empty response: the bridge relays an
             // empty `LlmResponse`, letting the cortex fail cleanly rather than
-            // hang. (Errors are not silently turned into a fake plan.)
-            Err(_) => LlmPlanResponse::default(),
+            // hang. (Errors are not silently turned into a fake plan.) The error
+            // is logged so backend/API failures remain diagnosable.
+            Err(e) => {
+                eprintln!(
+                    "anima-cortex: LLM planning backend '{}' failed: {e:?}",
+                    req.backend
+                );
+                LlmPlanResponse::default()
+            }
         }
     }
 }

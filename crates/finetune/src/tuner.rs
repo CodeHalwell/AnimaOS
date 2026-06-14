@@ -284,6 +284,9 @@ impl FineTuner for FixtureFineTuner {
             merge_path: config.method.merge_path(),
             serving_tier: config.method.serving_tier(),
             weights_digest,
+            // The fixture tuner produces no on-disk artifacts.
+            adapter_path: None,
+            merged_gguf_path: None,
             provenance: Provenance {
                 base_model: config.base_model.clone(),
                 method: config.method.clone(),

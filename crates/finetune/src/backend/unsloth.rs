@@ -284,6 +284,8 @@ pub fn parse_training_result(stdout: &str) -> Result<AdapterArtifact, FineTuneEr
         merge_path: result.merge_path,
         serving_tier: result.serving_tier,
         weights_digest: result.weights_digest,
+        adapter_path: Some(result.adapter_path),
+        merged_gguf_path: result.merged_gguf_path,
         provenance: Provenance {
             base_model: result.provenance.base_model,
             method: result.provenance.method,
@@ -322,17 +324,6 @@ fn run_external_training(
     config: &FineTuneConfig,
     pairs: &[TrainingPair],
 ) -> Result<AdapterArtifact, FineTuneError> {
-    use std::io::Write;
-    use std::process::Command;
-
-    // 1. Build + serialise the job spec to a temp file.
-    let spec = build_job_spec(config, pairs);
-    let spec_json =
-        serde_json::to_vec_pretty(&spec).map_err(|e| FineTuneError::ExternalBackend {
-            backend: "unsloth".to_string(),
-            message: format!("failed to serialise job spec: {e}"),
-        })?;
-
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -344,13 +335,52 @@ fn run_external_training(
     let tmp_root = std::env::temp_dir().join(format!("anima-finetune-{unique}"));
     let spec_path = tmp_root.join("job_spec.json");
     let out_dir = tmp_root.join("out");
-    std::fs::create_dir_all(&out_dir).map_err(|e| FineTuneError::ExternalBackend {
+
+    // Run the external job. On success the produced artifacts remain under
+    // `out_dir` and are referenced by `AdapterArtifact::adapter_path`; on any
+    // failure the whole work dir is removed below so nothing leaks (S8.4.5/6).
+    let result = run_external_job(config, pairs, &spec_path, &out_dir);
+
+    // The job spec is a transient input — always remove it.
+    let _ = std::fs::remove_file(&spec_path);
+    match result {
+        // Keep `out_dir`: it holds the produced adapter/GGUF that
+        // `artifact.adapter_path` points at; the caller owns its lifecycle.
+        Ok(artifact) => Ok(artifact),
+        // Nothing usable was produced — remove the entire work dir.
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_root);
+            Err(e)
+        }
+    }
+}
+
+/// The fallible body of a `live` training run, factored out so the caller can
+/// clean up the temporary work dir regardless of which step fails.
+#[cfg(feature = "live")]
+fn run_external_job(
+    config: &FineTuneConfig,
+    pairs: &[TrainingPair],
+    spec_path: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<AdapterArtifact, FineTuneError> {
+    use std::io::Write;
+    use std::process::Command;
+
+    // 1. Build + serialise the job spec to the temp file.
+    let spec = build_job_spec(config, pairs);
+    let spec_json =
+        serde_json::to_vec_pretty(&spec).map_err(|e| FineTuneError::ExternalBackend {
+            backend: "unsloth".to_string(),
+            message: format!("failed to serialise job spec: {e}"),
+        })?;
+    std::fs::create_dir_all(out_dir).map_err(|e| FineTuneError::ExternalBackend {
         backend: "unsloth".to_string(),
         message: format!("failed to create work dir {}: {e}", out_dir.display()),
     })?;
     {
         let mut f =
-            std::fs::File::create(&spec_path).map_err(|e| FineTuneError::ExternalBackend {
+            std::fs::File::create(spec_path).map_err(|e| FineTuneError::ExternalBackend {
                 backend: "unsloth".to_string(),
                 message: format!(
                     "failed to create job spec file {}: {e}",
@@ -379,8 +409,8 @@ fn run_external_training(
     // 3. Spawn `python3 <entrypoint> <spec_path> <out_dir>`, capturing output.
     let output = Command::new("python3")
         .arg(&entrypoint)
-        .arg(&spec_path)
-        .arg(&out_dir)
+        .arg(spec_path)
+        .arg(out_dir)
         .output()
         .map_err(|e| FineTuneError::ExternalBackend {
             backend: "unsloth".to_string(),

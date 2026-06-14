@@ -357,8 +357,13 @@ class AgentLoop:
 
         A dict/list is re-serialised; a string is validated as JSON (and
         passed through) so downstream ``ToolCall`` consumers always receive a
-        JSON document.  Raises ``ValueError`` on a non-JSON string.
+        JSON document.  ``None`` becomes an empty object ``"{}"`` (the Rust side
+        treats null args as ``{}``), never the JSON string ``"null"`` which
+        would break tool-argument parsing.  Raises ``ValueError`` on a non-JSON
+        string.
         """
+        if args is None:
+            return "{}"
         if isinstance(args, str):
             try:
                 json.loads(args)

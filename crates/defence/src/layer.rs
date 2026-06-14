@@ -16,17 +16,22 @@
 //! # Wiring
 //!
 //! [`DefenceLayer::screen`] is invoked by the cortex bridges in `vita`
-//! (`PythonCortexBridge`, `MockCortexBridge`, and the native bridge): each
-//! screens the cortex `InvokeComplete` output as an
-//! [`ActionKind::CompletionClaim`](crate::types::ActionKind::CompletionClaim)
-//! before recording completion, and a veto aborts the invocation with a
-//! `CortexError`. The returned [`ScreeningOutcome`] is translated into audit
-//! entries by `vita::push_defence_outcome` (emitting `AuditEntry::DefenceVeto`,
-//! `AuditEntry::ConstitutionVeto`, and `AuditEntry::AttentionDemandEscalated`).
+//! (`PythonCortexBridge`, `MockCortexBridge`, and the native bridge) at two
+//! points:
 //!
-//! Note: screening currently runs at the final-output checkpoint, not on each
-//! individual `ToolCall` before execution; per-tool-call pre-execution gating
-//! is a future extension.
+//! 1. **Per `ToolCall`, before dispatch** — each proposed tool call is screened
+//!    as an [`ActionKind::ToolCall`](crate::types::ActionKind::ToolCall); a veto
+//!    blocks that tool from executing and is surfaced back to the cortex as a
+//!    tool error (the invocation continues so the agent can adapt).
+//! 2. **On the final `InvokeComplete` output** — screened as an
+//!    [`ActionKind::CompletionClaim`](crate::types::ActionKind::CompletionClaim)
+//!    before recording completion; a veto here aborts the invocation with a
+//!    `CortexError`.
+//!
+//! In both cases the returned [`ScreeningOutcome`] is translated into audit
+//! entries by `vita::push_defence_outcome` (emitting `AuditEntry::DefenceVeto`,
+//! `AuditEntry::ConstitutionVeto`, and `AuditEntry::AttentionDemandEscalated`);
+//! allowed actions produce no audit entry.
 
 use std::time::{Duration, Instant};
 

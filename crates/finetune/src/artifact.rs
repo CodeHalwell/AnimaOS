@@ -80,6 +80,13 @@ pub struct AdapterArtifact {
     pub serving_tier: ServingTier,
     /// A stable digest standing in for the (externally-produced) adapter weights.
     pub weights_digest: String,
+    /// Filesystem path to the produced adapter artifacts, when the backend writes
+    /// them to disk (e.g. the external Unsloth trainer). `None` for in-memory or
+    /// fixture artifacts that produce no on-disk files.
+    pub adapter_path: Option<String>,
+    /// Filesystem path to the merged GGUF for baked variants, when one was
+    /// produced. `None` for mountable adapters or fixture artifacts.
+    pub merged_gguf_path: Option<String>,
     /// Lineage / trust metadata.
     pub provenance: Provenance,
 }
@@ -131,6 +138,8 @@ mod tests {
             merge_path: MergePath::Clean,
             serving_tier: tier,
             weights_digest: "deadbeef".to_string(),
+            adapter_path: None,
+            merged_gguf_path: None,
             provenance: Provenance {
                 base_model: "base-q4".to_string(),
                 method: AdaptationMethod::default(),

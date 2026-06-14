@@ -105,12 +105,22 @@ impl TurboQuantizer {
     /// Registers (or replaces) the stored vector for `block_index`.
     ///
     /// The vector is quantised immediately via [`TurboQuant::encode`] and the
-    /// compact representation retained; the input slice is not kept. The vector
-    /// must have the quantiser's configured dimension — see
-    /// [`TurboQuant::dim`](memory::turboquant::TurboQuant::dim).
-    pub fn register_block(&mut self, block_index: usize, vector: &[f32]) {
+    /// compact representation retained; the input slice is not kept.
+    ///
+    /// The vector must have the quantiser's configured dimension (see
+    /// [`TurboQuant::dim`](memory::turboquant::TurboQuant::dim)). A
+    /// wrong-length vector is **ignored** (not registered) and `false` is
+    /// returned, because `TurboQuant::encode` would silently pad/truncate it
+    /// into a representation that is not comparable to correctly-sized queries,
+    /// yielding misleading similarity scores. Returns `true` when the block was
+    /// registered.
+    pub fn register_block(&mut self, block_index: usize, vector: &[f32]) -> bool {
+        if vector.len() != self.quant.dim() {
+            return false;
+        }
         let qv = self.quant.encode(vector);
         self.blocks.insert(block_index, qv);
+        true
     }
 
     /// Returns the number of registered blocks.

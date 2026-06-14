@@ -293,6 +293,8 @@ mod tests {
             merge_path: MergePath::Clean,
             serving_tier: ServingTier::MountableAdapter,
             weights_digest: "d".to_string(),
+            adapter_path: None,
+            merged_gguf_path: None,
             provenance: Provenance {
                 base_model: "base-q4".to_string(),
                 method: AdaptationMethod::default(),
