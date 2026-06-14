@@ -1,9 +1,31 @@
 import { useEffect, useState } from 'react';
+import { subscribeConsole } from '../lib/consoleStream';
 
-export default function StressGauge() {
+interface StressGaugeProps {
+  /**
+   * When true, the gauge subscribes to a running operator console's SSE feed
+   * (`subscribeConsole`) and tracks the live `aggregate_stress` vital. When the
+   * console is unreachable it falls back to the same random-drift demo the
+   * documentation pages have always shown, so the static build still renders.
+   * Defaults to false — every existing usage (`<StressGauge client:visible />`)
+   * keeps the offline demo behaviour unchanged.
+   */
+  live?: boolean;
+  /** Console origin override; otherwise PUBLIC_ANIMA_CONSOLE_URL / loopback. */
+  baseUrl?: string;
+  /** Optional bearer token, passed as `?token=` (EventSource has no headers). */
+  token?: string;
+}
+
+export default function StressGauge({ live = false, baseUrl, token }: StressGaugeProps = {}) {
   const [stress, setStress] = useState(0.32);
+  // Once a real Vitals event arrives we stop the demo drift and follow it.
+  const [isLive, setIsLive] = useState(false);
 
+  // Offline / documentation demo: gentle random drift. Disabled as soon as a
+  // live aggregate_stress reading takes over so the two never fight.
   useEffect(() => {
+    if (isLive) return;
     const t = setInterval(() => {
       setStress((s) => {
         const drift = (Math.random() - 0.5) * 0.1;
@@ -12,7 +34,25 @@ export default function StressGauge() {
       });
     }, 1200);
     return () => clearInterval(t);
-  }, []);
+  }, [isLive]);
+
+  // Live console subscription — only when explicitly opted in (operator console
+  // page). Connection errors leave `isLive` false, so the demo keeps running.
+  useEffect(() => {
+    if (!live) return;
+    const sub = subscribeConsole({
+      baseUrl,
+      token,
+      onSnapshot: (snap) => {
+        if (snap.aggregateStress != null) {
+          setIsLive(true);
+          setStress(snap.aggregateStress);
+        }
+      },
+      onError: () => setIsLive(false),
+    });
+    return () => sub.close();
+  }, [live, baseUrl, token]);
 
   const state =
     stress >= 0.9 ? { label: 'EMERGENCY', color: '#ff6b6b', action: 'emergency_consolidate()' } :
