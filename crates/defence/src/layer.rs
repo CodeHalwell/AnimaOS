@@ -13,10 +13,20 @@
 //! 3. [`RewardHackingDetector`]  — completion claims without evidence
 //! 4. [`GoalDriftMonitor`]       — divergence from original objective
 //!
-//! The caller is responsible for translating the returned [`ScreeningOutcome`]
-//! into audit entries (using `vita::AuditEntry::DefenceVeto` once that
-//! variant is added in a later PR) and for surfacing attention-demand events
-//! to the user.
+//! # Wiring
+//!
+//! [`DefenceLayer::screen`] is invoked by the cortex bridges in `vita`
+//! (`PythonCortexBridge`, `MockCortexBridge`, and the native bridge): each
+//! screens the cortex `InvokeComplete` output as an
+//! [`ActionKind::CompletionClaim`](crate::types::ActionKind::CompletionClaim)
+//! before recording completion, and a veto aborts the invocation with a
+//! `CortexError`. The returned [`ScreeningOutcome`] is translated into audit
+//! entries by `vita::push_defence_outcome` (emitting `AuditEntry::DefenceVeto`,
+//! `AuditEntry::ConstitutionVeto`, and `AuditEntry::AttentionDemandEscalated`).
+//!
+//! Note: screening currently runs at the final-output checkpoint, not on each
+//! individual `ToolCall` before execution; per-tool-call pre-execution gating
+//! is a future extension.
 
 use std::time::{Duration, Instant};
 
