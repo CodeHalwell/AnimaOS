@@ -9,6 +9,7 @@ name = "anima-hosted"
 path = "src/main.rs"
 
 [dependencies]
+corpus = { path = "../../crates/corpus" }
 vita = { path = "../../crates/vita" }
 memory = { path = "../../crates/memory" }
 interoception = { path = "../../crates/interoception" }

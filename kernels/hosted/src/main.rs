@@ -72,6 +72,7 @@
 mod cortex;
 mod doctor;
 mod init;
+mod syscall_router;
 
 use std::future::Future;
 use std::pin::Pin;
