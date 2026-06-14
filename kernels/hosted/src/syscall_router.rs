@@ -203,7 +203,8 @@ impl SyscallHandler for KernelSyscallHandler<'_> {
             .get(tool_id as usize)
             .ok_or(SyscallError::Invalid)?
             .clone();
-        let envelope = praxis::ToolEnvelope::new(praxis::Bus::Mcp, name, Vec::new(), tool_id as u64);
+        let envelope =
+            praxis::ToolEnvelope::new(praxis::Bus::Mcp, name, Vec::new(), tool_id as u64);
         match self.tools.dispatch(&envelope) {
             Ok(_output) => Ok(SyscallOutcome::ToolDispatched(DispatchTicket(
                 envelope.correlation_id,
@@ -369,7 +370,10 @@ mod tests {
     fn yield_routes_to_scheduler_boost() {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
         let mut h = KernelSyscallHandler::new(&mut sched, &mut agenda, &frames, &senses, &tools);
-        assert_eq!(dispatch(SyscallEnum::Yield, &mut h), Ok(SyscallOutcome::Yielded));
+        assert_eq!(
+            dispatch(SyscallEnum::Yield, &mut h),
+            Ok(SyscallOutcome::Yielded)
+        );
     }
 
     #[test]
@@ -383,7 +387,10 @@ mod tests {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
         let mut h = KernelSyscallHandler::new(&mut sched, &mut agenda, &frames, &senses, &tools);
         assert_eq!(h.tick(), 0);
-        assert_eq!(dispatch(SyscallEnum::SleepUntilTick, &mut h), Ok(SyscallOutcome::Slept));
+        assert_eq!(
+            dispatch(SyscallEnum::SleepUntilTick, &mut h),
+            Ok(SyscallOutcome::Slept)
+        );
         assert_eq!(h.tick(), 1);
     }
 
@@ -475,7 +482,12 @@ mod tests {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
         senses.packetize_text("hello");
         let mut h = KernelSyscallHandler::with_policy(
-            &mut sched, &mut agenda, &frames, &senses, &tools, deny_all,
+            &mut sched,
+            &mut agenda,
+            &frames,
+            &senses,
+            &tools,
+            deny_all,
         );
         for sc in [
             SyscallEnum::Yield,
@@ -497,7 +509,12 @@ mod tests {
         let (mut sched, mut agenda, frames, senses, tools) = fixtures();
         senses.packetize_text("hello");
         let mut h = KernelSyscallHandler::with_policy(
-            &mut sched, &mut agenda, &frames, &senses, &tools, deny_senses,
+            &mut sched,
+            &mut agenda,
+            &frames,
+            &senses,
+            &tools,
+            deny_senses,
         );
         // Sensory read is denied by policy...
         assert_eq!(
@@ -505,7 +522,10 @@ mod tests {
             Err(SyscallError::PermissionDenied)
         );
         // ...but yield is still admitted.
-        assert_eq!(dispatch(SyscallEnum::Yield, &mut h), Ok(SyscallOutcome::Yielded));
+        assert_eq!(
+            dispatch(SyscallEnum::Yield, &mut h),
+            Ok(SyscallOutcome::Yielded)
+        );
     }
 
     // ── AgentTable / PCB lifecycle ───────────────────────────────────────────
@@ -537,7 +557,7 @@ mod tests {
         let mut table = AgentTable::new();
         let pid = AgentPid(3);
         table.admit(pid, 0, 0).unwrap(); // -> Ready
-        // Ready cannot block directly.
+                                         // Ready cannot block directly.
         match table.block(pid) {
             Err(AgentTableError::Transition(TransitionError { from, to })) => {
                 assert_eq!(from, AgentState::Ready);

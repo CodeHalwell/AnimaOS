@@ -143,14 +143,19 @@ mod tests {
                 return Err(SyscallError::PermissionDenied);
             }
             self.last_tool = tool_id;
-            Ok(SyscallOutcome::ToolDispatched(DispatchTicket(tool_id as u64)))
+            Ok(SyscallOutcome::ToolDispatched(DispatchTicket(
+                tool_id as u64,
+            )))
         }
     }
 
     #[test]
     fn dispatch_yield() {
         let mut h = MockHandler::default();
-        assert_eq!(dispatch(SyscallEnum::Yield, &mut h), Ok(SyscallOutcome::Yielded));
+        assert_eq!(
+            dispatch(SyscallEnum::Yield, &mut h),
+            Ok(SyscallOutcome::Yielded)
+        );
     }
 
     #[test]

@@ -72,10 +72,10 @@ pub mod eval;
 pub mod features;
 #[cfg(feature = "std")]
 pub mod trace;
-#[cfg(feature = "turboquant")]
-pub mod turboquant;
 #[cfg(feature = "std")]
 pub mod training;
+#[cfg(feature = "turboquant")]
+pub mod turboquant;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 

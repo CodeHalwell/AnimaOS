@@ -678,23 +678,25 @@ impl PythonCortexBridge {
                     // the cortex observes the block and may adapt (a single tool
                     // veto does not abort the whole invocation — unlike the
                     // final-output veto below).
-                    let (result_str, error_val): (String, serde_json::Value) = match screen_tool_call(
-                        &self.defence,
-                        audit,
-                        &request.agent_id,
-                        &task_id,
-                        &request.description,
-                        &tool_name,
-                        &args,
-                    )? {
-                        ToolScreening::Veto(reason) => {
-                            (String::new(), serde_json::Value::String(reason))
-                        }
-                        ToolScreening::Allow => match dispatch_tool.dispatch(&tool_name, &args) {
-                            Ok(r) => (r, serde_json::Value::Null),
-                            Err(e) => (String::new(), serde_json::Value::String(e)),
-                        },
-                    };
+                    let (result_str, error_val): (String, serde_json::Value) =
+                        match screen_tool_call(
+                            &self.defence,
+                            audit,
+                            &request.agent_id,
+                            &task_id,
+                            &request.description,
+                            &tool_name,
+                            &args,
+                        )? {
+                            ToolScreening::Veto(reason) => {
+                                (String::new(), serde_json::Value::String(reason))
+                            }
+                            ToolScreening::Allow => match dispatch_tool.dispatch(&tool_name, &args)
+                            {
+                                Ok(r) => (r, serde_json::Value::Null),
+                                Err(e) => (String::new(), serde_json::Value::String(e)),
+                            },
+                        };
 
                     // Record successful tool results as observable evidence.
                     if !result_str.is_empty() {
@@ -2514,7 +2516,9 @@ mod tests {
         });
 
         // The bridge first sends InvokeRequest; consume it.
-        let first = recv_ipc(&mut peer).expect("recv InvokeRequest").expect("frame");
+        let first = recv_ipc(&mut peer)
+            .expect("recv InvokeRequest")
+            .expect("frame");
         assert_eq!(first["type"], "InvokeRequest");
 
         // Cortex → vita: LlmRequest (plan) carrying a request_id.
@@ -2533,7 +2537,9 @@ mod tests {
         .expect("send LlmRequest");
 
         // vita → cortex: LlmResponse echoing request_id and carrying the plan.
-        let resp = recv_ipc(&mut peer).expect("recv LlmResponse").expect("frame");
+        let resp = recv_ipc(&mut peer)
+            .expect("recv LlmResponse")
+            .expect("frame");
         assert_eq!(resp["type"], "LlmResponse");
         assert_eq!(resp["request_id"], "req-42", "request_id must be echoed");
         let plan = resp["plan"].as_array().expect("plan array");
@@ -2595,7 +2601,9 @@ mod tests {
                 .map(|(r, _)| r)
         });
 
-        let _invoke = recv_ipc(&mut peer).expect("recv InvokeRequest").expect("frame");
+        let _invoke = recv_ipc(&mut peer)
+            .expect("recv InvokeRequest")
+            .expect("frame");
 
         send_ipc(
             &mut peer,
@@ -2611,7 +2619,9 @@ mod tests {
         )
         .expect("send LlmRequest");
 
-        let resp = recv_ipc(&mut peer).expect("recv LlmResponse").expect("frame");
+        let resp = recv_ipc(&mut peer)
+            .expect("recv LlmResponse")
+            .expect("frame");
         assert_eq!(resp["type"], "LlmResponse");
         assert_eq!(resp["request_id"], "req-none", "request_id still echoed");
         assert!(

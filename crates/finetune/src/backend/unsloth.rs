@@ -252,8 +252,7 @@ pub fn parse_training_result(stdout: &str) -> Result<AdapterArtifact, FineTuneEr
     let line = stdout
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .next_back()
+        .rfind(|l| !l.is_empty())
         .ok_or_else(|| FineTuneError::ExternalBackend {
             backend: "unsloth".to_string(),
             message: "entrypoint produced no output to parse as a training result".to_string(),
@@ -302,7 +301,10 @@ pub fn parse_training_result(stdout: &str) -> Result<AdapterArtifact, FineTuneEr
 /// Only invoked from the `live` `run_external_training` and from unit tests, so
 /// the default non-test build (without `live`) never calls it.
 #[cfg_attr(not(any(feature = "live", test)), allow(dead_code))]
-fn resolve_entrypoint(home: Option<&str>, override_path: Option<&str>) -> Option<std::path::PathBuf> {
+fn resolve_entrypoint(
+    home: Option<&str>,
+    override_path: Option<&str>,
+) -> Option<std::path::PathBuf> {
     if let Some(p) = override_path {
         if !p.is_empty() {
             return Some(std::path::PathBuf::from(p));
@@ -325,10 +327,11 @@ fn run_external_training(
 
     // 1. Build + serialise the job spec to a temp file.
     let spec = build_job_spec(config, pairs);
-    let spec_json = serde_json::to_vec_pretty(&spec).map_err(|e| FineTuneError::ExternalBackend {
-        backend: "unsloth".to_string(),
-        message: format!("failed to serialise job spec: {e}"),
-    })?;
+    let spec_json =
+        serde_json::to_vec_pretty(&spec).map_err(|e| FineTuneError::ExternalBackend {
+            backend: "unsloth".to_string(),
+            message: format!("failed to serialise job spec: {e}"),
+        })?;
 
     let unique = format!(
         "{}-{}",
@@ -346,10 +349,14 @@ fn run_external_training(
         message: format!("failed to create work dir {}: {e}", out_dir.display()),
     })?;
     {
-        let mut f = std::fs::File::create(&spec_path).map_err(|e| FineTuneError::ExternalBackend {
-            backend: "unsloth".to_string(),
-            message: format!("failed to create job spec file {}: {e}", spec_path.display()),
-        })?;
+        let mut f =
+            std::fs::File::create(&spec_path).map_err(|e| FineTuneError::ExternalBackend {
+                backend: "unsloth".to_string(),
+                message: format!(
+                    "failed to create job spec file {}: {e}",
+                    spec_path.display()
+                ),
+            })?;
         f.write_all(&spec_json)
             .map_err(|e| FineTuneError::ExternalBackend {
                 backend: "unsloth".to_string(),
@@ -377,10 +384,7 @@ fn run_external_training(
         .output()
         .map_err(|e| FineTuneError::ExternalBackend {
             backend: "unsloth".to_string(),
-            message: format!(
-                "failed to spawn `python3 {}`: {e}",
-                entrypoint.display()
-            ),
+            message: format!("failed to spawn `python3 {}`: {e}", entrypoint.display()),
         })?;
 
     if !output.status.success() {
@@ -528,7 +532,10 @@ mod tests {
         assert_eq!(art.description, "grade-school maths");
         assert_eq!(art.format, AdapterFormat::LoraAdapter);
         assert_eq!(art.merge_path, crate::method::MergePath::Clean);
-        assert_eq!(art.serving_tier, crate::method::ServingTier::MountableAdapter);
+        assert_eq!(
+            art.serving_tier,
+            crate::method::ServingTier::MountableAdapter
+        );
         assert_eq!(art.weights_digest, "cafef00d");
         assert_eq!(art.provenance.base_model, "base-q4");
         assert_eq!(art.provenance.source_job, "maths");

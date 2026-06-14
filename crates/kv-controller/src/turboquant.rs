@@ -197,7 +197,10 @@ mod tests {
             "anti-correlated ({opposite}) should score well below aligned ({same})"
         );
         // Opposite direction → cosine ≈ -1 → unit ≈ 0.
-        assert!(opposite < 0.1, "anti-correlated should score ~0.0, got {opposite}");
+        assert!(
+            opposite < 0.1,
+            "anti-correlated should score ~0.0, got {opposite}"
+        );
     }
 
     #[test]
@@ -221,7 +224,10 @@ mod tests {
         );
         // And it must be notably lower than the self-similarity.
         let self_sim = tq.similarity(0, &a);
-        assert!(sim < self_sim - 0.3, "orthogonal {sim} should be well below self {self_sim}");
+        assert!(
+            sim < self_sim - 0.3,
+            "orthogonal {sim} should be well below self {self_sim}"
+        );
     }
 
     #[test]
@@ -272,8 +278,11 @@ mod tests {
         // the lower index (block 0).
         let mut baseline = KvController::with_pre_trained_weights();
         let base = baseline.select_blocks(&features, 1);
-        let base_retained: Vec<usize> =
-            base.iter().filter(|d| d.retain).map(|d| d.block_index).collect();
+        let base_retained: Vec<usize> = base
+            .iter()
+            .filter(|d| d.retain)
+            .map(|d| d.block_index)
+            .collect();
         assert_eq!(base_retained, vec![0], "NoQuantizer keeps the lowest index");
 
         // TurboQuantizer: register block 0 with a representation that is the
@@ -288,8 +297,11 @@ mod tests {
 
         let mut quantised = KvController::with_pre_trained_weights().with_quantizer(tq);
         let q = quantised.select_blocks(&features, 1);
-        let q_retained: Vec<usize> =
-            q.iter().filter(|d| d.retain).map(|d| d.block_index).collect();
+        let q_retained: Vec<usize> = q
+            .iter()
+            .filter(|d| d.retain)
+            .map(|d| d.block_index)
+            .collect();
 
         assert_eq!(
             q_retained,

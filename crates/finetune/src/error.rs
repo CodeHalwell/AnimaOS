@@ -71,10 +71,7 @@ impl fmt::Display for FineTuneError {
                 )
             }
             FineTuneError::ExternalBackend { backend, message } => {
-                write!(
-                    f,
-                    "external training backend `{backend}` failed: {message}"
-                )
+                write!(f, "external training backend `{backend}` failed: {message}")
             }
         }
     }

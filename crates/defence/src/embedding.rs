@@ -78,7 +78,9 @@ impl EmbeddingSimilarity {
         for word in Self::content_words(text) {
             any = true;
             // Word unigram feature.
-            *counts.entry(hash_feature(b"w:", word.as_bytes())).or_insert(0) += 1;
+            *counts
+                .entry(hash_feature(b"w:", word.as_bytes()))
+                .or_insert(0) += 1;
 
             // Character 3-gram features over the (normalised) word, padded so
             // short words still emit at least one n-gram.
@@ -151,24 +153,24 @@ impl ObjectiveSimilarity for EmbeddingSimilarity {
 fn normalise(word: &str) -> String {
     let canonical = match word {
         // Deletion family.
-        "delete" | "deletes" | "deleting" | "deleted" | "remove" | "removes"
-        | "removing" | "removed" | "erase" | "erases" | "erasing" | "purge" => "delete",
+        "delete" | "deletes" | "deleting" | "deleted" | "remove" | "removes" | "removing"
+        | "removed" | "erase" | "erases" | "erasing" | "purge" => "delete",
         // Authentication family.
-        "auth" | "authenticate" | "authentication" | "authenticating" | "login"
-        | "logins" | "signin" => "auth",
+        "auth" | "authenticate" | "authentication" | "authenticating" | "login" | "logins"
+        | "signin" => "auth",
         // Test family.
         "test" | "tests" | "testing" | "tested" | "spec" | "specs" => "test",
         // Compression / archive family.
-        "compress" | "compresses" | "compressing" | "compressed" | "zip"
-        | "zipped" | "archive" | "archives" | "archiving" => "compress",
+        "compress" | "compresses" | "compressing" | "compressed" | "zip" | "zipped" | "archive"
+        | "archives" | "archiving" => "compress",
         // Documentation family.
         "doc" | "docs" | "documentation" | "documents" | "document" => "doc",
         // Write / modify family.
-        "write" | "writes" | "writing" | "modify" | "modifies" | "modifying"
-        | "edit" | "edits" | "editing" | "update" | "updates" | "updating" => "write",
+        "write" | "writes" | "writing" | "modify" | "modifies" | "modifying" | "edit" | "edits"
+        | "editing" | "update" | "updates" | "updating" => "write",
         // Send / transmit family (exfiltration-adjacent vocabulary).
-        "send" | "sends" | "sending" | "transmit" | "transmits" | "upload"
-        | "uploads" | "uploading" | "exfiltrate" | "exfiltrating" => "send",
+        "send" | "sends" | "sending" | "transmit" | "transmits" | "upload" | "uploads"
+        | "uploading" | "exfiltrate" | "exfiltrating" => "send",
         // Build / compile family.
         "build" | "builds" | "building" | "compile" | "compiles" | "compiling" => "build",
         // Otherwise keep the word, dropping a trailing plural "s" as a crude
@@ -332,7 +334,11 @@ mod tests {
             "refactor the authentication module",
             "rework the auth subsystem",
         );
-        assert_eq!(r, VetoResult::Allow, "semantically aligned action should pass");
+        assert_eq!(
+            r,
+            VetoResult::Allow,
+            "semantically aligned action should pass"
+        );
     }
 
     #[test]
