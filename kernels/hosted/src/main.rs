@@ -5507,6 +5507,80 @@ fn cmd_jobs(args: &[String]) {
                 }
             }
         }
+        Some("propose-finetune") => {
+            // Corpus-growth fine-tune proposal (E32↔E8): if the accumulated
+            // training corpus has crossed the threshold and the cooldown has
+            // elapsed since the last proposal, enqueue a one-shot fine-tune job.
+            // Training stays operator-gated downstream (E8 adoption gate + E15
+            // approval queue) — this only *proposes*.
+            let threshold = flag_value(args, "--threshold")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_FINETUNE_THRESHOLD);
+            let cooldown_hours = flag_value(args, "--cooldown-hours")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_FINETUNE_COOLDOWN_HOURS);
+            let base_model = flag_value(args, "--base-model")
+                .or_else(|| std::env::var("ANIMA_MODEL").ok())
+                .unwrap_or_else(|| "base-q4".to_string());
+            let corpus_dir = flag_value(args, "--corpus-dir")
+                .or_else(|| std::env::var("ANIMA_CORPUS_DIR").ok())
+                .unwrap_or_else(|| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    format!("{home}/.anima/training_corpus")
+                });
+            let workspace = flag_value(args, "--workspace").unwrap_or_default();
+
+            let corpus_pairs = count_corpus_pairs(std::path::Path::new(&corpus_dir));
+            let last_proposed = latest_finetune_proposal_ns(&registry);
+            let cooldown_ns = cooldown_hours
+                .saturating_mul(3_600)
+                .saturating_mul(1_000_000_000);
+            let trigger = jobs::FineTuneTrigger::new(threshold, cooldown_ns);
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            match trigger.evaluate(corpus_pairs, &base_model, &workspace, now_ns, last_proposed) {
+                Some(job) => {
+                    let job_id = job.job_id.clone();
+                    let description = job.description.clone();
+                    let schedule_type = job.schedule.type_label().to_owned();
+                    match registry.add(job) {
+                        Ok(()) => {
+                            log.push(AuditEntry::JobScheduled {
+                                agent_id: AGENT_ID.to_owned(),
+                                job_id: job_id.clone(),
+                                description,
+                                schedule_type,
+                                workspace_id: workspace,
+                            });
+                            println!(
+                                "jobs: proposed fine-tune {job_id:?} \
+                                 (corpus={corpus_pairs} pairs ≥ threshold={threshold})"
+                            );
+                            if let Err(e) = registry.flush() {
+                                eprintln!("jobs: flush failed: {e}");
+                                cli_fail(1);
+                            }
+                            print_jobs_audit(&log);
+                        }
+                        Err(e) => {
+                            eprintln!("jobs: {e}");
+                            cli_fail(1);
+                        }
+                    }
+                }
+                None => {
+                    let reason = if corpus_pairs < threshold.max(1) {
+                        format!("corpus {corpus_pairs} pairs < threshold {threshold}")
+                    } else {
+                        "within cooldown since last proposal".to_string()
+                    };
+                    println!("jobs: no fine-tune proposed ({reason})");
+                }
+            }
+        }
         _ => {
             eprintln!("usage: anima-hosted jobs list");
             eprintln!("       anima-hosted jobs add --description <desc> [--cron <expr>|--at <ns>] [--workspace <id>] [--payload <json>]");
@@ -5514,6 +5588,7 @@ fn cmd_jobs(args: &[String]) {
             eprintln!("       anima-hosted jobs remove <job_id> [<reason>]");
             eprintln!("       anima-hosted jobs run <job_id>");
             eprintln!("       anima-hosted jobs poll");
+            eprintln!("       anima-hosted jobs propose-finetune [--threshold <n>] [--cooldown-hours <h>] [--base-model <m>] [--corpus-dir <path>]");
             eprintln!();
             eprintln!(
                 "note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)"
@@ -5527,6 +5602,49 @@ fn cmd_jobs(args: &[String]) {
 /// Extracts the value of a named CLI flag (`--flag <value>`).
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
+/// Default corpus size (accumulated training pairs) that triggers a fine-tune
+/// proposal via `jobs propose-finetune` (E32↔E8).
+const DEFAULT_FINETUNE_THRESHOLD: usize = 200;
+/// Default cooldown between successive fine-tune proposals, in hours.
+const DEFAULT_FINETUNE_COOLDOWN_HOURS: u64 = 24;
+
+/// Count accumulated training pairs in `corpus_dir`.
+///
+/// The sleep-phase compiler writes each pair as one line of `alpaca.jsonl` (and
+/// mirrors it into the conversation / chain-of-thought files), so counting the
+/// Alpaca file's non-empty lines yields the pair count without triple-counting.
+/// A missing corpus (agent never compiled any) counts as zero.
+fn count_corpus_pairs(corpus_dir: &std::path::Path) -> usize {
+    let file = corpus_dir.join("alpaca.jsonl");
+    std::fs::read_to_string(&file)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// Whether a job's payload is a fine-tune proposal (matches the payload `kind`
+/// discriminator written by `jobs::FineTuneTrigger`).
+fn job_is_finetune_proposal(job: &jobs::ScheduledJob) -> bool {
+    serde_json::from_str::<serde_json::Value>(&job.payload)
+        .ok()
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|k| k.as_str())
+                .map(|s| s == jobs::FineTuneProposalPayload::KIND)
+        })
+        .unwrap_or(false)
+}
+
+/// The `created_at_ns` of the most recent fine-tune proposal already in the
+/// registry, used as the trigger's cooldown anchor (so repeated invocations
+/// don't re-propose until the cooldown elapses).
+fn latest_finetune_proposal_ns(registry: &jobs::JobRegistry) -> Option<u64> {
+    registry
+        .iter()
+        .filter(|(_, j)| job_is_finetune_proposal(j))
+        .map(|(_, j)| j.created_at_ns)
+        .max()
 }
 
 /// Prints E32 job-related audit entries to stdout.
@@ -7196,4 +7314,68 @@ fn main() {
     print_audit(&agent_a);
     println!();
     print_audit(&agent_b);
+}
+
+#[cfg(test)]
+mod finetune_proposal_tests {
+    use super::{count_corpus_pairs, job_is_finetune_proposal, latest_finetune_proposal_ns};
+    use jobs::{FineTuneTrigger, JobRegistry, JobSchedule, ScheduledJob};
+
+    #[test]
+    fn count_corpus_pairs_counts_nonempty_alpaca_lines() {
+        let dir = std::env::temp_dir().join(format!("anima-corpus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("alpaca.jsonl"),
+            "{\"a\":1}\n{\"a\":2}\n\n{\"a\":3}\n",
+        )
+        .unwrap();
+        assert_eq!(count_corpus_pairs(&dir), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn count_corpus_pairs_missing_dir_is_zero() {
+        let dir = std::path::Path::new("/nonexistent/anima/corpus/xyz");
+        assert_eq!(count_corpus_pairs(dir), 0);
+    }
+
+    #[test]
+    fn job_is_finetune_proposal_matches_only_trigger_payloads() {
+        let ft = FineTuneTrigger::new(10, 0).build_job(20, "base-q4", "", 5);
+        assert!(job_is_finetune_proposal(&ft));
+
+        let other = ScheduledJob::new(
+            "backup",
+            "",
+            r#"{"kind":"backup"}"#,
+            JobSchedule::Immediate,
+            1,
+        );
+        assert!(!job_is_finetune_proposal(&other));
+
+        let opaque = ScheduledJob::new("x", "", "not json", JobSchedule::Immediate, 1);
+        assert!(!job_is_finetune_proposal(&opaque));
+    }
+
+    #[test]
+    fn latest_finetune_proposal_ns_returns_max_over_proposals_only() {
+        let mut reg = JobRegistry::in_memory();
+        assert_eq!(latest_finetune_proposal_ns(&reg), None);
+
+        let trigger = FineTuneTrigger::new(10, 0);
+        reg.add(trigger.build_job(20, "base-q4", "", 100)).unwrap();
+        reg.add(trigger.build_job(30, "base-q4", "", 300)).unwrap();
+        // A non-proposal job with a larger timestamp must be ignored.
+        reg.add(ScheduledJob::new(
+            "backup",
+            "",
+            r#"{"kind":"backup"}"#,
+            JobSchedule::Immediate,
+            900,
+        ))
+        .unwrap();
+
+        assert_eq!(latest_finetune_proposal_ns(&reg), Some(300));
+    }
 }
