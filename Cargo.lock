@@ -263,7 +263,10 @@ dependencies = [
 name = "comms"
 version = "0.1.0"
 dependencies = [
+ "actuators",
+ "reqwest",
  "senses",
+ "serde_json",
 ]
 
 [[package]]

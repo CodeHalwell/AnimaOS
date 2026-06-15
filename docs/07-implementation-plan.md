@@ -1608,7 +1608,9 @@ All stories S10.1–S10.5 ✅ (fixture default; live channel delivery behind
 See `docs/15-communication-multimodal.md`.
 
 **Dependencies.** E6 (operator seam, SensoryBridge), E7 (egress guard
-for outbound channel calls — wired once E7 merges).
+for outbound channel calls — now wired: live `TelegramAdapter`/`SlackAdapter`
+sends screen the Bot API / Slack host through `actuators::egress::EgressGuard`
+before reading a token or opening a socket).
 
 **Stories.**
 - S10.1 `ChannelGateway` trait + `anima-comms` host binary. ✅
@@ -1618,7 +1620,10 @@ for outbound channel calls — wired once E7 merges).
 - S10.2 First channel adapters: Telegram and Slack. ✅
   (`crates/comms/src/adapters.rs` — `TelegramAdapter` and `SlackAdapter` with
   `FixtureQueue`; all adapters default to fixture mode; live mode gated by
-  `ANIMA_COMMS_LIVE`; 16 unit tests; thread-safety proved via clone-sharing test)
+  `ANIMA_COMMS_LIVE` (runtime) + the `live` Cargo feature (build-time). Live
+  text sends hit Telegram `sendMessage` / Slack `chat.postMessage` via
+  `reqwest::blocking`, screened through `actuators::egress::EgressGuard` first;
+  18 unit tests; thread-safety proved via clone-sharing test)
 - S10.3 Image modality (afferent + efferent). ✅
   (`crates/senses/src/lib.rs` — `SensoryPacket::Image { bytes, mime, caption }`;
   `HumanGuidance::max_image_bytes` policy bound; `packetize_image_checked()` with
@@ -3337,6 +3342,11 @@ only `users` + `serde` / `serde_json`).
   sections, total_records).  `anima data export <user_id> [--output <path>]`
   writes the bundle as pretty-printed JSON.  `AuditEntry::DataExported` records
   the export. ✅
+  Each consented category is filled from the store that owns it: identity facts
+  from the user profile, episodic memory + usage stats from the per-user
+  `SessionStore` (`SessionQuery::for_user`), and the agent-global knowledge
+  graph reported as zero-row (not per-subject-keyed, so excluded from a DSAR to
+  avoid exposing other users' data).
   (`consent::DataExportBuilder` / `DataExportBundle`; 3 unit tests; doc-test;
   `anima data export` CLI)
 

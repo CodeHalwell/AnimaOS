@@ -2121,6 +2121,7 @@ fn print_session_audit(log: &AuditLog) {
 /// 4. All operations are audited with E23 `AuditEntry` variants.
 fn cmd_data(args: &[String]) {
     use consent::{build_revocation_directive, scan_expired_grants, DataExportBuilder};
+    use sessions::{SessionQuery, SessionStore};
     use users::{DataCategory, UserRegistry};
 
     const AGENT_ID: &str = "anima";
@@ -2196,17 +2197,74 @@ fn cmd_data(args: &[String]) {
                                 "facts": rec.profile.facts,
                             }),
                         );
+                        // Open the per-user conversation store once; it backs
+                        // both the episodic-memory and usage-stats sections. A
+                        // missing store (agent never persisted any sessions) is
+                        // "no records", not an error.
+                        let session_store =
+                            SessionStore::open(SessionStore::default_path(AGENT_ID)).ok();
+                        let user_sessions = session_store
+                            .as_ref()
+                            .map(|s| s.list(&SessionQuery::for_user(user_id.as_str())))
+                            .unwrap_or_default();
+                        let total_turns: usize = user_sessions.iter().map(|s| s.turns.len()).sum();
+
+                        // Populate every consented category with the subject's
+                        // actual retained data, drawn from the store that owns
+                        // it. Each `DataCategory` maps to a concrete source.
                         for cat in DataCategory::all() {
-                            if rec.consent.is_consented(*cat, now_ns) {
-                                builder.add_section(
-                                    *cat,
-                                    1,
-                                    serde_json::json!({
-                                        "user_id": user_id,
-                                        "category": cat.as_str(),
-                                        "note": "placeholder — wire to store for full export"
-                                    }),
-                                );
+                            if !rec.consent.is_consented(*cat, now_ns) {
+                                continue;
+                            }
+                            match cat {
+                                DataCategory::IdentityFacts => {
+                                    builder.add_section(
+                                        *cat,
+                                        rec.profile.facts.len(),
+                                        serde_json::json!({ "facts": rec.profile.facts }),
+                                    );
+                                }
+                                DataCategory::EpisodicMemory => {
+                                    // Full conversation history for this subject.
+                                    builder.add_section(
+                                        *cat,
+                                        user_sessions.len(),
+                                        serde_json::json!({
+                                            "sessions": user_sessions,
+                                            "total_turns": total_turns,
+                                        }),
+                                    );
+                                }
+                                DataCategory::UsageStats => {
+                                    builder.add_section(
+                                        *cat,
+                                        1,
+                                        serde_json::json!({
+                                            "created_at_ns": rec.profile.created_at_ns,
+                                            "last_seen_ns": rec.profile.last_seen_ns,
+                                            "session_count": user_sessions.len(),
+                                            "total_turns": total_turns,
+                                        }),
+                                    );
+                                }
+                                DataCategory::KnowledgeCorpus => {
+                                    // The E27 knowledge graph is agent-global and
+                                    // not keyed per subject, so a per-user DSAR
+                                    // cannot slice one user's entries out of it
+                                    // without exposing others'. Report the
+                                    // category honestly with zero rows rather
+                                    // than leaking unrelated data.
+                                    builder.add_section(
+                                        *cat,
+                                        0,
+                                        serde_json::json!({
+                                            "entries": [],
+                                            "note": "knowledge-corpus entries are not retained \
+                                                     per-user in this build; nothing to export \
+                                                     for this subject",
+                                        }),
+                                    );
+                                }
                             }
                         }
                         let bundle = builder.build(user_id, AGENT_ID, now_ns);

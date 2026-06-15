@@ -9,5 +9,17 @@ description = "Channel gateway framework for AnimaOS: Telegram/Slack adapters, i
 name = "anima-comms"
 path = "src/bin/anima-comms.rs"
 
+[features]
+default = []
+# Enable live channel sends (Telegram/Slack HTTP). Off by default to keep CI
+# hermetic — mirrors the `actuators` crate's `live` gate. Outbound URLs are
+# always screened through `actuators::EgressGuard` regardless of this flag.
+live = ["dep:reqwest", "dep:serde_json"]
+
 [dependencies]
 senses = { path = "../senses" }
+# EgressGuard (E7) screens every outbound URL before a live send.
+actuators = { path = "../actuators" }
+# Only needed on the live HTTP path: request bodies + response parsing.
+serde_json = { workspace = true, optional = true }
+reqwest = { version = "0.13", features = ["blocking", "json"], default-features = false, optional = true }
