@@ -29,8 +29,12 @@
       plan→tool→observe→answer loop — has been exercised against a real local
       HTTP server (`ANIMA_COMPAT_LIVE=1`), so what remains on a real host is
       Ollama-specific behaviour, not the wire plumbing.
-- [ ] Decide the exposed-deployment story: reverse-proxy/TLS guidance and a
-      non-empty `ANIMA_CONSOLE_TOKEN` requirement outside loopback.
+- [~] Exposed-deployment story: the non-empty `ANIMA_CONSOLE_TOKEN` requirement
+      outside loopback is now **enforced** — `ConsoleServer::bind` refuses
+      (`PermissionDenied`) to bind any non-loopback address (including the
+      `0.0.0.0` / `::` wildcards) without a token, and `anima-hosted serve`
+      surfaces the reason instead of starting unauthenticated; `.env.example`
+      documents it. Still open: reverse-proxy/TLS deployment guidance doc.
 - [ ] Publish a versioned release image (`:v*`) once the above is validated.
 
 ## Pillar 2 — Bare-metal ready

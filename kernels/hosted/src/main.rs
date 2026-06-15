@@ -6615,9 +6615,12 @@ fn cmd_serve() {
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
-    let addr = console
-        .start()
-        .expect("operator console failed to bind — is the port already in use?");
+    let addr = console.start().unwrap_or_else(|e| {
+        // Surface the real reason — e.g. the exposure-policy refusal to bind a
+        // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
+        eprintln!("anima-hosted: operator console failed to start: {e}");
+        std::process::exit(1);
+    });
     let token_note = std::env::var("ANIMA_CONSOLE_TOKEN")
         .map(|t| !t.is_empty())
         .unwrap_or(false);
