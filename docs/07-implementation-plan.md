@@ -1505,7 +1505,9 @@ for live mode).
   `AdapterLibrary` registration, `--quiet` flag; 9 unit tests; `ANIMA_FINETUNE_LIVE=1`
   live-mode diagnostic). `crates/finetune` (`anima-finetune`) ships `FineTuner` trait,
   `FixtureFineTuner`, `AdaptationMethod` (incl. HRA), `AdapterLibrary`
-  (mount/evict/provenance), and the eval harness (S8.4.2/.4/.7/.8 ✅). Real Unsloth/HRA
+  (mount/evict/provenance + S8.4.8 adoption gate: `decide_adoption` fuses the
+  eval harness with the E13 alignment outcome, and `mount_gated` refuses any
+  un-adopted adapter), and the eval harness (S8.4.2/.4/.7/.8 ✅). Real Unsloth/HRA
   GPU training + merge/quant (S8.4.5/.6) remain external/live-gated —
   `UnslothFineTuner` is a `live`-gated skeleton returning `BackendUnavailable`. ⬜
 

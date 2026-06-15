@@ -94,9 +94,15 @@ TUI and COM1 serial bridge for the kernel.
 - [ ] Point `finetune::UnslothFineTuner`'s `live` gate at the same flow and
       ingest the manifest into the adapter library (E8 S8.4.8), giving the
       Rust side custody of provenance + eval.
-- [ ] Eval gate before adoption: a sleep-phase-trained adapter must pass the
-      E8 eval harness + E13 alignment evals before the router mounts it;
-      surface adoption in the approval queue (Pillar 3).
+- [x] Eval gate before adoption — DONE: `anima_finetune::decide_adoption`
+      fuses the E8 eval harness (S8.4.7 adoption rule + S8.4.6 merge-fidelity
+      floor) with the E13 alignment outcome into an `AdoptionDecision`. The
+      library now distinguishes *registered* from *adopted*:
+      `AdapterLibrary::mount_gated` refuses any adapter that has not cleared the
+      gate (`MountError::NotAdopted`), and re-training or eviction revokes the
+      clearance. Covered by unit tests + a `train → register → evaluate →
+      decide → mount_gated` integration test. Still open: surfacing the
+      `AdoptionDecision` in the operator approval queue UI (Pillar 3).
 - [ ] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
       the corpus crosses a size threshold — closing the autonomy loop.
 

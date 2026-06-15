@@ -44,6 +44,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adoption;
 pub mod artifact;
 pub mod backend;
 pub mod dataset;
@@ -54,6 +55,7 @@ pub mod library;
 pub mod method;
 pub mod tuner;
 
+pub use adoption::{decide_adoption, AdoptionDecision, AdoptionPolicy, AlignmentOutcome};
 pub use artifact::{AdapterArtifact, AdapterFormat, Provenance};
 pub use dataset::{TrainingPair, TrainingSet};
 pub use error::FineTuneError;

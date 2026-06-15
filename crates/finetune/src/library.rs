@@ -19,9 +19,10 @@
 //! concern (S8.4.8 "library hygiene"); on-disk eviction in the real library
 //! would additionally delete the adapter files.
 
+use crate::adoption::AdoptionDecision;
 use crate::artifact::AdapterArtifact;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// Identifies a place an adapter can be mounted: a serving `tier` (e.g.
@@ -89,6 +90,13 @@ pub enum MountError {
         /// The mount point that was empty.
         mount_id: MountId,
     },
+    /// The adapter is registered and mountable in principle, but has not cleared
+    /// the adoption gate (eval harness + alignment), so [`AdapterLibrary::mount_gated`]
+    /// refuses to put it on a live serving tier.
+    NotAdopted {
+        /// The id of the un-adopted adapter.
+        adapter_id: String,
+    },
 }
 
 impl fmt::Display for MountError {
@@ -112,6 +120,10 @@ impl fmt::Display for MountError {
                 "nothing mounted at tier `{}` / model `{}`",
                 mount_id.tier, mount_id.model
             ),
+            MountError::NotAdopted { adapter_id } => write!(
+                f,
+                "adapter `{adapter_id}` has not passed the adoption gate (eval + alignment)"
+            ),
         }
     }
 }
@@ -125,6 +137,10 @@ pub struct AdapterLibrary {
     policy: EvictionPolicy,
     adapters: HashMap<String, AdapterArtifact>,
     mounts: HashMap<MountId, String>,
+    /// Adapter ids that have cleared the adoption gate (eval + alignment) and
+    /// may therefore be mounted via [`AdapterLibrary::mount_gated`]. An adapter
+    /// loses adoption when it is replaced (new weights) or evicted.
+    adopted: HashSet<String>,
 }
 
 impl AdapterLibrary {
@@ -141,6 +157,7 @@ impl AdapterLibrary {
             policy,
             adapters: HashMap::new(),
             mounts: HashMap::new(),
+            adopted: HashSet::new(),
         }
     }
 
@@ -164,6 +181,9 @@ impl AdapterLibrary {
     /// [`EvictionPolicy`]; mounted adapters are pinned and never evicted.
     pub fn register(&mut self, artifact: AdapterArtifact) -> Result<(), MountError> {
         if self.adapters.contains_key(&artifact.adapter_id) {
+            // Re-registering replaces the weights, so any prior adoption is
+            // stale — the new artifact must clear the gate again before mounting.
+            self.adopted.remove(&artifact.adapter_id);
             self.adapters.insert(artifact.adapter_id.clone(), artifact);
             return Ok(());
         }
@@ -193,6 +213,7 @@ impl AdapterLibrary {
         match victim {
             Some(id) => {
                 self.adapters.remove(&id);
+                self.adopted.remove(&id);
                 Ok(())
             }
             // Every entry is pinned by an active mount.
@@ -244,6 +265,49 @@ impl AdapterLibrary {
         }
         self.mounts.insert(mount_id, adapter_id.to_string());
         Ok(())
+    }
+
+    /// Record the outcome of the adoption gate for one adapter (S8.4.8).
+    ///
+    /// An **approved** decision clears the adapter for [`mount_gated`]; a
+    /// rejected decision revokes any prior clearance (e.g. after a re-eval that
+    /// no longer beats baseline). The adapter need not be registered yet — the
+    /// clearance is keyed by id and consulted at mount time.
+    ///
+    /// [`mount_gated`]: Self::mount_gated
+    pub fn record_adoption(&mut self, decision: &AdoptionDecision) {
+        if decision.approved {
+            self.adopted.insert(decision.adapter_id.clone());
+        } else {
+            self.adopted.remove(&decision.adapter_id);
+        }
+    }
+
+    /// Whether `adapter_id` has cleared the adoption gate and may be mounted via
+    /// [`mount_gated`](Self::mount_gated).
+    pub fn is_adopted(&self, adapter_id: &str) -> bool {
+        self.adopted.contains(adapter_id)
+    }
+
+    /// Adoption-gated mount — the entry point the router must use before serving
+    /// a self-trained adapter (S8.4.8 "before the router mounts it").
+    ///
+    /// Identical to [`mount`](Self::mount) but additionally refuses, with
+    /// [`MountError::NotAdopted`], any adapter that has not been cleared by
+    /// [`record_adoption`](Self::record_adoption). The adoption check runs first
+    /// so an un-gated adapter never reaches the format check.
+    pub fn mount_gated(&mut self, mount_id: MountId, adapter_id: &str) -> Result<(), MountError> {
+        if !self.adapters.contains_key(adapter_id) {
+            return Err(MountError::UnknownAdapter {
+                adapter_id: adapter_id.to_string(),
+            });
+        }
+        if !self.is_adopted(adapter_id) {
+            return Err(MountError::NotAdopted {
+                adapter_id: adapter_id.to_string(),
+            });
+        }
+        self.mount(mount_id, adapter_id)
     }
 
     /// Unmount whatever is mounted at `mount_id`, returning the adapter id that
@@ -369,6 +433,127 @@ mod tests {
         let mp = MountId::new("instinct", "base-q4");
         assert_eq!(
             lib.mount(mp, "h"),
+            Err(MountError::NotMountable {
+                adapter_id: "h".to_string()
+            })
+        );
+    }
+
+    // ── Adoption gate (S8.4.8) ────────────────────────────────────────────────
+
+    fn approved(id: &str) -> AdoptionDecision {
+        AdoptionDecision {
+            adapter_id: id.to_string(),
+            approved: true,
+            eval_passed: true,
+            alignment_passed: true,
+            reasons: vec![],
+        }
+    }
+
+    fn rejected(id: &str) -> AdoptionDecision {
+        AdoptionDecision {
+            adapter_id: id.to_string(),
+            approved: false,
+            eval_passed: false,
+            alignment_passed: true,
+            reasons: vec!["eval: did not beat baseline".to_string()],
+        }
+    }
+
+    #[test]
+    fn mount_gated_rejects_unadopted_adapter() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        let mp = MountId::new("instinct", "base-q4");
+        // Registered and mountable, but never gated → refused.
+        assert_eq!(
+            lib.mount_gated(mp, "a"),
+            Err(MountError::NotAdopted {
+                adapter_id: "a".to_string()
+            })
+        );
+        assert!(!lib.is_adopted("a"));
+    }
+
+    #[test]
+    fn mount_gated_allows_after_adoption() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&approved("a"));
+        assert!(lib.is_adopted("a"));
+        let mp = MountId::new("instinct", "base-q4");
+        lib.mount_gated(mp.clone(), "a").unwrap();
+        assert_eq!(lib.mounted_at(&mp), Some("a"));
+    }
+
+    #[test]
+    fn mount_gated_rejects_unknown_adapter() {
+        let mut lib = AdapterLibrary::new(8);
+        let mp = MountId::new("instinct", "base-q4");
+        assert_eq!(
+            lib.mount_gated(mp, "ghost"),
+            Err(MountError::UnknownAdapter {
+                adapter_id: "ghost".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn rejected_decision_does_not_clear_for_mount() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&rejected("a"));
+        let mp = MountId::new("instinct", "base-q4");
+        assert!(matches!(
+            lib.mount_gated(mp, "a"),
+            Err(MountError::NotAdopted { .. })
+        ));
+    }
+
+    #[test]
+    fn rejected_decision_revokes_prior_adoption() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&approved("a"));
+        assert!(lib.is_adopted("a"));
+        // A later re-eval that fails must revoke the clearance.
+        lib.record_adoption(&rejected("a"));
+        assert!(!lib.is_adopted("a"));
+    }
+
+    #[test]
+    fn re_registering_revokes_adoption() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&approved("a"));
+        // New weights under the same id ⇒ must re-earn adoption.
+        lib.register(mountable("a", 2)).unwrap();
+        assert!(!lib.is_adopted("a"));
+    }
+
+    #[test]
+    fn eviction_drops_adoption() {
+        let mut lib = AdapterLibrary::new(1);
+        lib.register(mountable("old", 1)).unwrap();
+        lib.record_adoption(&approved("old"));
+        assert!(lib.is_adopted("old"));
+        // Registering a second adapter evicts the (un-mounted) oldest.
+        lib.register(mountable("new", 2)).unwrap();
+        assert!(lib.get("old").is_none());
+        assert!(!lib.is_adopted("old"));
+    }
+
+    #[test]
+    fn mount_gated_still_enforces_mountability() {
+        // Even if a baked variant were (wrongly) marked adopted, the format
+        // check still refuses it — the gate is additive, not a bypass.
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(baked("h", 1)).unwrap();
+        lib.record_adoption(&approved("h"));
+        let mp = MountId::new("instinct", "base-q4");
+        assert_eq!(
+            lib.mount_gated(mp, "h"),
             Err(MountError::NotMountable {
                 adapter_id: "h".to_string()
             })
