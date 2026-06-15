@@ -113,6 +113,16 @@ impl AdaptationMethod {
         }
     }
 
+    /// The adapter rank, when the method has one (`None` for a full fine-tune).
+    pub fn rank(&self) -> Option<u32> {
+        match self {
+            AdaptationMethod::Lora { rank, .. }
+            | AdaptationMethod::QLora { rank, .. }
+            | AdaptationMethod::Hra { rank, .. } => Some(*rank),
+            AdaptationMethod::FullFineTune => None,
+        }
+    }
+
     /// How this method's update merges into a 4-bit GGUF base (S8.4.6).
     pub fn merge_path(&self) -> MergePath {
         match self {

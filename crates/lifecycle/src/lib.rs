@@ -21,6 +21,9 @@
 //!
 //! The [`skill_bridge`] module wires E11 (`skills`) skill/tool proposals into
 //! the [`approval`] queue so operator-gated promotions actually flow through it.
+//! The [`adapter_bridge`] module does the same for E8 self-trained adapters that
+//! have cleared the `anima_finetune` adoption gate, surfacing them as
+//! `WeightUpdate` proposals for human sign-off before the router mounts them.
 //!
 //! ## Architecture
 //!
@@ -30,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapter_bridge;
 pub mod approval;
 pub mod digest;
 pub mod replay;
@@ -39,6 +43,7 @@ pub mod twin;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
+pub use adapter_bridge::adapter_adoption_to_proposal;
 pub use approval::{
     ApprovalQueue, DefenceVerdict, Proposal, ProposalKind, ProposalStatus, SandboxTestResult,
 };

@@ -105,8 +105,11 @@ TUI and COM1 serial bridge for the kernel.
       `AdapterLibrary::mount_gated` refuses any adapter that has not cleared the
       gate (`MountError::NotAdopted`), and re-training or eviction revokes the
       clearance. Covered by unit tests + a `train → register → evaluate →
-      decide → mount_gated` integration test. Still open: surfacing the
-      `AdoptionDecision` in the operator approval queue UI (Pillar 3).
+      decide → mount_gated` integration test. The cleared decision is routed
+      to the operator approval queue via
+      `lifecycle::adapter_adoption_to_proposal` (a `WeightUpdate` proposal,
+      symmetric to the E11 skill/tool bridge). Still open: rendering the queue
+      in the console UI (Pillar 3).
 - [ ] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
       the corpus crosses a size threshold — closing the autonomy loop.
 
