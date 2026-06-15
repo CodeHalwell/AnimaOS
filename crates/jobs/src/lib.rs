@@ -32,13 +32,16 @@
 //! | [`schedule`] | [`schedule::JobSchedule`], [`schedule::is_cron_due`], [`schedule::validate_cron`] |
 //! | [`registry`] | [`registry::JobRegistry`], [`registry::JobRegistryError`] |
 //! | [`runner`] | [`runner::JobRunner`], [`runner::RunResult`], [`runner::due_job_ids`], [`runner::record_run_result`] |
+//! | [`finetune_trigger`] | [`finetune_trigger::FineTuneTrigger`], [`finetune_trigger::FineTuneProposalPayload`] — corpus-growth fine-tune proposal (E32↔E8) |
 
+pub mod finetune_trigger;
 pub mod job;
 pub mod registry;
 pub mod runner;
 pub mod schedule;
 
 // Re-export the most commonly used types.
+pub use finetune_trigger::{FineTuneProposalPayload, FineTuneTrigger};
 pub use job::{make_job_id, JobStatus, LastRun, RetryPolicy, ScheduledJob};
 pub use registry::{JobRegistry, JobRegistryError};
 pub use runner::{due_job_ids, record_run_result, JobRunner, RunResult};

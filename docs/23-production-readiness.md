@@ -110,8 +110,15 @@ TUI and COM1 serial bridge for the kernel.
       `lifecycle::adapter_adoption_to_proposal` (a `WeightUpdate` proposal,
       symmetric to the E11 skill/tool bridge). Still open: rendering the queue
       in the console UI (Pillar 3).
-- [ ] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
+- [~] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
       the corpus crosses a size threshold — closing the autonomy loop.
+      `jobs::FineTuneTrigger` is the policy (corpus-pair threshold + cooldown);
+      `evaluate()` emits a one-shot `ScheduledJob` carrying a
+      `FineTuneProposalPayload` (base model, pair count, reason) for the runner
+      to dispatch — operator-gated downstream via the E8 adoption gate + E15
+      approval queue. Fully unit-tested. Remaining: the hosted serve loop wires
+      the corpus-size signal into `evaluate()` and persists `last_proposed_at_ns`
+      (the same "caller wires the runner" contract the rest of E32 follows).
 
 ## Definition of done
 
