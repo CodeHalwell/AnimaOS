@@ -318,32 +318,27 @@ impl AdapterLibrary {
     /// a rejected decision revokes any prior clearance (e.g. after a re-eval that
     /// no longer beats baseline) and unmounts the adapter.
     ///
-    /// The clearance is bound to [`AdoptionDecision::weights_digest`] (the digest
-    /// of the artifact the decision was made about) and checked against the
-    /// registered artifact by [`is_adopted`], so a stale decision recorded after
-    /// the id's weights were replaced cannot adopt the new, unevaluated weights.
-    /// (Registration already clears clearance, so recording before the artifact
-    /// exists also has no lasting effect.)
+    /// The decision only affects the **currently-registered** weights of this id:
+    /// a decision whose [`AdoptionDecision::weights_digest`] doesn't match the
+    /// registered artifact is ignored. A stale decision from an earlier run
+    /// therefore can neither adopt unevaluated weights nor (when rejecting) tear
+    /// down a newer digest that actually passed — and recording before the
+    /// artifact exists is a no-op.
     ///
     /// [`mount_gated`]: Self::mount_gated
-    /// [`is_adopted`]: Self::is_adopted
     pub fn record_adoption(&mut self, decision: &AdoptionDecision) {
+        // Ignore any decision that isn't about the weights registered right now.
+        let current_digest = self
+            .adapters
+            .get(&decision.adapter_id)
+            .map(|a| a.weights_digest.as_str());
+        if current_digest != Some(decision.weights_digest.as_str()) {
+            return;
+        }
         if decision.approved {
             self.adopted
                 .insert(decision.adapter_id.clone(), decision.weights_digest.clone());
         } else {
-            // Only act on a rejection for the *currently-registered* weights. A
-            // stale rejection from an earlier run carries that run's digest; if
-            // newer weights have since been registered (and perhaps adopted +
-            // mounted), letting the old failure through would wrongly revoke the
-            // new clearance and unmount weights that actually passed.
-            let current_digest = self
-                .adapters
-                .get(&decision.adapter_id)
-                .map(|a| a.weights_digest.as_str());
-            if current_digest != Some(decision.weights_digest.as_str()) {
-                return;
-            }
             // Revoking automated clearance also drops the operator sign-off (it
             // was for weights that no longer pass) and unmounts any live serving
             // of this adapter — otherwise the router would keep serving weights
@@ -362,13 +357,21 @@ impl AdapterLibrary {
     /// proposal carried; [`mount_gated`](Self::mount_gated) then requires it on
     /// top of automated adoption.
     ///
-    /// The digest is recorded (not just the id) so that approving a **stale**
-    /// proposal — one whose weights have since been replaced under the same id —
-    /// does not clear the new weights: [`is_operator_approved`] only honours the
-    /// approval when the stored digest still matches the registered artifact.
+    /// Approving a **stale** proposal — one whose `weights_digest` does not match
+    /// the currently-registered artifact — is ignored, so it neither clears nor
+    /// overwrites the approval standing for the live weights. (Approving a digest
+    /// that is not the registered one would otherwise make [`is_operator_approved`]
+    /// false for the weights actually in use.)
     ///
     /// [`is_operator_approved`]: Self::is_operator_approved
     pub fn record_operator_approval(&mut self, adapter_id: &str, weights_digest: &str) {
+        let current_digest = self
+            .adapters
+            .get(adapter_id)
+            .map(|a| a.weights_digest.as_str());
+        if current_digest != Some(weights_digest) {
+            return;
+        }
         self.operator_approved
             .insert(adapter_id.to_string(), weights_digest.to_string());
     }
@@ -780,6 +783,34 @@ mod tests {
         lib.revoke_operator_approval("a", "d");
         assert!(!lib.is_operator_approved("a"));
         assert!(lib.mounted_at(&mp).is_none());
+    }
+
+    #[test]
+    fn stale_approval_does_not_overwrite_current_clearance() {
+        let mut lib = AdapterLibrary::new(8);
+        // v2 is registered and fully cleared.
+        let mut v2 = mountable("a", 2);
+        v2.weights_digest = "digest-v2".to_string();
+        lib.register(v2).unwrap();
+        lib.record_adoption(&approved("a", "digest-v2"));
+        lib.record_operator_approval("a", "digest-v2");
+        assert!(lib.is_adopted("a") && lib.is_operator_approved("a"));
+
+        // Delayed *approvals* for the earlier v1 weights must not overwrite the
+        // standing clearance for the live v2 weights.
+        lib.record_adoption(&approved("a", "digest-v1"));
+        lib.record_operator_approval("a", "digest-v1");
+        assert!(
+            lib.is_adopted("a"),
+            "v2 adoption survives a stale v1 approval"
+        );
+        assert!(
+            lib.is_operator_approved("a"),
+            "v2 operator approval survives a stale v1 approval"
+        );
+
+        let mp = MountId::new("instinct", "base-q4");
+        lib.mount_gated(mp, "a").expect("v2 still mountable");
     }
 
     #[test]

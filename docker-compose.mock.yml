@@ -13,9 +13,12 @@
 #
 # Usage:
 #   docker compose -f docker-compose.mock.yml up --build
-#   # then open http://127.0.0.1:8088/ for the dashboard, or:
-#   #   anima-console tui --url http://127.0.0.1:8088
+#   # The console gates every route except /healthz; this stack ships a default
+#   # ANIMA_CONSOLE_TOKEN=anima-local-dev (see below), so pass it on each request:
+#   # then open http://127.0.0.1:8088/?token=anima-local-dev for the dashboard, or:
+#   #   anima-console tui --url http://127.0.0.1:8088 --token anima-local-dev
 #   #   curl -X POST http://127.0.0.1:8088/guidance \
+#   #        -H 'Authorization: Bearer anima-local-dev' \
 #   #        -H 'Content-Type: application/json' \
 #   #        -d '{"text":"summarise system state","priority":"High"}'
 #
@@ -36,7 +39,7 @@ services:
     command: ["serve"]
     ports:
       # Operator console — bound to host loopback.
-      # Open http://127.0.0.1:8088/ in a browser for the dashboard.
+      # Open http://127.0.0.1:8088/?token=anima-local-dev in a browser for the dashboard.
       - "127.0.0.1:8088:8088"
     environment:
       # The deterministic mock backend: no network egress, reproducible streams.
