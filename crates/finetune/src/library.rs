@@ -332,6 +332,18 @@ impl AdapterLibrary {
             self.adopted
                 .insert(decision.adapter_id.clone(), decision.weights_digest.clone());
         } else {
+            // Only act on a rejection for the *currently-registered* weights. A
+            // stale rejection from an earlier run carries that run's digest; if
+            // newer weights have since been registered (and perhaps adopted +
+            // mounted), letting the old failure through would wrongly revoke the
+            // new clearance and unmount weights that actually passed.
+            let current_digest = self
+                .adapters
+                .get(&decision.adapter_id)
+                .map(|a| a.weights_digest.as_str());
+            if current_digest != Some(decision.weights_digest.as_str()) {
+                return;
+            }
             // Revoking automated clearance also drops the operator sign-off (it
             // was for weights that no longer pass) and unmounts any live serving
             // of this adapter — otherwise the router would keep serving weights
@@ -361,14 +373,23 @@ impl AdapterLibrary {
             .insert(adapter_id.to_string(), weights_digest.to_string());
     }
 
-    /// Withdraw operator sign-off for `adapter_id` (e.g. the proposal was
-    /// rejected or rescinded) and unmount any live serving of it, so revoking
-    /// approval immediately stops the router serving the adapter — human
-    /// sign-off stays enforced after an approval changes, mirroring the
-    /// automated rejection branch of [`record_adoption`](Self::record_adoption).
-    /// A subsequent [`mount_gated`](Self::mount_gated) refuses with
+    /// Withdraw operator sign-off for the `weights_digest` weights of
+    /// `adapter_id` (e.g. that proposal was rejected or rescinded) and unmount
+    /// any live serving of it, so revoking approval immediately stops the router
+    /// serving the adapter — human sign-off stays enforced after an approval
+    /// changes, mirroring the automated rejection branch of
+    /// [`record_adoption`](Self::record_adoption). A subsequent
+    /// [`mount_gated`](Self::mount_gated) refuses with
     /// [`MountError::NotOperatorApproved`] until re-approved.
-    pub fn revoke_operator_approval(&mut self, adapter_id: &str) {
+    ///
+    /// Pass the digest the rescinded proposal carried: since proposals are
+    /// digest-distinct, a **no-op** when it doesn't match the currently-approved
+    /// digest prevents rejecting a stale `adapter@old_digest` proposal from
+    /// tearing down a newer `adapter@new_digest` that is approved and mounted.
+    pub fn revoke_operator_approval(&mut self, adapter_id: &str, weights_digest: &str) {
+        if self.operator_approved.get(adapter_id).map(String::as_str) != Some(weights_digest) {
+            return;
+        }
         self.operator_approved.remove(adapter_id);
         self.mounts.retain(|_, mounted| mounted != adapter_id);
     }
@@ -749,9 +770,39 @@ mod tests {
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
 
-        // Rescinding operator sign-off must stop live serving immediately.
-        lib.revoke_operator_approval("a");
+        // A stale rescind for a different digest is a no-op — the current
+        // approval and mount survive.
+        lib.revoke_operator_approval("a", "other-digest");
+        assert!(lib.is_operator_approved("a"));
+        assert_eq!(lib.mounted_at(&mp), Some("a"));
+
+        // Rescinding sign-off for the current digest stops live serving at once.
+        lib.revoke_operator_approval("a", "d");
         assert!(!lib.is_operator_approved("a"));
+        assert!(lib.mounted_at(&mp).is_none());
+    }
+
+    #[test]
+    fn stale_rejection_does_not_revoke_current_adoption() {
+        let mut lib = AdapterLibrary::new(8);
+        // v2 is the currently-registered, adopted, operator-approved, mounted set.
+        let mut v2 = mountable("a", 2);
+        v2.weights_digest = "digest-v2".to_string();
+        lib.register(v2).unwrap();
+        lib.record_adoption(&approved("a", "digest-v2"));
+        lib.record_operator_approval("a", "digest-v2");
+        let mp = MountId::new("instinct", "base-q4");
+        lib.mount_gated(mp.clone(), "a").unwrap();
+
+        // A late rejection from the earlier v1 run must not clear v2 or unmount it.
+        lib.record_adoption(&rejected("a", "digest-v1"));
+        assert!(lib.is_adopted("a"));
+        assert!(lib.is_operator_approved("a"));
+        assert_eq!(lib.mounted_at(&mp), Some("a"));
+
+        // A rejection for the current digest does revoke + unmount.
+        lib.record_adoption(&rejected("a", "digest-v2"));
+        assert!(!lib.is_adopted("a"));
         assert!(lib.mounted_at(&mp).is_none());
     }
 
