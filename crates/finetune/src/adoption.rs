@@ -123,6 +123,20 @@ pub fn decide_adoption(
     let mut reasons = Vec::new();
 
     // ── E8 eval half ──────────────────────────────────────────────────────────
+    // Require actual probe evidence for every metric the adoption rule weighs.
+    // `evaluate_adapter` scores a missing bucket as a neutral `1.0` with a zero
+    // case count, so without this a misconfigured eval set (no task-success or
+    // OOD cases) could spuriously "beat baseline" and approve an adapter that was
+    // never probed on a required metric.
+    let cc = &candidate.case_counts;
+    let have_evidence = cc.task_success > 0 && cc.ood_generalisation > 0 && cc.retention > 0;
+    if !have_evidence {
+        reasons.push(format!(
+            "eval: missing probe cases (task_success={}, ood={}, retention={}); \
+             every adoption metric needs at least one case",
+            cc.task_success, cc.ood_generalisation, cc.retention
+        ));
+    }
     let beats = candidate.beats_baseline(baseline, policy.margin, policy.retention_tolerance);
     if !beats {
         reasons.push(format!(
@@ -138,7 +152,7 @@ pub fn decide_adoption(
             candidate.scores.merge_fidelity, policy.min_merge_fidelity
         ));
     }
-    let eval_passed = beats && fidelity_ok;
+    let eval_passed = have_evidence && beats && fidelity_ok;
 
     // ── E13 alignment half ────────────────────────────────────────────────────
     let alignment_passed = alignment.is_approved();
@@ -186,6 +200,25 @@ mod tests {
 
     fn baseline() -> EvalReport {
         report("lora", 0.70, 0.60, 0.90, 1.0)
+    }
+
+    #[test]
+    fn rejects_when_a_required_eval_bucket_is_empty() {
+        // Scores look strong enough to beat the baseline, but the task-success
+        // bucket has no probe cases — a missing bucket is scored 1.0 neutrally,
+        // so without the case-count check this would spuriously pass the eval.
+        let mut candidate = report("hra", 0.99, 0.99, 0.95, 0.99);
+        candidate.case_counts.task_success = 0;
+        let d = decide_adoption(
+            &candidate,
+            &baseline(),
+            &AlignmentOutcome::Approved,
+            &AdoptionPolicy::default(),
+            "test-digest",
+        );
+        assert!(!d.approved, "no probe evidence must not be approved");
+        assert!(!d.eval_passed);
+        assert!(d.reasons.iter().any(|r| r.contains("missing probe cases")));
     }
 
     #[test]

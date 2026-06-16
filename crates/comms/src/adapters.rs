@@ -69,6 +69,11 @@ fn screen_egress(guard: &EgressGuard, base_url: &str) -> Result<(), ChannelError
 /// connection pool (Keep-Alive) warm across sends. The build result is cached
 /// so a one-time TLS-backend failure surfaces consistently instead of being
 /// retried on a hot path. Both channels share one timeout policy.
+///
+/// Redirects are **disabled**: [`screen_egress`] only vets the original API
+/// origin, so following a 30x to another host would open a socket to an
+/// unscreened URL and bypass the [`EgressGuard`] guarantee. A redirect instead
+/// surfaces as a non-success status the callers already treat as an error.
 #[cfg(feature = "live")]
 fn shared_http_client() -> Result<&'static reqwest::blocking::Client, ChannelError> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
@@ -77,6 +82,7 @@ fn shared_http_client() -> Result<&'static reqwest::blocking::Client, ChannelErr
         .get_or_init(|| {
             reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| e.to_string())
         })
