@@ -19,10 +19,10 @@ use crate::approval::{Proposal, ProposalKind, ProposalStatus};
 /// the automated eval/alignment gate must never reach the operator queue (it is
 /// not promotable), mirroring `skill_proposal_to_queue_proposal` returning
 /// `None` for skills that were not `PendingApproval`. Also returns `None` when
-/// `artifact` and `decision` describe different adapters (so a mismatched pair
-/// can never queue the wrong weights for sign-off), and when `artifact` is a
-/// baked variant — a `WeightUpdate` proposal advertises a hot-mountable adapter,
-/// which a baked variant is not.
+/// `artifact` and `decision` disagree on the adapter id **or** the evaluated
+/// `weights_digest` (so a stale decision can never queue weights it did not
+/// actually clear), and when `artifact` is a baked variant — a `WeightUpdate`
+/// proposal advertises a hot-mountable adapter, which a baked variant is not.
 ///
 /// On approval the proposal carries the base model, the adapter weights digest,
 /// the adaptation rank (if any), and a caller-supplied `training_summary`; its
@@ -33,14 +33,18 @@ pub fn adapter_adoption_to_proposal(
     training_summary: impl Into<String>,
     now_ns: u64,
 ) -> Option<Proposal> {
-    // Refuse to promote when the decision is unapproved, when the artifact and
-    // the decision describe different adapters (a mismatch would queue the wrong
-    // weights for sign-off), or when the artifact is a baked variant. A
-    // `WeightUpdate` proposal advertises a hot-mountable adapter (`adapter_hash`
-    // + `rank`); a baked variant cannot be hot-mounted (`mount_gated` rejects
-    // it), so emitting one would hand the operator an item that can't be applied
-    // as described. Baked variants are promoted as distinct models elsewhere.
-    if !decision.approved || artifact.adapter_id != decision.adapter_id || !artifact.is_mountable()
+    // Refuse to promote unless the decision approved *these* weights of this
+    // adapter. Both the id and the evaluated `weights_digest` must match: a stale
+    // decision from an earlier run of the same id carries the old digest, so
+    // pairing it with freshly-registered weights would emit a `WeightUpdate`
+    // whose provenance falsely claims the new weights cleared eval/alignment.
+    // Baked variants are also refused — a `WeightUpdate` advertises a
+    // hot-mountable adapter (`adapter_hash` + `rank`) that `mount_gated` would
+    // reject for a baked variant; those are promoted as distinct models elsewhere.
+    if !decision.approved
+        || artifact.adapter_id != decision.adapter_id
+        || artifact.weights_digest != decision.weights_digest
+        || !artifact.is_mountable()
     {
         return None;
     }
@@ -105,9 +109,10 @@ mod tests {
         }
     }
 
-    fn approved() -> AdoptionDecision {
+    fn approved(digest: &str) -> AdoptionDecision {
         AdoptionDecision {
             adapter_id: "nightly-adapter".to_string(),
+            weights_digest: digest.to_string(),
             approved: true,
             eval_passed: true,
             alignment_passed: true,
@@ -115,9 +120,10 @@ mod tests {
         }
     }
 
-    fn rejected() -> AdoptionDecision {
+    fn rejected(digest: &str) -> AdoptionDecision {
         AdoptionDecision {
             adapter_id: "nightly-adapter".to_string(),
+            weights_digest: digest.to_string(),
             approved: false,
             eval_passed: false,
             alignment_passed: true,
@@ -127,8 +133,13 @@ mod tests {
 
     #[test]
     fn approved_adapter_becomes_weight_update_proposal() {
-        let p = adapter_adoption_to_proposal(&artifact(), &approved(), "120 episodic pairs", 200)
-            .expect("approved adapter yields a proposal");
+        let p = adapter_adoption_to_proposal(
+            &artifact(),
+            &approved("abc123"),
+            "120 episodic pairs",
+            200,
+        )
+        .expect("approved adapter yields a proposal");
         // Queue id encodes the adapter id and the weights digest.
         assert_eq!(p.id, "nightly-adapter@abc123");
         assert_eq!(p.created_at_ns, 200);
@@ -152,16 +163,25 @@ mod tests {
 
     #[test]
     fn rejected_adapter_yields_no_proposal() {
-        assert!(adapter_adoption_to_proposal(&artifact(), &rejected(), "x", 1).is_none());
+        assert!(adapter_adoption_to_proposal(&artifact(), &rejected("abc123"), "x", 1).is_none());
     }
 
     #[test]
     fn mismatched_adapter_id_yields_no_proposal() {
         // An approved decision for a *different* adapter must never promote this
         // artifact's weights — the IDs are cross-checked before queueing.
-        let mut decision = approved();
+        let mut decision = approved("abc123");
         decision.adapter_id = "some-other-adapter".to_string();
         assert!(adapter_adoption_to_proposal(&artifact(), &decision, "x", 1).is_none());
+    }
+
+    #[test]
+    fn stale_digest_decision_yields_no_proposal() {
+        // A decision approved for an earlier run carries that run's digest; pairing
+        // it with the current artifact (different weights) must not emit a proposal
+        // whose provenance would falsely claim the new weights cleared the gate.
+        let stale = approved("old-digest");
+        assert!(adapter_adoption_to_proposal(&artifact(), &stale, "x", 1).is_none());
     }
 
     #[test]
@@ -172,12 +192,13 @@ mod tests {
         baked.format = AdapterFormat::BakedGguf;
         baked.serving_tier = ServingTier::BakedVariant;
         assert!(!baked.is_mountable());
-        assert!(adapter_adoption_to_proposal(&baked, &approved(), "x", 1).is_none());
+        assert!(adapter_adoption_to_proposal(&baked, &approved("abc123"), "x", 1).is_none());
     }
 
     #[test]
     fn proposal_enqueues_and_surfaces_as_pending() {
-        let p = adapter_adoption_to_proposal(&artifact(), &approved(), "summary", 10).unwrap();
+        let p =
+            adapter_adoption_to_proposal(&artifact(), &approved("abc123"), "summary", 10).unwrap();
         let mut queue = ApprovalQueue::new();
         assert!(queue.enqueue(p));
         let pending = queue.pending();
@@ -191,11 +212,13 @@ mod tests {
         // be able to sit in the queue (digest-distinct ids), so a retrain isn't
         // silently dropped by the duplicate-id guard.
         let mut queue = ApprovalQueue::new();
-        let first = adapter_adoption_to_proposal(&artifact(), &approved(), "run 1", 10).unwrap();
+        let first =
+            adapter_adoption_to_proposal(&artifact(), &approved("abc123"), "run 1", 10).unwrap();
 
         let mut retrained = artifact();
         retrained.weights_digest = "def456".to_string();
-        let second = adapter_adoption_to_proposal(&retrained, &approved(), "run 2", 20).unwrap();
+        let second =
+            adapter_adoption_to_proposal(&retrained, &approved("def456"), "run 2", 20).unwrap();
 
         assert_ne!(first.id, second.id);
         assert!(queue.enqueue(first));

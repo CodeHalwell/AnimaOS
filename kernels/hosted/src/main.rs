@@ -2197,15 +2197,22 @@ fn cmd_data(args: &[String]) {
                                 "facts": rec.profile.facts,
                             }),
                         );
-                        // Open the per-user conversation store once; it backs
-                        // both the episodic-memory and usage-stats sections. A
-                        // missing store (agent never persisted any sessions)
-                        // opens empty and is "no records"; a real I/O/parse
-                        // error (e.g. a corrupted sessions.json) must abort
-                        // rather than silently emit an incomplete GDPR export.
-                        let session_store =
+                        // The per-user conversation store backs only the
+                        // episodic-memory and usage-stats sections. Open it lazily
+                        // — and only when one of those categories is actually
+                        // consented — so a corrupt/unreadable sessions.json can't
+                        // block an export that wouldn't include any session data
+                        // (e.g. a subject who consented only to identity facts).
+                        // A missing store opens empty ("no records"); when session
+                        // data *is* in scope, a real I/O/parse error aborts rather
+                        // than silently emit an incomplete GDPR export.
+                        let needs_sessions =
+                            [DataCategory::EpisodicMemory, DataCategory::UsageStats]
+                                .iter()
+                                .any(|cat| rec.consent.is_consented(*cat, now_ns));
+                        let session_store = if needs_sessions {
                             match SessionStore::open(SessionStore::default_path(AGENT_ID)) {
-                                Ok(store) => store,
+                                Ok(store) => Some(store),
                                 Err(e) => {
                                     eprintln!(
                                         "data: cannot read session store for export ({e}); \
@@ -2214,9 +2221,14 @@ fn cmd_data(args: &[String]) {
                                     cli_fail(1);
                                     return;
                                 }
-                            };
-                        let user_sessions =
-                            session_store.list(&SessionQuery::for_user(user_id.as_str()));
+                            }
+                        } else {
+                            None
+                        };
+                        let user_sessions = session_store
+                            .as_ref()
+                            .map(|s| s.list(&SessionQuery::for_user(user_id.as_str())))
+                            .unwrap_or_default();
                         let total_turns: usize = user_sessions.iter().map(|s| s.turns.len()).sum();
 
                         // Populate every consented category with the subject's

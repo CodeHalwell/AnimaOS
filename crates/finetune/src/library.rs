@@ -312,26 +312,25 @@ impl AdapterLibrary {
         Ok(())
     }
 
-    /// Record the outcome of the adoption gate for the `weights_digest` weights
-    /// of one adapter (S8.4.8).
+    /// Record the outcome of the adoption gate for one adapter (S8.4.8).
     ///
-    /// An **approved** decision clears those weights for [`mount_gated`]; a
-    /// rejected decision revokes any prior clearance (e.g. after a re-eval that
+    /// An **approved** decision clears the evaluated weights for [`mount_gated`];
+    /// a rejected decision revokes any prior clearance (e.g. after a re-eval that
     /// no longer beats baseline) and unmounts the adapter.
     ///
-    /// `weights_digest` is the digest of the artifact the `decision` was made
-    /// about — pass `artifact.weights_digest`. It is stored and checked against
-    /// the registered artifact by [`is_adopted`], so a stale decision recorded
-    /// after the id's weights were replaced cannot adopt the new, unevaluated
-    /// weights. (Registration already clears clearance, so recording before the
-    /// artifact exists also has no lasting effect.)
+    /// The clearance is bound to [`AdoptionDecision::weights_digest`] (the digest
+    /// of the artifact the decision was made about) and checked against the
+    /// registered artifact by [`is_adopted`], so a stale decision recorded after
+    /// the id's weights were replaced cannot adopt the new, unevaluated weights.
+    /// (Registration already clears clearance, so recording before the artifact
+    /// exists also has no lasting effect.)
     ///
     /// [`mount_gated`]: Self::mount_gated
     /// [`is_adopted`]: Self::is_adopted
-    pub fn record_adoption(&mut self, decision: &AdoptionDecision, weights_digest: &str) {
+    pub fn record_adoption(&mut self, decision: &AdoptionDecision) {
         if decision.approved {
             self.adopted
-                .insert(decision.adapter_id.clone(), weights_digest.to_string());
+                .insert(decision.adapter_id.clone(), decision.weights_digest.clone());
         } else {
             // Revoking automated clearance also drops the operator sign-off (it
             // was for weights that no longer pass) and unmounts any live serving
@@ -554,16 +553,7 @@ mod tests {
     fn reregistering_replaced_id_revokes_adoption_and_unmounts() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(
-            &AdoptionDecision {
-                adapter_id: "a".to_string(),
-                approved: true,
-                eval_passed: true,
-                alignment_passed: true,
-                reasons: vec![],
-            },
-            "d",
-        );
+        lib.record_adoption(&approved("a", "d"));
         lib.record_operator_approval("a", "d");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
@@ -590,16 +580,7 @@ mod tests {
     fn adoption_recorded_before_registration_does_not_pre_clear_weights() {
         let mut lib = AdapterLibrary::new(8);
         // Clearance recorded for an id that has no artifact yet.
-        lib.record_adoption(
-            &AdoptionDecision {
-                adapter_id: "a".to_string(),
-                approved: true,
-                eval_passed: true,
-                alignment_passed: true,
-                reasons: vec![],
-            },
-            "d",
-        );
+        lib.record_adoption(&approved("a", "d"));
         // Registering *any* weights under that id must not inherit the stale
         // clearance — those bytes were never evaluated.
         lib.register(mountable("a", 1)).unwrap();
@@ -628,9 +609,10 @@ mod tests {
 
     // ── Adoption gate (S8.4.8) ────────────────────────────────────────────────
 
-    fn approved(id: &str) -> AdoptionDecision {
+    fn approved(id: &str, digest: &str) -> AdoptionDecision {
         AdoptionDecision {
             adapter_id: id.to_string(),
+            weights_digest: digest.to_string(),
             approved: true,
             eval_passed: true,
             alignment_passed: true,
@@ -638,9 +620,10 @@ mod tests {
         }
     }
 
-    fn rejected(id: &str) -> AdoptionDecision {
+    fn rejected(id: &str, digest: &str) -> AdoptionDecision {
         AdoptionDecision {
             adapter_id: id.to_string(),
+            weights_digest: digest.to_string(),
             approved: false,
             eval_passed: false,
             alignment_passed: true,
@@ -667,7 +650,7 @@ mod tests {
     fn mount_gated_allows_after_both_gate_halves() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&approved("a"), "d");
+        lib.record_adoption(&approved("a", "d"));
         assert!(lib.is_adopted("a"));
         let mp = MountId::new("instinct", "base-q4");
         // Automated clearance without operator sign-off is still refused.
@@ -687,7 +670,7 @@ mod tests {
     fn revoking_adoption_unmounts_live_adapter() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&approved("a"), "d");
+        lib.record_adoption(&approved("a", "d"));
         lib.record_operator_approval("a", "d");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
@@ -695,7 +678,7 @@ mod tests {
 
         // A later rejecting decision (failed re-eval / alignment veto) must pull
         // the live mount, not just the clearance bit.
-        lib.record_adoption(&rejected("a"), "d");
+        lib.record_adoption(&rejected("a", "d"));
         assert!(!lib.is_adopted("a"));
         assert!(!lib.is_operator_approved("a"));
         assert!(lib.mounted_at(&mp).is_none());
@@ -708,7 +691,7 @@ mod tests {
         let mut v1 = mountable("a", 1);
         v1.weights_digest = "digest-v1".to_string();
         lib.register(v1).unwrap();
-        lib.record_adoption(&approved("a"), "digest-v1");
+        lib.record_adoption(&approved("a", "digest-v1"));
         lib.record_operator_approval("a", "digest-v1");
         assert!(lib.is_operator_approved("a"));
 
@@ -716,7 +699,7 @@ mod tests {
         let mut v2 = mountable("a", 2);
         v2.weights_digest = "digest-v2".to_string();
         lib.register(v2).unwrap();
-        lib.record_adoption(&approved("a"), "digest-v2");
+        lib.record_adoption(&approved("a", "digest-v2"));
 
         // Approving the *stale* v1 proposal (digest-v1) must not clear v2: the
         // stored digest no longer matches the registered artifact.
@@ -748,11 +731,11 @@ mod tests {
 
         // A decision evaluated against v1 arrives late and is recorded now. It
         // must not adopt v2 — those weights were never evaluated.
-        lib.record_adoption(&approved("a"), "digest-v1");
+        lib.record_adoption(&approved("a", "digest-v1"));
         assert!(!lib.is_adopted("a"));
 
         // The decision for the actually-registered v2 weights does adopt it.
-        lib.record_adoption(&approved("a"), "digest-v2");
+        lib.record_adoption(&approved("a", "digest-v2"));
         assert!(lib.is_adopted("a"));
     }
 
@@ -760,7 +743,7 @@ mod tests {
     fn revoking_operator_approval_unmounts_live_adapter() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&approved("a"), "d");
+        lib.record_adoption(&approved("a", "d"));
         lib.record_operator_approval("a", "d");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
@@ -788,7 +771,7 @@ mod tests {
     fn rejected_decision_does_not_clear_for_mount() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&rejected("a"), "d");
+        lib.record_adoption(&rejected("a", "d"));
         let mp = MountId::new("instinct", "base-q4");
         assert!(matches!(
             lib.mount_gated(mp, "a"),
@@ -800,10 +783,10 @@ mod tests {
     fn rejected_decision_revokes_prior_adoption() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&approved("a"), "d");
+        lib.record_adoption(&approved("a", "d"));
         assert!(lib.is_adopted("a"));
         // A later re-eval that fails must revoke the clearance.
-        lib.record_adoption(&rejected("a"), "d");
+        lib.record_adoption(&rejected("a", "d"));
         assert!(!lib.is_adopted("a"));
     }
 
@@ -811,7 +794,7 @@ mod tests {
     fn re_registering_revokes_adoption() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
-        lib.record_adoption(&approved("a"), "d");
+        lib.record_adoption(&approved("a", "d"));
         // New weights under the same id ⇒ must re-earn adoption.
         lib.register(mountable("a", 2)).unwrap();
         assert!(!lib.is_adopted("a"));
@@ -821,7 +804,7 @@ mod tests {
     fn eviction_drops_adoption() {
         let mut lib = AdapterLibrary::new(1);
         lib.register(mountable("old", 1)).unwrap();
-        lib.record_adoption(&approved("old"), "d");
+        lib.record_adoption(&approved("old", "d"));
         assert!(lib.is_adopted("old"));
         // Registering a second adapter evicts the (un-mounted) oldest.
         lib.register(mountable("new", 2)).unwrap();
@@ -835,7 +818,7 @@ mod tests {
         // check still refuses it — the gate is additive, not a bypass.
         let mut lib = AdapterLibrary::new(8);
         lib.register(baked("h", 1)).unwrap();
-        lib.record_adoption(&approved("h"), "d");
+        lib.record_adoption(&approved("h", "d"));
         lib.record_operator_approval("h", "d");
         let mp = MountId::new("instinct", "base-q4");
         assert_eq!(

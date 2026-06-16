@@ -81,6 +81,11 @@ impl Default for AdoptionPolicy {
 pub struct AdoptionDecision {
     /// The adapter the decision is about.
     pub adapter_id: String,
+    /// The `weights_digest` of the exact artifact that was evaluated. Recorded so
+    /// downstream consumers (the library's adoption map, the E15 proposal bridge)
+    /// can verify a decision against the currently-registered weights and reject
+    /// a stale decision once the id's weights have been replaced.
+    pub weights_digest: String,
     /// Whether the adapter may be mounted.
     pub approved: bool,
     /// Whether the eval-harness half passed (adoption rule + fidelity floor).
@@ -104,11 +109,16 @@ impl AdoptionDecision {
 /// fidelity floor) with the E13 `alignment` outcome. The adapter is approved
 /// only when **both** halves pass; every failing check is recorded in
 /// [`AdoptionDecision::reasons`].
+///
+/// `weights_digest` is the digest of the artifact being evaluated; it is stamped
+/// onto the returned [`AdoptionDecision`] so the decision is bound to the exact
+/// weights it was made about (pass `artifact.weights_digest`).
 pub fn decide_adoption(
     candidate: &EvalReport,
     baseline: &EvalReport,
     alignment: &AlignmentOutcome,
     policy: &AdoptionPolicy,
+    weights_digest: &str,
 ) -> AdoptionDecision {
     let mut reasons = Vec::new();
 
@@ -144,6 +154,7 @@ pub fn decide_adoption(
 
     AdoptionDecision {
         adapter_id: candidate.adapter_id.clone(),
+        weights_digest: weights_digest.to_string(),
         approved: eval_passed && alignment_passed,
         eval_passed,
         alignment_passed,
@@ -185,9 +196,14 @@ mod tests {
             &baseline(),
             &AlignmentOutcome::Approved,
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         assert!(d.approved);
         assert!(d.eval_passed && d.alignment_passed);
+        assert_eq!(
+            d.weights_digest, "test-digest",
+            "decision records the evaluated digest"
+        );
         assert!(d.reasons.is_empty(), "approved decision carries no reasons");
     }
 
@@ -200,6 +216,7 @@ mod tests {
             &baseline(),
             &AlignmentOutcome::Approved,
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         assert!(!d.approved);
         assert!(!d.eval_passed);
@@ -215,6 +232,7 @@ mod tests {
             &baseline(),
             &AlignmentOutcome::Approved,
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         assert!(!d.approved);
         assert!(!d.eval_passed);
@@ -231,6 +249,7 @@ mod tests {
                 reasons: vec!["violates no-deception clause".to_string()],
             },
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         assert!(!d.approved);
         assert!(d.eval_passed);
@@ -251,6 +270,7 @@ mod tests {
                 reasons: vec!["clause-7".to_string()],
             },
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         assert!(!d.approved);
         assert!(d.reasons.iter().any(|r| r.starts_with("eval:")));
@@ -265,6 +285,7 @@ mod tests {
             &baseline(),
             &AlignmentOutcome::Approved,
             &AdoptionPolicy::default(),
+            "test-digest",
         );
         let json = serde_json::to_string(&d).unwrap();
         let back: AdoptionDecision = serde_json::from_str(&json).unwrap();
