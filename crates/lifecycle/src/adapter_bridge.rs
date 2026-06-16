@@ -45,8 +45,13 @@ pub fn adapter_adoption_to_proposal(
         return None;
     }
     Some(Proposal {
-        // Use the adapter id as the queue id so the round-trip mapping is direct.
-        id: artifact.adapter_id.clone(),
+        // Queue id is `<adapter_id>@<weights_digest>`, not the bare adapter id:
+        // a later retraining run reuses the same adapter id with new weights, and
+        // `ApprovalQueue::enqueue` rejects a duplicate id outright (even if the
+        // prior proposal was already decided), which would silently drop the new
+        // cleared weights from the operator queue. The digest makes each run's
+        // proposal distinct while the adapter id stays recoverable as the prefix.
+        id: format!("{}@{}", artifact.adapter_id, artifact.weights_digest),
         kind: ProposalKind::WeightUpdate {
             model_id: artifact.provenance.base_model.clone(),
             adapter_hash: artifact.weights_digest.clone(),
@@ -124,7 +129,8 @@ mod tests {
     fn approved_adapter_becomes_weight_update_proposal() {
         let p = adapter_adoption_to_proposal(&artifact(), &approved(), "120 episodic pairs", 200)
             .expect("approved adapter yields a proposal");
-        assert_eq!(p.id, "nightly-adapter");
+        // Queue id encodes the adapter id and the weights digest.
+        assert_eq!(p.id, "nightly-adapter@abc123");
         assert_eq!(p.created_at_ns, 200);
         assert!(p.is_pending());
         match p.kind {
@@ -177,5 +183,23 @@ mod tests {
         let pending = queue.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].kind.label(), "weight-update");
+    }
+
+    #[test]
+    fn retraining_same_adapter_id_enqueues_distinctly() {
+        // Two runs reuse the adapter id but produce different weights; both must
+        // be able to sit in the queue (digest-distinct ids), so a retrain isn't
+        // silently dropped by the duplicate-id guard.
+        let mut queue = ApprovalQueue::new();
+        let first = adapter_adoption_to_proposal(&artifact(), &approved(), "run 1", 10).unwrap();
+
+        let mut retrained = artifact();
+        retrained.weights_digest = "def456".to_string();
+        let second = adapter_adoption_to_proposal(&retrained, &approved(), "run 2", 20).unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert!(queue.enqueue(first));
+        assert!(queue.enqueue(second));
+        assert_eq!(queue.pending().len(), 2);
     }
 }

@@ -97,6 +97,14 @@ pub enum MountError {
         /// The id of the un-adopted adapter.
         adapter_id: String,
     },
+    /// The adapter cleared the automated adoption gate but has not received
+    /// operator sign-off (the E15 `WeightUpdate` proposal is not yet approved),
+    /// so [`AdapterLibrary::mount_gated`] refuses to serve it. This is the human
+    /// half of the two-stage gate.
+    NotOperatorApproved {
+        /// The id of the adapter awaiting operator approval.
+        adapter_id: String,
+    },
 }
 
 impl fmt::Display for MountError {
@@ -124,6 +132,10 @@ impl fmt::Display for MountError {
                 f,
                 "adapter `{adapter_id}` has not passed the adoption gate (eval + alignment)"
             ),
+            MountError::NotOperatorApproved { adapter_id } => write!(
+                f,
+                "adapter `{adapter_id}` has not received operator sign-off (E15 approval)"
+            ),
         }
     }
 }
@@ -137,10 +149,18 @@ pub struct AdapterLibrary {
     policy: EvictionPolicy,
     adapters: HashMap<String, AdapterArtifact>,
     mounts: HashMap<MountId, String>,
-    /// Adapter ids that have cleared the adoption gate (eval + alignment) and
-    /// may therefore be mounted via [`AdapterLibrary::mount_gated`]. An adapter
-    /// loses adoption when it is replaced (new weights) or evicted.
+    /// Adapter ids that have cleared the **automated** half of the adoption gate
+    /// (eval + alignment) via [`AdapterLibrary::record_adoption`]. An adapter
+    /// loses this when it is (re)registered (new weights), evicted, or its
+    /// adoption is revoked.
     adopted: HashSet<String>,
+    /// Adapter ids that have additionally received **operator** sign-off via
+    /// [`AdapterLibrary::record_operator_approval`] (the human half of the gate:
+    /// the E15 `WeightUpdate` proposal was approved). [`AdapterLibrary::mount_gated`]
+    /// requires both this *and* [`Self::adopted`], so self-trained weights never
+    /// reach a serving tier on automated clearance alone. Cleared on the same
+    /// events as `adopted`.
+    operator_approved: HashSet<String>,
 }
 
 impl AdapterLibrary {
@@ -158,6 +178,7 @@ impl AdapterLibrary {
             adapters: HashMap::new(),
             mounts: HashMap::new(),
             adopted: HashSet::new(),
+            operator_approved: HashSet::new(),
         }
     }
 
@@ -197,6 +218,7 @@ impl AdapterLibrary {
         // "adopt-then-register" pre-clearance hole. For a brand-new id these are
         // no-ops (nothing adopted or mounted yet).
         self.adopted.remove(&artifact.adapter_id);
+        self.operator_approved.remove(&artifact.adapter_id);
         self.mounts
             .retain(|_, mounted| mounted != &artifact.adapter_id);
         if self.adapters.contains_key(&artifact.adapter_id) {
@@ -230,6 +252,7 @@ impl AdapterLibrary {
             Some(id) => {
                 self.adapters.remove(&id);
                 self.adopted.remove(&id);
+                self.operator_approved.remove(&id);
                 Ok(())
             }
             // Every entry is pinned by an active mount.
@@ -300,23 +323,59 @@ impl AdapterLibrary {
         if decision.approved {
             self.adopted.insert(decision.adapter_id.clone());
         } else {
+            // Revoking automated clearance also drops the operator sign-off (it
+            // was for weights that no longer pass) and unmounts any live serving
+            // of this adapter — otherwise the router would keep serving weights
+            // the gate just rejected without ever calling `mount_gated` again.
             self.adopted.remove(&decision.adapter_id);
+            self.operator_approved.remove(&decision.adapter_id);
+            self.mounts
+                .retain(|_, mounted| mounted != &decision.adapter_id);
         }
     }
 
-    /// Whether `adapter_id` has cleared the adoption gate and may be mounted via
-    /// [`mount_gated`](Self::mount_gated).
+    /// Record operator sign-off — the **human** half of the adoption gate — for
+    /// `adapter_id` (S8.4.8). Call this when the E15 `WeightUpdate` proposal that
+    /// [`crate`]'s lifecycle bridge created from the adoption decision is approved
+    /// by an operator; [`mount_gated`](Self::mount_gated) then requires it on top
+    /// of automated adoption. A no-op if the proposal is later rejected — call
+    /// [`revoke_operator_approval`](Self::revoke_operator_approval) for that.
+    pub fn record_operator_approval(&mut self, adapter_id: &str) {
+        self.operator_approved.insert(adapter_id.to_string());
+    }
+
+    /// Withdraw operator sign-off for `adapter_id` (e.g. the proposal was
+    /// rejected or rescinded). A subsequent [`mount_gated`](Self::mount_gated)
+    /// refuses with [`MountError::NotOperatorApproved`] until re-approved.
+    pub fn revoke_operator_approval(&mut self, adapter_id: &str) {
+        self.operator_approved.remove(adapter_id);
+    }
+
+    /// Whether `adapter_id` has cleared the **automated** adoption gate and may
+    /// be mounted via [`mount_gated`](Self::mount_gated) once operator sign-off
+    /// is also recorded.
     pub fn is_adopted(&self, adapter_id: &str) -> bool {
         self.adopted.contains(adapter_id)
+    }
+
+    /// Whether `adapter_id` has operator sign-off (the human half of the gate).
+    pub fn is_operator_approved(&self, adapter_id: &str) -> bool {
+        self.operator_approved.contains(adapter_id)
     }
 
     /// Adoption-gated mount — the entry point the router must use before serving
     /// a self-trained adapter (S8.4.8 "before the router mounts it").
     ///
-    /// Identical to [`mount`](Self::mount) but additionally refuses, with
-    /// [`MountError::NotAdopted`], any adapter that has not been cleared by
-    /// [`record_adoption`](Self::record_adoption). The adoption check runs first
-    /// so an un-gated adapter never reaches the format check.
+    /// Identical to [`mount`](Self::mount) but additionally enforces **both**
+    /// halves of the adoption gate, so self-trained weights never reach a serving
+    /// tier on automated clearance alone:
+    /// 1. [`MountError::NotAdopted`] — the automated eval + alignment gate has not
+    ///    cleared the adapter ([`record_adoption`](Self::record_adoption)).
+    /// 2. [`MountError::NotOperatorApproved`] — the operator has not signed off on
+    ///    the resulting proposal ([`record_operator_approval`](Self::record_operator_approval)).
+    ///
+    /// The checks run before the format check so an un-gated adapter never reaches
+    /// it.
     pub fn mount_gated(&mut self, mount_id: MountId, adapter_id: &str) -> Result<(), MountError> {
         if !self.adapters.contains_key(adapter_id) {
             return Err(MountError::UnknownAdapter {
@@ -325,6 +384,11 @@ impl AdapterLibrary {
         }
         if !self.is_adopted(adapter_id) {
             return Err(MountError::NotAdopted {
+                adapter_id: adapter_id.to_string(),
+            });
+        }
+        if !self.is_operator_approved(adapter_id) {
+            return Err(MountError::NotOperatorApproved {
                 adapter_id: adapter_id.to_string(),
             });
         }
@@ -458,6 +522,7 @@ mod tests {
             alignment_passed: true,
             reasons: vec![],
         });
+        lib.record_operator_approval("a");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
@@ -465,9 +530,11 @@ mod tests {
         // Re-register the same id with fresh (un-gated) weights.
         lib.register(mountable("a", 5)).unwrap();
 
-        // Adoption is revoked and the stale mount is gone, so the router can no
-        // longer serve the swapped-in weights until they clear the gate again.
+        // Adoption + operator clearance are revoked and the stale mount is gone,
+        // so the router can no longer serve the swapped-in weights until they
+        // clear both halves of the gate again.
         assert!(!lib.is_adopted("a"));
+        assert!(!lib.is_operator_approved("a"));
         assert!(lib.mounted_at(&mp).is_none());
         assert_eq!(
             lib.mount_gated(mp, "a"),
@@ -552,14 +619,41 @@ mod tests {
     }
 
     #[test]
-    fn mount_gated_allows_after_adoption() {
+    fn mount_gated_allows_after_both_gate_halves() {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
         lib.record_adoption(&approved("a"));
         assert!(lib.is_adopted("a"));
         let mp = MountId::new("instinct", "base-q4");
+        // Automated clearance without operator sign-off is still refused.
+        assert_eq!(
+            lib.mount_gated(mp.clone(), "a"),
+            Err(MountError::NotOperatorApproved {
+                adapter_id: "a".to_string()
+            })
+        );
+        // Both halves recorded ⇒ mount succeeds.
+        lib.record_operator_approval("a");
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
+    }
+
+    #[test]
+    fn revoking_adoption_unmounts_live_adapter() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&approved("a"));
+        lib.record_operator_approval("a");
+        let mp = MountId::new("instinct", "base-q4");
+        lib.mount_gated(mp.clone(), "a").unwrap();
+        assert_eq!(lib.mounted_at(&mp), Some("a"));
+
+        // A later rejecting decision (failed re-eval / alignment veto) must pull
+        // the live mount, not just the clearance bit.
+        lib.record_adoption(&rejected("a"));
+        assert!(!lib.is_adopted("a"));
+        assert!(!lib.is_operator_approved("a"));
+        assert!(lib.mounted_at(&mp).is_none());
     }
 
     #[test]
@@ -626,6 +720,7 @@ mod tests {
         let mut lib = AdapterLibrary::new(8);
         lib.register(baked("h", 1)).unwrap();
         lib.record_adoption(&approved("h"));
+        lib.record_operator_approval("h");
         let mp = MountId::new("instinct", "base-q4");
         assert_eq!(
             lib.mount_gated(mp, "h"),
