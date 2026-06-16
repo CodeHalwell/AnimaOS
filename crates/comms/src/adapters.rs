@@ -43,6 +43,28 @@ fn screen_egress(guard: &EgressGuard, base_url: &str) -> Result<(), ChannelError
     }
 }
 
+/// A process-wide blocking HTTP client shared by every live channel send.
+///
+/// Building a `reqwest::blocking::Client` per call would force a fresh TCP/TLS
+/// handshake on every message; a single lazily-built client keeps the
+/// connection pool (Keep-Alive) warm across sends. The build result is cached
+/// so a one-time TLS-backend failure surfaces consistently instead of being
+/// retried on a hot path. Both channels share one timeout policy.
+#[cfg(feature = "live")]
+fn shared_http_client() -> Result<&'static reqwest::blocking::Client, ChannelError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| ChannelError::TransientFailure(format!("http client build failed: {e}")))
+}
+
 /// Extract the plain-text body of an outbound message, or report the modality
 /// as unsupported. The live channel paths only render text; image/voice replies
 /// would need `sendPhoto` / `sendVoice` equivalents not implemented here.
@@ -150,12 +172,7 @@ impl TelegramAdapter {
             let token = std::env::var("ANIMA_TELEGRAM_TOKEN")
                 .map_err(|_| ChannelError::ApiError("ANIMA_TELEGRAM_TOKEN not set".into()))?;
             let url = format!("{TELEGRAM_API_BASE}/bot{token}/sendMessage");
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .map_err(|e| {
-                    ChannelError::TransientFailure(format!("http client build failed: {e}"))
-                })?;
+            let client = shared_http_client()?;
             let resp = client
                 .post(&url)
                 .json(&serde_json::json!({ "chat_id": to, "text": text }))
@@ -259,12 +276,7 @@ impl SlackAdapter {
             let token = std::env::var("ANIMA_SLACK_TOKEN")
                 .map_err(|_| ChannelError::ApiError("ANIMA_SLACK_TOKEN not set".into()))?;
             let url = format!("{SLACK_API_BASE}/api/chat.postMessage");
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .map_err(|e| {
-                    ChannelError::TransientFailure(format!("http client build failed: {e}"))
-                })?;
+            let client = shared_http_client()?;
             let resp = client
                 .post(&url)
                 .bearer_auth(token)

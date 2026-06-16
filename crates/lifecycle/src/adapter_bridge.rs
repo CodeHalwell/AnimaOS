@@ -18,7 +18,9 @@ use crate::approval::{Proposal, ProposalKind, ProposalStatus};
 /// Returns `None` when `decision` was **not** approved — an adapter that failed
 /// the automated eval/alignment gate must never reach the operator queue (it is
 /// not promotable), mirroring `skill_proposal_to_queue_proposal` returning
-/// `None` for skills that were not `PendingApproval`.
+/// `None` for skills that were not `PendingApproval`. Also returns `None` when
+/// `artifact` and `decision` describe different adapters, so a mismatched pair
+/// can never queue the wrong weights for sign-off.
 ///
 /// On approval the proposal carries the base model, the adapter weights digest,
 /// the adaptation rank (if any), and a caller-supplied `training_summary`; its
@@ -29,7 +31,10 @@ pub fn adapter_adoption_to_proposal(
     training_summary: impl Into<String>,
     now_ns: u64,
 ) -> Option<Proposal> {
-    if !decision.approved {
+    // Refuse to promote when the decision is unapproved, or when the artifact
+    // and the decision describe different adapters — a mismatch would queue the
+    // wrong weights for the operator to sign off on.
+    if !decision.approved || artifact.adapter_id != decision.adapter_id {
         return None;
     }
     Some(Proposal {
@@ -135,6 +140,15 @@ mod tests {
     #[test]
     fn rejected_adapter_yields_no_proposal() {
         assert!(adapter_adoption_to_proposal(&artifact(), &rejected(), "x", 1).is_none());
+    }
+
+    #[test]
+    fn mismatched_adapter_id_yields_no_proposal() {
+        // An approved decision for a *different* adapter must never promote this
+        // artifact's weights — the IDs are cross-checked before queueing.
+        let mut decision = approved();
+        decision.adapter_id = "some-other-adapter".to_string();
+        assert!(adapter_adoption_to_proposal(&artifact(), &decision, "x", 1).is_none());
     }
 
     #[test]

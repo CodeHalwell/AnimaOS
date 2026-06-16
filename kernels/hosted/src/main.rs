@@ -5617,10 +5617,19 @@ const DEFAULT_FINETUNE_COOLDOWN_HOURS: u64 = 24;
 /// Alpaca file's non-empty lines yields the pair count without triple-counting.
 /// A missing corpus (agent never compiled any) counts as zero.
 fn count_corpus_pairs(corpus_dir: &std::path::Path) -> usize {
+    use std::io::BufRead;
     let file = corpus_dir.join("alpaca.jsonl");
-    std::fs::read_to_string(&file)
-        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0)
+    let Ok(f) = std::fs::File::open(&file) else {
+        return 0;
+    };
+    // Stream the corpus line-by-line: it grows unboundedly with the agent's
+    // training history, so we never pull the whole file into memory just to
+    // count non-empty pairs.
+    std::io::BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .count()
 }
 
 /// Whether a job's payload is a fine-tune proposal (matches the payload `kind`
