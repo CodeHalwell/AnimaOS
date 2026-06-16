@@ -39,7 +39,12 @@ const SLACK_API_BASE: &str = "https://slack.com";
 fn comms_live_enabled() -> bool {
     std::env::var("ANIMA_COMMS_LIVE")
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -191,8 +196,14 @@ impl TelegramAdapter {
                 .post(&url)
                 .json(&serde_json::json!({ "chat_id": to, "text": text }))
                 .send()
+                // `reqwest::Error` Display includes the request URL, which embeds
+                // the bot token in `/bot{token}/sendMessage`; strip it so the
+                // token can never leak into a `ChannelError` or its logs.
                 .map_err(|e| {
-                    ChannelError::TransientFailure(format!("telegram send failed: {e}"))
+                    ChannelError::TransientFailure(format!(
+                        "telegram send failed: {}",
+                        e.without_url()
+                    ))
                 })?;
             if !resp.status().is_success() {
                 return Err(ChannelError::ApiError(format!(
@@ -296,7 +307,15 @@ impl SlackAdapter {
                 .bearer_auth(token)
                 .json(&serde_json::json!({ "channel": to, "text": text }))
                 .send()
-                .map_err(|e| ChannelError::TransientFailure(format!("slack send failed: {e}")))?;
+                // Slack carries the token in the bearer header (not the URL), but
+                // strip the URL defensively to keep the same no-credential-leak
+                // guarantee as the Telegram path.
+                .map_err(|e| {
+                    ChannelError::TransientFailure(format!(
+                        "slack send failed: {}",
+                        e.without_url()
+                    ))
+                })?;
             if !resp.status().is_success() {
                 return Err(ChannelError::ApiError(format!(
                     "slack API returned status {}",

@@ -177,20 +177,29 @@ impl AdapterLibrary {
     }
 
     /// Register an artifact. Re-registering the same `adapter_id` replaces it in
-    /// place (no eviction) and revokes both its adoption clearance and any live
-    /// mounts of it, so the replacement weights must clear the gate and be
-    /// re-mounted before the router serves them. Otherwise, if full, eviction
-    /// follows the configured [`EvictionPolicy`]; mounted adapters are pinned and
-    /// never evicted.
+    /// place (no eviction). Otherwise, if full, eviction follows the configured
+    /// [`EvictionPolicy`]; mounted adapters are pinned and never evicted.
+    ///
+    /// Any registration of an id — first-time or replacement — revokes that id's
+    /// adoption clearance and drops any live mounts of it, so the registered
+    /// weights must clear the gate ([`record_adoption`]) and be re-mounted before
+    /// the router serves them. This is what prevents a clearance recorded for an
+    /// id *before* its artifact exists from auto-adopting whatever weights are
+    /// later registered under that id: clearance only ever applies to weights
+    /// that were already in the library when it was recorded.
+    ///
+    /// [`record_adoption`]: Self::record_adoption
     pub fn register(&mut self, artifact: AdapterArtifact) -> Result<(), MountError> {
+        // A (re)registration changes (or first establishes) the bytes behind this
+        // id, so any standing adoption clearance and any live mount of it are
+        // stale and must be cleared before the new weights can be served. Doing
+        // this on every path — not just replacement — also closes the
+        // "adopt-then-register" pre-clearance hole. For a brand-new id these are
+        // no-ops (nothing adopted or mounted yet).
+        self.adopted.remove(&artifact.adapter_id);
+        self.mounts
+            .retain(|_, mounted| mounted != &artifact.adapter_id);
         if self.adapters.contains_key(&artifact.adapter_id) {
-            // Re-registering replaces the weights, so any prior adoption is
-            // stale — the new artifact must clear the gate again before mounting.
-            self.adopted.remove(&artifact.adapter_id);
-            // Drop any live mounts serving the old weights: leaving them in place
-            // would let the router keep serving the freshly-swapped, un-gated
-            // artifact, defeating the re-adoption requirement above.
-            self.mounts.retain(|_, mounted| mounted != &artifact.adapter_id);
             self.adapters.insert(artifact.adapter_id.clone(), artifact);
             return Ok(());
         }
@@ -278,10 +287,15 @@ impl AdapterLibrary {
     ///
     /// An **approved** decision clears the adapter for [`mount_gated`]; a
     /// rejected decision revokes any prior clearance (e.g. after a re-eval that
-    /// no longer beats baseline). The adapter need not be registered yet — the
-    /// clearance is keyed by id and consulted at mount time.
+    /// no longer beats baseline).
+    ///
+    /// Record this **after** [`register`]ing the exact weights the decision was
+    /// made about: a subsequent (re)registration of the same id clears the
+    /// clearance, so recording it before the artifact exists has no lasting
+    /// effect (and cannot pre-adopt weights that have not been evaluated).
     ///
     /// [`mount_gated`]: Self::mount_gated
+    /// [`register`]: Self::register
     pub fn record_adoption(&mut self, decision: &AdoptionDecision) {
         if decision.approved {
             self.adopted.insert(decision.adapter_id.clone());
@@ -455,6 +469,30 @@ mod tests {
         // longer serve the swapped-in weights until they clear the gate again.
         assert!(!lib.is_adopted("a"));
         assert!(lib.mounted_at(&mp).is_none());
+        assert_eq!(
+            lib.mount_gated(mp, "a"),
+            Err(MountError::NotAdopted {
+                adapter_id: "a".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn adoption_recorded_before_registration_does_not_pre_clear_weights() {
+        let mut lib = AdapterLibrary::new(8);
+        // Clearance recorded for an id that has no artifact yet.
+        lib.record_adoption(&AdoptionDecision {
+            adapter_id: "a".to_string(),
+            approved: true,
+            eval_passed: true,
+            alignment_passed: true,
+            reasons: vec![],
+        });
+        // Registering *any* weights under that id must not inherit the stale
+        // clearance — those bytes were never evaluated.
+        lib.register(mountable("a", 1)).unwrap();
+        assert!(!lib.is_adopted("a"));
+        let mp = MountId::new("instinct", "base-q4");
         assert_eq!(
             lib.mount_gated(mp, "a"),
             Err(MountError::NotAdopted {
