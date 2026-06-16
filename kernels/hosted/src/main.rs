@@ -5541,8 +5541,15 @@ fn cmd_jobs(args: &[String]) {
             let cooldown_hours = flag_value(args, "--cooldown-hours")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_FINETUNE_COOLDOWN_HOURS);
+            // Resolve the base model the same way `serve` does, so a proposal
+            // targets the model the agent actually serves/pulled rather than a
+            // placeholder: explicit --base-model / ANIMA_MODEL first, then the
+            // serve chain (ANIMA_OLLAMA_MODEL → ANIMA_WORKHORSE_MODEL), then the
+            // last-resort placeholder.
             let base_model = flag_value(args, "--base-model")
                 .or_else(|| std::env::var("ANIMA_MODEL").ok())
+                .or_else(|| std::env::var("ANIMA_OLLAMA_MODEL").ok())
+                .or_else(|| std::env::var("ANIMA_WORKHORSE_MODEL").ok())
                 .unwrap_or_else(|| "base-q4".to_string());
             let corpus_dir = flag_value(args, "--corpus-dir")
                 .or_else(|| std::env::var("ANIMA_CORPUS_DIR").ok())
@@ -5553,7 +5560,7 @@ fn cmd_jobs(args: &[String]) {
             let workspace = flag_value(args, "--workspace").unwrap_or_default();
 
             let corpus_pairs = count_corpus_pairs(std::path::Path::new(&corpus_dir));
-            let last_proposed = latest_finetune_proposal_ns(&registry);
+            let last_proposed = latest_finetune_proposal_ns(&registry, &workspace);
             let cooldown_ns = cooldown_hours
                 .saturating_mul(3_600)
                 .saturating_mul(1_000_000_000);
@@ -5667,13 +5674,16 @@ fn job_is_finetune_proposal(job: &jobs::ScheduledJob) -> bool {
         .unwrap_or(false)
 }
 
-/// The `created_at_ns` of the most recent fine-tune proposal already in the
-/// registry, used as the trigger's cooldown anchor (so repeated invocations
-/// don't re-propose until the cooldown elapses).
-fn latest_finetune_proposal_ns(registry: &jobs::JobRegistry) -> Option<u64> {
+/// The `created_at_ns` of the most recent fine-tune proposal for `workspace_id`
+/// already in the registry, used as the trigger's cooldown anchor (so repeated
+/// invocations don't re-propose until the cooldown elapses).
+///
+/// Scoped to the workspace so a proposal for one workspace doesn't suppress a
+/// valid proposal for another in the same agent registry.
+fn latest_finetune_proposal_ns(registry: &jobs::JobRegistry, workspace_id: &str) -> Option<u64> {
     registry
         .iter()
-        .filter(|(_, j)| job_is_finetune_proposal(j))
+        .filter(|(_, j)| job_is_finetune_proposal(j) && j.workspace_id == workspace_id)
         .map(|(_, j)| j.created_at_ns)
         .max()
 }
@@ -7392,7 +7402,7 @@ mod finetune_proposal_tests {
     #[test]
     fn latest_finetune_proposal_ns_returns_max_over_proposals_only() {
         let mut reg = JobRegistry::in_memory();
-        assert_eq!(latest_finetune_proposal_ns(&reg), None);
+        assert_eq!(latest_finetune_proposal_ns(&reg, ""), None);
 
         let trigger = FineTuneTrigger::new(10, 0);
         reg.add(trigger.build_job(20, "base-q4", "", 100)).unwrap();
@@ -7407,6 +7417,22 @@ mod finetune_proposal_tests {
         ))
         .unwrap();
 
-        assert_eq!(latest_finetune_proposal_ns(&reg), Some(300));
+        assert_eq!(latest_finetune_proposal_ns(&reg, ""), Some(300));
+    }
+
+    #[test]
+    fn latest_finetune_proposal_ns_is_scoped_to_workspace() {
+        let mut reg = JobRegistry::in_memory();
+        let trigger = FineTuneTrigger::new(10, 0);
+        reg.add(trigger.build_job(20, "base-q4", "ws-a", 100))
+            .unwrap();
+        reg.add(trigger.build_job(30, "base-q4", "ws-b", 500))
+            .unwrap();
+
+        // Each workspace's cooldown anchor sees only its own proposals, so a
+        // newer proposal in ws-b doesn't suppress ws-a (and vice versa).
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-a"), Some(100));
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-b"), Some(500));
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-c"), None);
     }
 }
