@@ -2199,14 +2199,24 @@ fn cmd_data(args: &[String]) {
                         );
                         // Open the per-user conversation store once; it backs
                         // both the episodic-memory and usage-stats sections. A
-                        // missing store (agent never persisted any sessions) is
-                        // "no records", not an error.
+                        // missing store (agent never persisted any sessions)
+                        // opens empty and is "no records"; a real I/O/parse
+                        // error (e.g. a corrupted sessions.json) must abort
+                        // rather than silently emit an incomplete GDPR export.
                         let session_store =
-                            SessionStore::open(SessionStore::default_path(AGENT_ID)).ok();
-                        let user_sessions = session_store
-                            .as_ref()
-                            .map(|s| s.list(&SessionQuery::for_user(user_id.as_str())))
-                            .unwrap_or_default();
+                            match SessionStore::open(SessionStore::default_path(AGENT_ID)) {
+                                Ok(store) => store,
+                                Err(e) => {
+                                    eprintln!(
+                                        "data: cannot read session store for export ({e}); \
+                                         refusing to emit an incomplete export"
+                                    );
+                                    cli_fail(1);
+                                    return;
+                                }
+                            };
+                        let user_sessions =
+                            session_store.list(&SessionQuery::for_user(user_id.as_str()));
                         let total_turns: usize = user_sessions.iter().map(|s| s.turns.len()).sum();
 
                         // Populate every consented category with the subject's
@@ -5588,7 +5598,7 @@ fn cmd_jobs(args: &[String]) {
             eprintln!("       anima-hosted jobs remove <job_id> [<reason>]");
             eprintln!("       anima-hosted jobs run <job_id>");
             eprintln!("       anima-hosted jobs poll");
-            eprintln!("       anima-hosted jobs propose-finetune [--threshold <n>] [--cooldown-hours <h>] [--base-model <m>] [--corpus-dir <path>]");
+            eprintln!("       anima-hosted jobs propose-finetune [--threshold <n>] [--cooldown-hours <h>] [--base-model <m>] [--corpus-dir <path>] [--workspace <id>]");
             eprintln!();
             eprintln!(
                 "note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)"

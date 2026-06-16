@@ -22,4 +22,7 @@ senses = { path = "../senses" }
 actuators = { path = "../actuators" }
 # Only needed on the live HTTP path: request bodies + response parsing.
 serde_json = { workspace = true, optional = true }
-reqwest = { version = "0.13", features = ["blocking", "json"], default-features = false, optional = true }
+# `rustls-tls` is required: defaults are off, and without a TLS backend the
+# live Telegram/Slack `https://` sends fail before reaching the API. rustls
+# avoids a system OpenSSL build-dep.
+reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false, optional = true }

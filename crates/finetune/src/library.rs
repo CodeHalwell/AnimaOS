@@ -177,13 +177,20 @@ impl AdapterLibrary {
     }
 
     /// Register an artifact. Re-registering the same `adapter_id` replaces it in
-    /// place (no eviction). Otherwise, if full, eviction follows the configured
-    /// [`EvictionPolicy`]; mounted adapters are pinned and never evicted.
+    /// place (no eviction) and revokes both its adoption clearance and any live
+    /// mounts of it, so the replacement weights must clear the gate and be
+    /// re-mounted before the router serves them. Otherwise, if full, eviction
+    /// follows the configured [`EvictionPolicy`]; mounted adapters are pinned and
+    /// never evicted.
     pub fn register(&mut self, artifact: AdapterArtifact) -> Result<(), MountError> {
         if self.adapters.contains_key(&artifact.adapter_id) {
             // Re-registering replaces the weights, so any prior adoption is
             // stale — the new artifact must clear the gate again before mounting.
             self.adopted.remove(&artifact.adapter_id);
+            // Drop any live mounts serving the old weights: leaving them in place
+            // would let the router keep serving the freshly-swapped, un-gated
+            // artifact, defeating the re-adoption requirement above.
+            self.mounts.retain(|_, mounted| mounted != &artifact.adapter_id);
             self.adapters.insert(artifact.adapter_id.clone(), artifact);
             return Ok(());
         }
@@ -424,6 +431,36 @@ mod tests {
         lib.mount(mp.clone(), "a").unwrap();
         lib.mount(mp.clone(), "b").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("b"));
+    }
+
+    #[test]
+    fn reregistering_replaced_id_revokes_adoption_and_unmounts() {
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(mountable("a", 1)).unwrap();
+        lib.record_adoption(&AdoptionDecision {
+            adapter_id: "a".to_string(),
+            approved: true,
+            eval_passed: true,
+            alignment_passed: true,
+            reasons: vec![],
+        });
+        let mp = MountId::new("instinct", "base-q4");
+        lib.mount_gated(mp.clone(), "a").unwrap();
+        assert_eq!(lib.mounted_at(&mp), Some("a"));
+
+        // Re-register the same id with fresh (un-gated) weights.
+        lib.register(mountable("a", 5)).unwrap();
+
+        // Adoption is revoked and the stale mount is gone, so the router can no
+        // longer serve the swapped-in weights until they clear the gate again.
+        assert!(!lib.is_adopted("a"));
+        assert!(lib.mounted_at(&mp).is_none());
+        assert_eq!(
+            lib.mount_gated(mp, "a"),
+            Err(MountError::NotAdopted {
+                adapter_id: "a".to_string()
+            })
+        );
     }
 
     #[test]

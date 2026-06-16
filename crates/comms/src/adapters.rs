@@ -29,6 +29,20 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 /// Slack Web API origin.
 const SLACK_API_BASE: &str = "https://slack.com";
 
+/// Whether the `ANIMA_COMMS_LIVE` runtime gate enables live channel sends.
+///
+/// Parsed as a boolean rather than a presence check so an explicit
+/// `ANIMA_COMMS_LIVE=0` (or `false`/`off`/empty) keeps egress **off** — a bare
+/// presence test would let an operator who sets the var to disable live mode
+/// accidentally turn it on. Only `1`/`true`/`yes`/`on` (case-insensitive)
+/// enable it, matching the documented `ANIMA_COMMS_LIVE=1`.
+fn comms_live_enabled() -> bool {
+    std::env::var("ANIMA_COMMS_LIVE")
+        .ok()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Screen `base_url` through `guard`, mapping a denial to a [`ChannelError`].
 ///
 /// Run before reading any token or opening a socket so a policy violation can
@@ -141,7 +155,7 @@ impl TelegramAdapter {
     pub fn with_fixture(messages: Vec<FixtureMessage>) -> Self {
         Self {
             fixture: FixtureQueue::new(messages),
-            live: std::env::var("ANIMA_COMMS_LIVE").is_ok(),
+            live: comms_live_enabled(),
             egress_guard: EgressGuard::default(),
         }
     }
@@ -250,7 +264,7 @@ impl SlackAdapter {
     pub fn with_fixture(messages: Vec<FixtureMessage>) -> Self {
         Self {
             fixture: FixtureQueue::new(messages),
-            live: std::env::var("ANIMA_COMMS_LIVE").is_ok(),
+            live: comms_live_enabled(),
             egress_guard: EgressGuard::default(),
         }
     }
