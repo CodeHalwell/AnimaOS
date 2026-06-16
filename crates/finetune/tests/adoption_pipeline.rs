@@ -89,7 +89,7 @@ fn adapter_mounts_only_after_clearing_the_gate() {
     ));
 
     // With operator sign-off recorded too, the same mount succeeds.
-    lib.record_operator_approval(&artifact.adapter_id);
+    lib.record_operator_approval(&artifact.adapter_id, &artifact.weights_digest);
     lib.mount_gated(mount.clone(), &artifact.adapter_id)
         .unwrap();
     assert_eq!(lib.mounted_at(&mount), Some(artifact.adapter_id.as_str()));

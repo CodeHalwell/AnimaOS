@@ -156,11 +156,13 @@ pub struct AdapterLibrary {
     adopted: HashSet<String>,
     /// Adapter ids that have additionally received **operator** sign-off via
     /// [`AdapterLibrary::record_operator_approval`] (the human half of the gate:
-    /// the E15 `WeightUpdate` proposal was approved). [`AdapterLibrary::mount_gated`]
-    /// requires both this *and* [`Self::adopted`], so self-trained weights never
-    /// reach a serving tier on automated clearance alone. Cleared on the same
-    /// events as `adopted`.
-    operator_approved: HashSet<String>,
+    /// the E15 `WeightUpdate` proposal was approved), mapped to the exact
+    /// `weights_digest` the operator approved. [`AdapterLibrary::mount_gated`]
+    /// requires both this *and* [`Self::adopted`], and the stored digest must
+    /// match the currently-registered artifact — so approving a stale proposal
+    /// for an id whose weights have since been replaced never clears the new
+    /// weights. Cleared on the same events as `adopted`.
+    operator_approved: HashMap<String, String>,
 }
 
 impl AdapterLibrary {
@@ -178,7 +180,7 @@ impl AdapterLibrary {
             adapters: HashMap::new(),
             mounts: HashMap::new(),
             adopted: HashSet::new(),
-            operator_approved: HashSet::new(),
+            operator_approved: HashMap::new(),
         }
     }
 
@@ -335,13 +337,21 @@ impl AdapterLibrary {
     }
 
     /// Record operator sign-off — the **human** half of the adoption gate — for
-    /// `adapter_id` (S8.4.8). Call this when the E15 `WeightUpdate` proposal that
-    /// [`crate`]'s lifecycle bridge created from the adoption decision is approved
-    /// by an operator; [`mount_gated`](Self::mount_gated) then requires it on top
-    /// of automated adoption. A no-op if the proposal is later rejected — call
-    /// [`revoke_operator_approval`](Self::revoke_operator_approval) for that.
-    pub fn record_operator_approval(&mut self, adapter_id: &str) {
-        self.operator_approved.insert(adapter_id.to_string());
+    /// the `weights_digest` weights of `adapter_id` (S8.4.8). Call this when the
+    /// E15 `WeightUpdate` proposal that [`crate`]'s lifecycle bridge created from
+    /// the adoption decision is approved by an operator, passing the digest that
+    /// proposal carried; [`mount_gated`](Self::mount_gated) then requires it on
+    /// top of automated adoption.
+    ///
+    /// The digest is recorded (not just the id) so that approving a **stale**
+    /// proposal — one whose weights have since been replaced under the same id —
+    /// does not clear the new weights: [`is_operator_approved`] only honours the
+    /// approval when the stored digest still matches the registered artifact.
+    ///
+    /// [`is_operator_approved`]: Self::is_operator_approved
+    pub fn record_operator_approval(&mut self, adapter_id: &str, weights_digest: &str) {
+        self.operator_approved
+            .insert(adapter_id.to_string(), weights_digest.to_string());
     }
 
     /// Withdraw operator sign-off for `adapter_id` (e.g. the proposal was
@@ -358,9 +368,19 @@ impl AdapterLibrary {
         self.adopted.contains(adapter_id)
     }
 
-    /// Whether `adapter_id` has operator sign-off (the human half of the gate).
+    /// Whether `adapter_id` has operator sign-off for its **currently-registered**
+    /// weights (the human half of the gate). Returns `false` when the adapter is
+    /// unregistered, has no recorded approval, or the approved digest no longer
+    /// matches the registered artifact (a stale proposal was approved after the
+    /// weights were replaced).
     pub fn is_operator_approved(&self, adapter_id: &str) -> bool {
-        self.operator_approved.contains(adapter_id)
+        match (
+            self.operator_approved.get(adapter_id),
+            self.adapters.get(adapter_id),
+        ) {
+            (Some(approved_digest), Some(artifact)) => approved_digest == &artifact.weights_digest,
+            _ => false,
+        }
     }
 
     /// Adoption-gated mount — the entry point the router must use before serving
@@ -522,7 +542,7 @@ mod tests {
             alignment_passed: true,
             reasons: vec![],
         });
-        lib.record_operator_approval("a");
+        lib.record_operator_approval("a", "d");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
@@ -633,7 +653,7 @@ mod tests {
             })
         );
         // Both halves recorded ⇒ mount succeeds.
-        lib.record_operator_approval("a");
+        lib.record_operator_approval("a", "d");
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
     }
@@ -643,7 +663,7 @@ mod tests {
         let mut lib = AdapterLibrary::new(8);
         lib.register(mountable("a", 1)).unwrap();
         lib.record_adoption(&approved("a"));
-        lib.record_operator_approval("a");
+        lib.record_operator_approval("a", "d");
         let mp = MountId::new("instinct", "base-q4");
         lib.mount_gated(mp.clone(), "a").unwrap();
         assert_eq!(lib.mounted_at(&mp), Some("a"));
@@ -654,6 +674,40 @@ mod tests {
         assert!(!lib.is_adopted("a"));
         assert!(!lib.is_operator_approved("a"));
         assert!(lib.mounted_at(&mp).is_none());
+    }
+
+    #[test]
+    fn stale_operator_approval_does_not_clear_replaced_weights() {
+        let mut lib = AdapterLibrary::new(8);
+        // v1 of adapter "a" with a distinct digest, fully gated and mounted.
+        let mut v1 = mountable("a", 1);
+        v1.weights_digest = "digest-v1".to_string();
+        lib.register(v1).unwrap();
+        lib.record_adoption(&approved("a"));
+        lib.record_operator_approval("a", "digest-v1");
+        assert!(lib.is_operator_approved("a"));
+
+        // New weights are registered under the same id (clears both gates).
+        let mut v2 = mountable("a", 2);
+        v2.weights_digest = "digest-v2".to_string();
+        lib.register(v2).unwrap();
+        lib.record_adoption(&approved("a"));
+
+        // Approving the *stale* v1 proposal (digest-v1) must not clear v2: the
+        // stored digest no longer matches the registered artifact.
+        lib.record_operator_approval("a", "digest-v1");
+        assert!(!lib.is_operator_approved("a"));
+        let mp = MountId::new("instinct", "base-q4");
+        assert_eq!(
+            lib.mount_gated(mp.clone(), "a"),
+            Err(MountError::NotOperatorApproved {
+                adapter_id: "a".to_string()
+            })
+        );
+
+        // Approving the correct v2 digest clears it.
+        lib.record_operator_approval("a", "digest-v2");
+        lib.mount_gated(mp, "a").unwrap();
     }
 
     #[test]
@@ -720,7 +774,7 @@ mod tests {
         let mut lib = AdapterLibrary::new(8);
         lib.register(baked("h", 1)).unwrap();
         lib.record_adoption(&approved("h"));
-        lib.record_operator_approval("h");
+        lib.record_operator_approval("h", "d");
         let mp = MountId::new("instinct", "base-q4");
         assert_eq!(
             lib.mount_gated(mp, "h"),
