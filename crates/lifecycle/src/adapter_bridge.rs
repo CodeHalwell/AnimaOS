@@ -19,8 +19,10 @@ use crate::approval::{Proposal, ProposalKind, ProposalStatus};
 /// the automated eval/alignment gate must never reach the operator queue (it is
 /// not promotable), mirroring `skill_proposal_to_queue_proposal` returning
 /// `None` for skills that were not `PendingApproval`. Also returns `None` when
-/// `artifact` and `decision` describe different adapters, so a mismatched pair
-/// can never queue the wrong weights for sign-off.
+/// `artifact` and `decision` describe different adapters (so a mismatched pair
+/// can never queue the wrong weights for sign-off), and when `artifact` is a
+/// baked variant — a `WeightUpdate` proposal advertises a hot-mountable adapter,
+/// which a baked variant is not.
 ///
 /// On approval the proposal carries the base model, the adapter weights digest,
 /// the adaptation rank (if any), and a caller-supplied `training_summary`; its
@@ -31,10 +33,15 @@ pub fn adapter_adoption_to_proposal(
     training_summary: impl Into<String>,
     now_ns: u64,
 ) -> Option<Proposal> {
-    // Refuse to promote when the decision is unapproved, or when the artifact
-    // and the decision describe different adapters — a mismatch would queue the
-    // wrong weights for the operator to sign off on.
-    if !decision.approved || artifact.adapter_id != decision.adapter_id {
+    // Refuse to promote when the decision is unapproved, when the artifact and
+    // the decision describe different adapters (a mismatch would queue the wrong
+    // weights for sign-off), or when the artifact is a baked variant. A
+    // `WeightUpdate` proposal advertises a hot-mountable adapter (`adapter_hash`
+    // + `rank`); a baked variant cannot be hot-mounted (`mount_gated` rejects
+    // it), so emitting one would hand the operator an item that can't be applied
+    // as described. Baked variants are promoted as distinct models elsewhere.
+    if !decision.approved || artifact.adapter_id != decision.adapter_id || !artifact.is_mountable()
+    {
         return None;
     }
     Some(Proposal {
@@ -149,6 +156,17 @@ mod tests {
         let mut decision = approved();
         decision.adapter_id = "some-other-adapter".to_string();
         assert!(adapter_adoption_to_proposal(&artifact(), &decision, "x", 1).is_none());
+    }
+
+    #[test]
+    fn baked_variant_yields_no_proposal() {
+        // A baked variant cleared the gate but can't be hot-mounted, so a
+        // WeightUpdate (adapter-mount) proposal would be inapplicable.
+        let mut baked = artifact();
+        baked.format = AdapterFormat::BakedGguf;
+        baked.serving_tier = ServingTier::BakedVariant;
+        assert!(!baked.is_mountable());
+        assert!(adapter_adoption_to_proposal(&baked, &approved(), "x", 1).is_none());
     }
 
     #[test]

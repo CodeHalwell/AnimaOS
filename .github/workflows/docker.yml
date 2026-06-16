@@ -107,14 +107,21 @@ jobs:
         run: |
           IMAGE=$(head -1 <<< "${{ steps.meta.outputs.tags }}")
           echo "Smoke-testing ${IMAGE}"
+          # The image binds the console on 0.0.0.0 (so the published port is
+          # reachable); the bind policy therefore requires a bearer token. Pass
+          # one and authenticate every request — this also exercises the auth
+          # path the way the image is meant to run in production.
+          TOKEN=ci-smoke-token
           docker run -d --name anima-smoke \
             -e ANIMA_BACKEND=mock \
+            -e ANIMA_CONSOLE_TOKEN="${TOKEN}" \
             -p 127.0.0.1:8088:8088 \
             "${IMAGE}" serve
 
-          # Wait for the console to accept connections (≤ 30 s).
+          # Wait for the console to accept connections (≤ 30 s). /healthz is the
+          # one route the token does not gate, so it doubles as the liveness probe.
           for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:8088/; then break; fi
+            if curl -sf -o /dev/null http://127.0.0.1:8088/healthz; then break; fi
             if [ "$i" = "30" ]; then
               echo "❌ console did not come up within 30 s"
               docker logs anima-smoke; exit 1
@@ -123,11 +130,13 @@ jobs:
           done
           echo "✅ dashboard responds"
 
-          # Capture the SSE stream while injecting guidance.
-          curl -sN --max-time 15 http://127.0.0.1:8088/events > /tmp/events.log &
+          # Capture the SSE stream while injecting guidance. EventSource can't set
+          # headers, so /events takes the token as a query parameter.
+          curl -sN --max-time 15 "http://127.0.0.1:8088/events?token=${TOKEN}" > /tmp/events.log &
           SSE_PID=$!
           sleep 1
           curl -sf -X POST http://127.0.0.1:8088/guidance \
+            -H "Authorization: Bearer ${TOKEN}" \
             -H 'Content-Type: application/json' \
             -d '{"text":"ci smoke test","priority":"High"}'
           echo "✅ guidance accepted"

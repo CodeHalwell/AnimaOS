@@ -109,8 +109,7 @@ impl FineTuneTrigger {
         let payload = FineTuneProposalPayload::new(base_model, corpus_pairs);
         // Serialising this small, owned struct cannot fail; assert the invariant
         // rather than silently enqueueing an empty payload the runner can't route.
-        let payload_json = serde_json::to_string(&payload)
-            .expect("FineTuneProposalPayload serialises to JSON");
+        let payload_json = serde_json::to_string(&payload).expect("payload serialises");
         ScheduledJob::new(
             format!("fine-tune proposal: corpus reached {corpus_pairs} pairs"),
             workspace_id,
