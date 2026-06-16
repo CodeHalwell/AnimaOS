@@ -141,7 +141,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # Operator console: bind all interfaces inside the container (compose maps
-      # only loopback on the host).  Set ANIMA_CONSOLE_TOKEN to require a token.
+      # only loopback on the host). The bind policy refuses a non-loopback bind
+      # without a token, so ANIMA_CONSOLE_TOKEN is REQUIRED here — set it in your
+      # .env (this production stack ships no default so an unauthenticated
+      # console is never exposed by accident). `docker compose up` will fail-fast
+      # with a clear message until it is set.
       ANIMA_CONSOLE_ADDR: 0.0.0.0:8088
       ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-}
       ANIMA_AUDIT_DIR: /home/anima/.anima/audit

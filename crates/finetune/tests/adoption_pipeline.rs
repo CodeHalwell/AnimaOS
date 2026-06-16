@@ -82,7 +82,7 @@ fn adapter_mounts_only_after_clearing_the_gate() {
     );
 
     // Automated clearance alone is not enough — the operator half still gates it.
-    lib.record_adoption(&decision);
+    lib.record_adoption(&decision, &artifact.weights_digest);
     assert!(matches!(
         lib.mount_gated(mount.clone(), &artifact.adapter_id),
         Err(MountError::NotOperatorApproved { .. })
@@ -113,7 +113,7 @@ fn alignment_veto_blocks_mount_despite_good_eval() {
 
     assert!(decision.eval_passed, "eval half should pass on merit");
     assert!(!decision.approved, "alignment veto must block adoption");
-    lib.record_adoption(&decision);
+    lib.record_adoption(&decision, &artifact.weights_digest);
 
     let mount = MountId::new("cheap-local", "base-q4");
     assert!(matches!(

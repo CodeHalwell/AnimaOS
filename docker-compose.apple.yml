@@ -47,7 +47,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANIMA_CONSOLE_ADDR: 0.0.0.0:8088
-      ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-}
+      # The console binds 0.0.0.0 inside the container (so the loopback port map
+      # can reach it), which the bind policy requires a token for. This stack
+      # publishes only on host loopback, so a known local-dev token keeps
+      # `docker compose up` working out of the box. Override it (e.g. in .env)
+      # for anything beyond local development.
+      ANIMA_CONSOLE_TOKEN: ${ANIMA_CONSOLE_TOKEN:-anima-local-dev}
       ANIMA_AUDIT_DIR: /home/anima/.anima/audit
     volumes:
       # Persist the identity store and audit logs across runs.
