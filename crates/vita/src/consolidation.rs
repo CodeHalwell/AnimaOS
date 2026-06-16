@@ -151,7 +151,10 @@ impl ConsolidationOutcome {
 ///    [`FineTuner::run_job`].
 /// 3. On success, optionally registers the artifact in `config.library`, emits
 ///    [`AuditEntry::ConsolidationCompleted`], and returns
-///    [`ConsolidationOutcome::Completed`].
+///    [`ConsolidationOutcome::Completed`]. Registration makes the adapter
+///    *known* but **not** adopted: it cannot reach a serving tier until it
+///    clears the S8.4.8 adoption gate (eval harness + alignment) and the router
+///    mounts it via [`AdapterLibrary::mount_gated`](anima_finetune::AdapterLibrary::mount_gated).
 /// 4. On failure, emits [`AuditEntry::ConsolidationFailed`] and returns
 ///    [`ConsolidationOutcome::Failed`].
 pub fn run_consolidation(

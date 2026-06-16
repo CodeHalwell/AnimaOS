@@ -11,6 +11,11 @@ vita = { path = "../vita" }
 # proposals into it. `skills` depends only on `praxis` + `serde` (no path to
 # `vita`/`lifecycle`), so this edge is acyclic — verified via `cargo metadata`.
 skills = { path = "../skills" }
+# E15↔E8 bridge: routes a sleep-phase adapter that cleared the finetune
+# adoption gate into the approval queue as a WeightUpdate proposal.
+# `anima-finetune` depends only on `serde`/`serde_json` (no path back to
+# `vita`/`lifecycle`), so this edge is acyclic.
+anima-finetune = { path = "../finetune" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

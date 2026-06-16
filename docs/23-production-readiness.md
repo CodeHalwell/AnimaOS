@@ -29,8 +29,12 @@
       plan→tool→observe→answer loop — has been exercised against a real local
       HTTP server (`ANIMA_COMPAT_LIVE=1`), so what remains on a real host is
       Ollama-specific behaviour, not the wire plumbing.
-- [ ] Decide the exposed-deployment story: reverse-proxy/TLS guidance and a
-      non-empty `ANIMA_CONSOLE_TOKEN` requirement outside loopback.
+- [~] Exposed-deployment story: the non-empty `ANIMA_CONSOLE_TOKEN` requirement
+      outside loopback is now **enforced** — `ConsoleServer::bind` refuses
+      (`PermissionDenied`) to bind any non-loopback address (including the
+      `0.0.0.0` / `::` wildcards) without a token, and `anima-hosted serve`
+      surfaces the reason instead of starting unauthenticated; `.env.example`
+      documents it. Still open: reverse-proxy/TLS deployment guidance doc.
 - [ ] Publish a versioned release image (`:v*`) once the above is validated.
 
 ## Pillar 2 — Bare-metal ready
@@ -94,11 +98,30 @@ TUI and COM1 serial bridge for the kernel.
 - [ ] Point `finetune::UnslothFineTuner`'s `live` gate at the same flow and
       ingest the manifest into the adapter library (E8 S8.4.8), giving the
       Rust side custody of provenance + eval.
-- [ ] Eval gate before adoption: a sleep-phase-trained adapter must pass the
-      E8 eval harness + E13 alignment evals before the router mounts it;
-      surface adoption in the approval queue (Pillar 3).
-- [ ] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
-      the corpus crosses a size threshold — closing the autonomy loop.
+- [x] Eval gate before adoption — DONE: `anima_finetune::decide_adoption`
+      fuses the E8 eval harness (S8.4.7 adoption rule + S8.4.6 merge-fidelity
+      floor) with the E13 alignment outcome into an `AdoptionDecision`. The
+      library now distinguishes *registered* from *adopted*:
+      `AdapterLibrary::mount_gated` refuses any adapter that has not cleared the
+      gate (`MountError::NotAdopted`), and re-training or eviction revokes the
+      clearance. Covered by unit tests + a `train → register → evaluate →
+      decide → mount_gated` integration test. The cleared decision is routed
+      to the operator approval queue via
+      `lifecycle::adapter_adoption_to_proposal` (a `WeightUpdate` proposal,
+      symmetric to the E11 skill/tool bridge). Still open: rendering the queue
+      in the console UI (Pillar 3).
+- [x] Schedule: let the agent propose a fine-tune run (E32 jobs engine) when
+      the corpus crosses a size threshold — DONE, closing the autonomy loop.
+      `jobs::FineTuneTrigger` is the policy (corpus-pair threshold + cooldown);
+      `evaluate()` emits a one-shot `ScheduledJob` carrying a
+      `FineTuneProposalPayload` (base model, pair count, reason). The hosted
+      `anima jobs propose-finetune` command wires it: it counts the live corpus
+      (`alpaca.jsonl`), anchors the cooldown on the most recent proposal already
+      in the registry, and enqueues the job when the threshold is crossed —
+      operator-gated downstream via the E8 adoption gate + E15 approval queue, so
+      it *proposes*, it does not silently adopt. Schedule the command (a cron
+      `jobs` entry or external scheduler) to make it autonomous. Verified
+      end-to-end (propose → cooldown → below-threshold) plus unit tests.
 
 ## Definition of done
 

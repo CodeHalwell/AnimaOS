@@ -17,7 +17,11 @@
 //! # Security
 //!
 //! - Bind to loopback (`127.0.0.1`) by default; the container maps only the
-//!   loopback port to the host, mirroring the Ollama daemon.
+//!   loopback port to the host, mirroring the Ollama daemon. Binding a
+//!   network-reachable address (anything non-loopback, including the
+//!   `0.0.0.0` / `::` wildcards) **requires** a non-empty token — see
+//!   [`check_bind_policy`] — so an unauthenticated console can never be exposed
+//!   beyond this host by accident.
 //! - An optional bearer token gates every route except `/healthz`. Browsers
 //!   using `EventSource` can't set headers, so the token is also accepted as a
 //!   `?token=` query parameter for `GET /events`.
@@ -138,6 +142,28 @@ pub struct ConsoleServer {
     limiter: AuthRateLimiter,
 }
 
+/// Enforce the exposure policy for a console bind: a network-reachable address
+/// must carry a token, or the bind is refused.
+///
+/// Loopback addresses (`127.0.0.0/8`, `::1`) are exempt — the container maps
+/// only the loopback port to the host. Everything else — including the
+/// unspecified wildcards `0.0.0.0` / `::` that bind *all* interfaces — requires
+/// a non-empty `ANIMA_CONSOLE_TOKEN`, so an unauthenticated console can never be
+/// exposed beyond this host by accident.
+fn check_bind_policy(addr: std::net::SocketAddr, has_token: bool) -> std::io::Result<()> {
+    if addr.ip().is_loopback() || has_token {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing to bind the operator console to non-loopback address {addr} without \
+             authentication; set a non-empty ANIMA_CONSOLE_TOKEN, or bind 127.0.0.1 for \
+             loopback-only access"
+        ),
+    ))
+}
+
 /// Map a protocol priority onto the `senses` priority enum.
 fn to_sensory_priority(p: Priority) -> SensoryPriority {
     match p {
@@ -166,11 +192,16 @@ impl ConsoleServer {
     /// Bind the listener (so the caller learns the resolved local address) and
     /// return it without yet serving. Useful for tests that need the OS-chosen
     /// port from `127.0.0.1:0`.
+    ///
+    /// Refuses, with [`std::io::ErrorKind::PermissionDenied`], to bind a
+    /// network-reachable address without a token — see [`check_bind_policy`].
     pub fn bind(&self) -> std::io::Result<TcpListener> {
         let addr =
             self.config.addr.to_socket_addrs()?.next().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address")
             })?;
+        let has_token = self.config.token.as_deref().is_some_and(|t| !t.is_empty());
+        check_bind_policy(addr, has_token)?;
         TcpListener::bind(addr)
     }
 
@@ -654,6 +685,59 @@ mod tests {
         let mut buf = String::new();
         let _ = s.read_to_string(&mut buf);
         buf
+    }
+
+    // ── Bind exposure policy ─────────────────────────────────────────────────
+
+    fn server_with(addr: &str, token: Option<&str>) -> ConsoleServer {
+        ConsoleServer::new(
+            Arc::new(ConsoleHub::new()),
+            SensoryBridge::new(HumanGuidance::new("t")),
+            ServerConfig {
+                addr: addr.into(),
+                token: token.map(str::to_string),
+            },
+        )
+    }
+
+    #[test]
+    fn bind_policy_allows_loopback_without_token() {
+        assert!(check_bind_policy("127.0.0.1:8088".parse().unwrap(), false).is_ok());
+        assert!(check_bind_policy("[::1]:8088".parse().unwrap(), false).is_ok());
+    }
+
+    #[test]
+    fn bind_policy_rejects_non_loopback_without_token() {
+        let err = check_bind_policy("203.0.113.5:8088".parse().unwrap(), false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn bind_policy_rejects_wildcard_without_token() {
+        // 0.0.0.0 / :: bind all interfaces → must require a token.
+        assert!(check_bind_policy("0.0.0.0:8088".parse().unwrap(), false).is_err());
+        assert!(check_bind_policy("[::]:8088".parse().unwrap(), false).is_err());
+    }
+
+    #[test]
+    fn bind_policy_allows_non_loopback_with_token() {
+        assert!(check_bind_policy("203.0.113.5:8088".parse().unwrap(), true).is_ok());
+    }
+
+    #[test]
+    fn bind_refuses_wildcard_without_token_before_opening_socket() {
+        let err = server_with("0.0.0.0:0", None).bind().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // An empty token is treated as no token.
+        assert!(
+            server_with("0.0.0.0:0", Some("")).bind().is_err(),
+            "empty ANIMA_CONSOLE_TOKEN must not satisfy the exposure gate"
+        );
+    }
+
+    #[test]
+    fn bind_allows_loopback_without_token() {
+        assert!(server_with("127.0.0.1:0", None).bind().is_ok());
     }
 
     #[test]

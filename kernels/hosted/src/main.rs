@@ -2121,6 +2121,7 @@ fn print_session_audit(log: &AuditLog) {
 /// 4. All operations are audited with E23 `AuditEntry` variants.
 fn cmd_data(args: &[String]) {
     use consent::{build_revocation_directive, scan_expired_grants, DataExportBuilder};
+    use sessions::{SessionQuery, SessionStore};
     use users::{DataCategory, UserRegistry};
 
     const AGENT_ID: &str = "anima";
@@ -2196,17 +2197,96 @@ fn cmd_data(args: &[String]) {
                                 "facts": rec.profile.facts,
                             }),
                         );
+                        // The per-user conversation store backs only the
+                        // episodic-memory and usage-stats sections. Open it lazily
+                        // — and only when one of those categories is actually
+                        // consented — so a corrupt/unreadable sessions.json can't
+                        // block an export that wouldn't include any session data
+                        // (e.g. a subject who consented only to identity facts).
+                        // A missing store opens empty ("no records"); when session
+                        // data *is* in scope, a real I/O/parse error aborts rather
+                        // than silently emit an incomplete GDPR export.
+                        let needs_sessions =
+                            [DataCategory::EpisodicMemory, DataCategory::UsageStats]
+                                .iter()
+                                .any(|cat| rec.consent.is_consented(*cat, now_ns));
+                        let session_store = if needs_sessions {
+                            match SessionStore::open(SessionStore::default_path(AGENT_ID)) {
+                                Ok(store) => Some(store),
+                                Err(e) => {
+                                    eprintln!(
+                                        "data: cannot read session store for export ({e}); \
+                                         refusing to emit an incomplete export"
+                                    );
+                                    cli_fail(1);
+                                    return;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let user_sessions = session_store
+                            .as_ref()
+                            .map(|s| s.list(&SessionQuery::for_user(user_id.as_str())))
+                            .unwrap_or_default();
+                        let total_turns: usize = user_sessions.iter().map(|s| s.turns.len()).sum();
+
+                        // Populate every consented category with the subject's
+                        // actual retained data, drawn from the store that owns
+                        // it. Each `DataCategory` maps to a concrete source.
                         for cat in DataCategory::all() {
-                            if rec.consent.is_consented(*cat, now_ns) {
-                                builder.add_section(
-                                    *cat,
-                                    1,
-                                    serde_json::json!({
-                                        "user_id": user_id,
-                                        "category": cat.as_str(),
-                                        "note": "placeholder — wire to store for full export"
-                                    }),
-                                );
+                            if !rec.consent.is_consented(*cat, now_ns) {
+                                continue;
+                            }
+                            match cat {
+                                DataCategory::IdentityFacts => {
+                                    builder.add_section(
+                                        *cat,
+                                        rec.profile.facts.len(),
+                                        serde_json::json!({ "facts": rec.profile.facts }),
+                                    );
+                                }
+                                DataCategory::EpisodicMemory => {
+                                    // Full conversation history for this subject.
+                                    builder.add_section(
+                                        *cat,
+                                        user_sessions.len(),
+                                        serde_json::json!({
+                                            "sessions": user_sessions,
+                                            "total_turns": total_turns,
+                                        }),
+                                    );
+                                }
+                                DataCategory::UsageStats => {
+                                    builder.add_section(
+                                        *cat,
+                                        1,
+                                        serde_json::json!({
+                                            "created_at_ns": rec.profile.created_at_ns,
+                                            "last_seen_ns": rec.profile.last_seen_ns,
+                                            "session_count": user_sessions.len(),
+                                            "total_turns": total_turns,
+                                        }),
+                                    );
+                                }
+                                DataCategory::KnowledgeCorpus => {
+                                    // The E27 knowledge graph is agent-global and
+                                    // not keyed per subject, so a per-user DSAR
+                                    // cannot slice one user's entries out of it
+                                    // without exposing others'. Report the
+                                    // category honestly with zero rows rather
+                                    // than leaking unrelated data.
+                                    builder.add_section(
+                                        *cat,
+                                        0,
+                                        serde_json::json!({
+                                            "entries": [],
+                                            "note": "knowledge-corpus entries are not retained \
+                                                     per-user in this build; nothing to export \
+                                                     for this subject",
+                                        }),
+                                    );
+                                }
                             }
                         }
                         let bundle = builder.build(user_id, AGENT_ID, now_ns);
@@ -5449,6 +5529,87 @@ fn cmd_jobs(args: &[String]) {
                 }
             }
         }
+        Some("propose-finetune") => {
+            // Corpus-growth fine-tune proposal (E32↔E8): if the accumulated
+            // training corpus has crossed the threshold and the cooldown has
+            // elapsed since the last proposal, enqueue a one-shot fine-tune job.
+            // Training stays operator-gated downstream (E8 adoption gate + E15
+            // approval queue) — this only *proposes*.
+            let threshold = flag_value(args, "--threshold")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_FINETUNE_THRESHOLD);
+            let cooldown_hours = flag_value(args, "--cooldown-hours")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_FINETUNE_COOLDOWN_HOURS);
+            // Resolve the base model the same way `serve` does, so a proposal
+            // targets the model the agent actually serves/pulled rather than a
+            // placeholder: explicit --base-model / ANIMA_MODEL first, then the
+            // serve chain (ANIMA_OLLAMA_MODEL → ANIMA_WORKHORSE_MODEL), then the
+            // last-resort placeholder.
+            let base_model = flag_value(args, "--base-model")
+                .or_else(|| std::env::var("ANIMA_MODEL").ok())
+                .or_else(|| std::env::var("ANIMA_OLLAMA_MODEL").ok())
+                .or_else(|| std::env::var("ANIMA_WORKHORSE_MODEL").ok())
+                .unwrap_or_else(|| "base-q4".to_string());
+            let corpus_dir = flag_value(args, "--corpus-dir")
+                .or_else(|| std::env::var("ANIMA_CORPUS_DIR").ok())
+                .unwrap_or_else(|| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                    format!("{home}/.anima/training_corpus")
+                });
+            let workspace = flag_value(args, "--workspace").unwrap_or_default();
+
+            let corpus_pairs = count_corpus_pairs(std::path::Path::new(&corpus_dir));
+            let last_proposed = latest_finetune_proposal_ns(&registry, &workspace);
+            let cooldown_ns = cooldown_hours
+                .saturating_mul(3_600)
+                .saturating_mul(1_000_000_000);
+            let trigger = jobs::FineTuneTrigger::new(threshold, cooldown_ns);
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+
+            match trigger.evaluate(corpus_pairs, &base_model, &workspace, now_ns, last_proposed) {
+                Some(job) => {
+                    let job_id = job.job_id.clone();
+                    let description = job.description.clone();
+                    let schedule_type = job.schedule.type_label().to_owned();
+                    match registry.add(job) {
+                        Ok(()) => {
+                            log.push(AuditEntry::JobScheduled {
+                                agent_id: AGENT_ID.to_owned(),
+                                job_id: job_id.clone(),
+                                description,
+                                schedule_type,
+                                workspace_id: workspace,
+                            });
+                            println!(
+                                "jobs: proposed fine-tune {job_id:?} \
+                                 (corpus={corpus_pairs} pairs ≥ threshold={threshold})"
+                            );
+                            if let Err(e) = registry.flush() {
+                                eprintln!("jobs: flush failed: {e}");
+                                cli_fail(1);
+                            }
+                            print_jobs_audit(&log);
+                        }
+                        Err(e) => {
+                            eprintln!("jobs: {e}");
+                            cli_fail(1);
+                        }
+                    }
+                }
+                None => {
+                    let reason = if corpus_pairs < threshold.max(1) {
+                        format!("corpus {corpus_pairs} pairs < threshold {threshold}")
+                    } else {
+                        "within cooldown since last proposal".to_string()
+                    };
+                    println!("jobs: no fine-tune proposed ({reason})");
+                }
+            }
+        }
         _ => {
             eprintln!("usage: anima-hosted jobs list");
             eprintln!("       anima-hosted jobs add --description <desc> [--cron <expr>|--at <ns>] [--workspace <id>] [--payload <json>]");
@@ -5456,6 +5617,7 @@ fn cmd_jobs(args: &[String]) {
             eprintln!("       anima-hosted jobs remove <job_id> [<reason>]");
             eprintln!("       anima-hosted jobs run <job_id>");
             eprintln!("       anima-hosted jobs poll");
+            eprintln!("       anima-hosted jobs propose-finetune [--threshold <n>] [--cooldown-hours <h>] [--base-model <m>] [--corpus-dir <path>] [--workspace <id>]");
             eprintln!();
             eprintln!(
                 "note: --cron expressions are 5-field (minute hour day-of-month month day-of-week)"
@@ -5469,6 +5631,61 @@ fn cmd_jobs(args: &[String]) {
 /// Extracts the value of a named CLI flag (`--flag <value>`).
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
+}
+
+/// Default corpus size (accumulated training pairs) that triggers a fine-tune
+/// proposal via `jobs propose-finetune` (E32↔E8).
+const DEFAULT_FINETUNE_THRESHOLD: usize = 200;
+/// Default cooldown between successive fine-tune proposals, in hours.
+const DEFAULT_FINETUNE_COOLDOWN_HOURS: u64 = 24;
+
+/// Count accumulated training pairs in `corpus_dir`.
+///
+/// The sleep-phase compiler writes each pair as one line of `alpaca.jsonl` (and
+/// mirrors it into the conversation / chain-of-thought files), so counting the
+/// Alpaca file's non-empty lines yields the pair count without triple-counting.
+/// A missing corpus (agent never compiled any) counts as zero.
+fn count_corpus_pairs(corpus_dir: &std::path::Path) -> usize {
+    use std::io::BufRead;
+    let file = corpus_dir.join("alpaca.jsonl");
+    let Ok(f) = std::fs::File::open(&file) else {
+        return 0;
+    };
+    // Stream the corpus line-by-line: it grows unboundedly with the agent's
+    // training history, so we never pull the whole file into memory just to
+    // count non-empty pairs.
+    std::io::BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
+/// Whether a job's payload is a fine-tune proposal (matches the payload `kind`
+/// discriminator written by `jobs::FineTuneTrigger`).
+fn job_is_finetune_proposal(job: &jobs::ScheduledJob) -> bool {
+    serde_json::from_str::<serde_json::Value>(&job.payload)
+        .ok()
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|k| k.as_str())
+                .map(|s| s == jobs::FineTuneProposalPayload::KIND)
+        })
+        .unwrap_or(false)
+}
+
+/// The `created_at_ns` of the most recent fine-tune proposal for `workspace_id`
+/// already in the registry, used as the trigger's cooldown anchor (so repeated
+/// invocations don't re-propose until the cooldown elapses).
+///
+/// Scoped to the workspace so a proposal for one workspace doesn't suppress a
+/// valid proposal for another in the same agent registry.
+fn latest_finetune_proposal_ns(registry: &jobs::JobRegistry, workspace_id: &str) -> Option<u64> {
+    registry
+        .iter()
+        .filter(|(_, j)| job_is_finetune_proposal(j) && j.workspace_id == workspace_id)
+        .map(|(_, j)| j.created_at_ns)
+        .max()
 }
 
 /// Prints E32 job-related audit entries to stdout.
@@ -6557,9 +6774,12 @@ fn cmd_serve() {
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
-    let addr = console
-        .start()
-        .expect("operator console failed to bind — is the port already in use?");
+    let addr = console.start().unwrap_or_else(|e| {
+        // Surface the real reason — e.g. the exposure-policy refusal to bind a
+        // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
+        eprintln!("anima-hosted: operator console failed to start: {e}");
+        std::process::exit(1);
+    });
     let token_note = std::env::var("ANIMA_CONSOLE_TOKEN")
         .map(|t| !t.is_empty())
         .unwrap_or(false);
@@ -7135,4 +7355,84 @@ fn main() {
     print_audit(&agent_a);
     println!();
     print_audit(&agent_b);
+}
+
+#[cfg(test)]
+mod finetune_proposal_tests {
+    use super::{count_corpus_pairs, job_is_finetune_proposal, latest_finetune_proposal_ns};
+    use jobs::{FineTuneTrigger, JobRegistry, JobSchedule, ScheduledJob};
+
+    #[test]
+    fn count_corpus_pairs_counts_nonempty_alpaca_lines() {
+        let dir = std::env::temp_dir().join(format!("anima-corpus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("alpaca.jsonl"),
+            "{\"a\":1}\n{\"a\":2}\n\n{\"a\":3}\n",
+        )
+        .unwrap();
+        assert_eq!(count_corpus_pairs(&dir), 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn count_corpus_pairs_missing_dir_is_zero() {
+        let dir = std::path::Path::new("/nonexistent/anima/corpus/xyz");
+        assert_eq!(count_corpus_pairs(dir), 0);
+    }
+
+    #[test]
+    fn job_is_finetune_proposal_matches_only_trigger_payloads() {
+        let ft = FineTuneTrigger::new(10, 0).build_job(20, "base-q4", "", 5);
+        assert!(job_is_finetune_proposal(&ft));
+
+        let other = ScheduledJob::new(
+            "backup",
+            "",
+            r#"{"kind":"backup"}"#,
+            JobSchedule::Immediate,
+            1,
+        );
+        assert!(!job_is_finetune_proposal(&other));
+
+        let opaque = ScheduledJob::new("x", "", "not json", JobSchedule::Immediate, 1);
+        assert!(!job_is_finetune_proposal(&opaque));
+    }
+
+    #[test]
+    fn latest_finetune_proposal_ns_returns_max_over_proposals_only() {
+        let mut reg = JobRegistry::in_memory();
+        assert_eq!(latest_finetune_proposal_ns(&reg, ""), None);
+
+        let trigger = FineTuneTrigger::new(10, 0);
+        reg.add(trigger.build_job(20, "base-q4", "", 100)).unwrap();
+        reg.add(trigger.build_job(30, "base-q4", "", 300)).unwrap();
+        // A non-proposal job with a larger timestamp must be ignored.
+        reg.add(ScheduledJob::new(
+            "backup",
+            "",
+            r#"{"kind":"backup"}"#,
+            JobSchedule::Immediate,
+            900,
+        ))
+        .unwrap();
+
+        assert_eq!(latest_finetune_proposal_ns(&reg, ""), Some(300));
+    }
+
+    #[test]
+    fn latest_finetune_proposal_ns_is_scoped_to_workspace() {
+        let mut reg = JobRegistry::in_memory();
+        let trigger = FineTuneTrigger::new(10, 0);
+        reg.add(trigger.build_job(20, "base-q4", "ws-a", 100))
+            .unwrap();
+        reg.add(trigger.build_job(30, "base-q4", "ws-b", 500))
+            .unwrap();
+
+        // Each workspace's cooldown anchor sees only its own proposals, so a
+        // newer proposal in ws-b doesn't suppress ws-a (and vice versa).
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-a"), Some(100));
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-b"), Some(500));
+        assert_eq!(latest_finetune_proposal_ns(&reg, "ws-c"), None);
+    }
 }
