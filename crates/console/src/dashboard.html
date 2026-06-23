@@ -479,6 +479,27 @@
     return (d ? d + "d " : "") + h + "h " + m + "m " + (s % 60) + "s";
   }
 
+  /* ── Transport ──────────────────────────────────────────────────── */
+  const token = new URLSearchParams(location.search).get("token");
+  const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
+  function connect() {
+    const es = new EventSource(url);
+    es.onopen = () => { $("conntext").textContent = "live"; $("conn").className = "chip up"; };
+    es.onerror = () => { $("conntext").textContent = "reconnecting…"; $("conn").className = "chip down"; };
+    es.onmessage = (m) => {
+      try {
+        const ev = JSON.parse(m.data);
+        // task_id is a u64; values above 2^53 lose precision in JSON.parse
+        // (and consecutive ids can collide after rounding). Recover the exact
+        // digits from the raw frame and carry them as a string key.
+        const raw = /"task_id":\s*(\d+)/.exec(m.data);
+        if (raw) ev.task_key = raw[1];
+        handle(ev);
+      } catch (e) { /* tolerate partial lines */ }
+    };
+  }
+  connect();
+
   /* ── "While you were away" digest ──────────────────────────────── */
   (function () {
     function loadDigest() {
@@ -491,7 +512,8 @@
           // Suppress panel when the agent has no history at all.
           const hasActivity =
             (d.tasks_completed || 0) + (d.tasks_failed || 0) +
-            (d.sleep_cycles || 0) + (d.cortex_invocations || 0) > 0;
+            (d.sleep_cycles || 0) + (d.cortex_invocations || 0) +
+            (d.defence_vetoes || 0) + (d.gate_blocks || 0) > 0;
           if (!hasActivity && !(d.notable_events && d.notable_events.length)) return;
 
           var rows = [
@@ -518,33 +540,11 @@
         })
         .catch(function () {}); // best-effort; 503 when not wired is silently ignored
     }
-    // Load once the SSE connection has been established so the token is in scope.
     setTimeout(loadDigest, 200);
     $("dismissdigest").addEventListener("click", function () {
       $("digestpanel").style.display = "none";
     });
   })();
-
-  /* ── Transport ──────────────────────────────────────────────────── */
-  const token = new URLSearchParams(location.search).get("token");
-  const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
-  function connect() {
-    const es = new EventSource(url);
-    es.onopen = () => { $("conntext").textContent = "live"; $("conn").className = "chip up"; };
-    es.onerror = () => { $("conntext").textContent = "reconnecting…"; $("conn").className = "chip down"; };
-    es.onmessage = (m) => {
-      try {
-        const ev = JSON.parse(m.data);
-        // task_id is a u64; values above 2^53 lose precision in JSON.parse
-        // (and consecutive ids can collide after rounding). Recover the exact
-        // digits from the raw frame and carry them as a string key.
-        const raw = /"task_id":\s*(\d+)/.exec(m.data);
-        if (raw) ev.task_key = raw[1];
-        handle(ev);
-      } catch (e) { /* tolerate partial lines */ }
-    };
-  }
-  connect();
 
   /* ── Composer ───────────────────────────────────────────────────── */
   $("composer").addEventListener("submit", async (e) => {

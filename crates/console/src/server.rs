@@ -145,6 +145,10 @@ pub struct ConsoleServer {
     digest_path: Option<std::path::PathBuf>,
     /// Agent ID used as the `agent_id` argument to `generate_digest`.
     digest_agent_id: String,
+    /// Mtime-based cache for the serialised digest JSON: `(mtime, json)`.
+    /// Avoids re-reading the full audit JSONL on every `GET /digest` call when
+    /// the file has not changed.
+    digest_cache: Mutex<Option<(std::time::SystemTime, String)>>,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -193,6 +197,7 @@ impl ConsoleServer {
             limiter: AuthRateLimiter::default(),
             digest_path: None,
             digest_agent_id: "anima".to_string(),
+            digest_cache: Mutex::new(None),
         }
     }
 
@@ -591,10 +596,26 @@ impl ConsoleServer {
                 br#"{"error":"digest not configured"}"#,
             );
         };
+        // Check mtime; serve the cached JSON if the file has not changed since
+        // the last request, avoiding a full audit-log read on every call.
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        {
+            let cache = self.digest_cache.lock().expect("poisoned");
+            if let (Some(mt), Some((cached_mt, cached_json))) = (mtime, cache.as_ref()) {
+                if mt == *cached_mt {
+                    return write_json(out, 200, "OK", cached_json.as_bytes());
+                }
+            }
+        }
         let entries = read_audit_entries(path);
         let digest = lifecycle::digest::generate_digest(&self.digest_agent_id, &entries);
         match serde_json::to_string(&digest) {
-            Ok(json) => write_json(out, 200, "OK", json.as_bytes()),
+            Ok(json) => {
+                if let Some(mt) = mtime {
+                    *self.digest_cache.lock().expect("poisoned") = Some((mt, json.clone()));
+                }
+                write_json(out, 200, "OK", json.as_bytes())
+            }
             Err(_) => write_json(
                 out,
                 500,
