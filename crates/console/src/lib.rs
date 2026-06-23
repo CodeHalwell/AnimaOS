@@ -96,7 +96,9 @@ impl Console {
     /// returning the resolved server address.
     pub fn start(&self) -> std::io::Result<std::net::SocketAddr> {
         AuditTailer::new(self.audit_path.clone(), self.hub()).spawn();
-        let server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone());
+        let agent_id = std::env::var("ANIMA_AGENT_ID").unwrap_or_else(|_| "anima".to_string());
+        let server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone())
+            .with_digest(self.audit_path.clone(), agent_id);
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
     }

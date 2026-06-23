@@ -153,6 +153,18 @@
   #composer button:disabled { filter: saturate(.2) brightness(.7); cursor: default; }
   .hint { color: var(--faint); font-size: 11px; padding: 0 18px 12px; }
 
+  /* ── Digest panel ────────────────────────────────────────────────── */
+  #digestpanel { flex-shrink: 0; }
+  #digestpanel .drow { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 0; font-size: 12.5px; }
+  #digestpanel .drow span { color: var(--muted); }
+  #digestpanel .drow b { font-weight: 600; font-family: var(--mono); font-size: 12px; }
+  #digestpanel .dnotable { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+  #digestpanel .dnotable .dlabel { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--warn); margin-bottom: 4px; }
+  #digestpanel .dnotable .dev { font-size: 11px; color: var(--muted); padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+  #digestpanel .dnotable .dev b { color: var(--crit); font-weight: 600; font-family: var(--mono); }
+  #dismissdigest { float: right; font-size: 10px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); background: rgba(10,13,20,.5); color: var(--muted); cursor: pointer; margin: -2px 0 0; }
+  #dismissdigest:hover { color: var(--ink); border-color: var(--accent); }
+
   /* ── Telemetry column ────────────────────────────────────────────── */
   #feedpanel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
@@ -260,6 +272,10 @@
 
   <!-- ── Telemetry ── -->
   <div class="col right">
+    <div class="panel" id="digestpanel" style="display:none" aria-label="while you were away digest">
+      <h2>While you were away <button id="dismissdigest" type="button" aria-label="dismiss digest">dismiss</button></h2>
+      <div id="digestbody"></div>
+    </div>
     <div class="panel" id="feedpanel">
       <h2>Telemetry <span id="evcount" style="font-weight:400"></span></h2>
       <div class="filters" id="filters">
@@ -462,6 +478,52 @@
     const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
     return (d ? d + "d " : "") + h + "h " + m + "m " + (s % 60) + "s";
   }
+
+  /* ── "While you were away" digest ──────────────────────────────── */
+  (function () {
+    function loadDigest() {
+      const headers = {};
+      if (token) headers["Authorization"] = "Bearer " + token;
+      fetch("/digest", { headers })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d) return;
+          // Suppress panel when the agent has no history at all.
+          const hasActivity =
+            (d.tasks_completed || 0) + (d.tasks_failed || 0) +
+            (d.sleep_cycles || 0) + (d.cortex_invocations || 0) > 0;
+          if (!hasActivity && !(d.notable_events && d.notable_events.length)) return;
+
+          var rows = [
+            ["tasks done",       d.tasks_completed  || 0],
+            ["failed",           d.tasks_failed     || 0],
+            ["cortex calls",     d.cortex_invocations || 0],
+            ["sleep cycles",     d.sleep_cycles     || 0],
+            ["defence vetoes",   d.defence_vetoes   || 0],
+            ["gate blocks",      d.gate_blocks      || 0],
+          ];
+          var html = rows.map(function (r) {
+            return '<div class="drow"><span>' + esc(r[0]) + "</span><b>" + esc(r[1]) + "</b></div>";
+          }).join("");
+
+          if (d.notable_events && d.notable_events.length) {
+            html += '<div class="dnotable"><div class="dlabel">Notable events</div>';
+            d.notable_events.slice(0, 5).forEach(function (ev) {
+              html += '<div class="dev"><b>' + esc(ev.kind) + "</b> " + esc(ev.description) + "</div>";
+            });
+            html += "</div>";
+          }
+          $("digestbody").innerHTML = html;
+          $("digestpanel").style.display = "";
+        })
+        .catch(function () {}); // best-effort; 503 when not wired is silently ignored
+    }
+    // Load once the SSE connection has been established so the token is in scope.
+    setTimeout(loadDigest, 200);
+    $("dismissdigest").addEventListener("click", function () {
+      $("digestpanel").style.display = "none";
+    });
+  })();
 
   /* ── Transport ──────────────────────────────────────────────────── */
   const token = new URLSearchParams(location.search).get("token");

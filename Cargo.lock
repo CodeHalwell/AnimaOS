@@ -342,6 +342,7 @@ version = "0.1.0"
 dependencies = [
  "console-proto",
  "interoception",
+ "lifecycle",
  "metrics-endpoint",
  "senses",
  "serde_json",
