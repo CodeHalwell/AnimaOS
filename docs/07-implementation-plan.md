@@ -1279,9 +1279,16 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
   (`kernels/microvm/src/operator_console.rs` — `emit()` / `poll_guidance()`;
   Phase 7 of `kernel_boot_task` drives the Phase-0 demo; `E6.4_CONSOLE_DONE`
   written to COM1; CI `microvm-boot` job asserts the marker)
-- S6.5 microVM Phase 1: `console-proto` over `smoltcp` + TLS (gated on
-  `virtio-net`). ☐ future — requires the `virtio-net` driver; the protocol
-  carries over unchanged; only the transport changes.
+- S6.5 microVM Phase 1: `console-proto` over `smoltcp` + TLS. 🟡 — the
+  **virtio-net transport shipped** (`kernels/microvm/src/net.rs`): a modern-PCI
+  virtio-net driver + identity-mapped DMA `Hal` carries the operator
+  `console-proto` wire types over a real TCP socket, CI-gated via
+  `E6.5_NET_DONE` / `E6.5_GUIDANCE_OK` (`microvm-boot`). The PCI ECAM base is now
+  discovered from the firmware's **ACPI MCFG** table (`kernels/microvm/src/acpi.rs`
+  — RSDP via the UEFI config table → XSDT/RSDT → MCFG), with the historical
+  candidate list as a fallback, so the probe works on boards that do not program
+  `0xE000_0000`. Remaining: binding TLS 1.3 (E4.4) onto the socket and a
+  `virtio-mmio` transport for Firecracker — tracked in `docs/22` §1.
 - S6.6 Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced`
   on the vita side. ✅ (`crates/senses/src/lib.rs` — `PrioritizedPacket::gate_override_reason:
   Option<String>` field; `SensoryBridge::packetize_text_forced()` validates that

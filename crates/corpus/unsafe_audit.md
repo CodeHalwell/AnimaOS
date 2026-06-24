@@ -101,6 +101,7 @@ groups:
 | `tls.rs` (2 sites) | entropy via `RDRAND` (CPUID-guarded) | CPUID check precedes use; absence is a hard error before any TLS bytes are produced |
 | `net.rs` `unsafe impl Hal for KernelHal` (4 trait methods) | DMA + MMIO contract for `virtio-drivers` | UEFI boot services identity-map RAM, so virtual = physical for every contract: `dma_alloc` hands out zeroed, page-aligned, never-reused bump-allocator pages; `mmio_phys_to_virt`/`share`/`unshare` are the identity with no bounce buffers |
 | `net.rs` `MmioCam::new` (ECAM candidate scan) | PCI configuration access | each candidate window is identity-mapped device space; a wrong candidate reads `0x0000`/`0xFFFF` vendor ids and is rejected by the host-bridge validity check — reads never touch unmapped memory |
+| `acpi.rs` `map_bytes` / `read_sdt` (ACPI MCFG scan) | read the firmware-supplied RSDP/XSDT/MCFG tables to discover the real PCI ECAM base | the RSDP pointer comes from the UEFI configuration table and every onward pointer is read from an already-bounds-checked ACPI table; boot services are still live so all of it is identity-mapped firmware memory; lengths are clamped (`MAX_TABLE_LEN`, `MAX_ROOT_ENTRIES`) before mapping, and the pure parsers are host-tested, so a corrupt table degrades to "no ECAM base", never to UB. The byte-level parsers (`parse_rsdp`, `parse_mcfg_bases`) carry no `unsafe`. |
 
 These are exercised end-to-end by the `microvm-boot` CI job, which boots the
 image under QEMU/OVMF and asserts the `E4.1_*`…`E4.5_SOAK_DONE` serial

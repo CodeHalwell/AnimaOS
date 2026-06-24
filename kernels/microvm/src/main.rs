@@ -87,6 +87,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod net;
 mod operator_console;
 mod sleep_soak;

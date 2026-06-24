@@ -44,12 +44,14 @@ use virtio_drivers::transport::pci::{virtio_device_type, PciTransport};
 use virtio_drivers::transport::DeviceType;
 use virtio_drivers::{BufferDirection, Hal, PhysAddr};
 
-/// Candidate ECAM (MMCONFIG) windows, most likely first. OVMF on QEMU q35
+/// Fallback ECAM (MMCONFIG) windows, most likely first, used when ACPI MCFG
+/// discovery (`acpi::mcfg_ecam_bases`) yields nothing. OVMF on QEMU q35
 /// programs 0xE000_0000; SeaBIOS-era q35 and some Cloud Hypervisor builds
 /// use 0xB000_0000. A candidate is accepted only if the host bridge at
 /// 00:00.0 reads back a real vendor id (not 0x0000/0xFFFF), so a wrong
-/// guess degrades to "no device", never to UB. The durable fix is parsing
-/// ACPI MCFG; tracked in docs/22.
+/// guess degrades to "no device", never to UB. The durable path — reading
+/// the real base from ACPI MCFG (docs/22 §1) — is now wired in `probe_virtio_net`
+/// via `crate::acpi`; this list remains as the belt-and-braces fallback.
 const ECAM_CANDIDATES: &[usize] = &[0xE000_0000, 0xB000_0000];
 
 /// slirp user-net constants (QEMU `-netdev user`): guest address and the
@@ -113,10 +115,24 @@ type Net = VirtIONet<KernelHal, PciTransport, QUEUE_SIZE>;
 /// first virtio-net function. Returns `None` when the board has no ECAM
 /// mapping or no virtio-net device (the self-skip path).
 fn probe_virtio_net(serial: &impl Fn(&str)) -> Option<Net> {
+    // Prefer the ECAM base(s) the firmware declares in ACPI MCFG, then fall
+    // back to the hard-coded candidates. Each base is still validated below by
+    // the host-bridge vendor-id check, so an absent or malformed MCFG only ever
+    // degrades to the prior candidate-scan behaviour.
+    let mut bases: Vec<usize> = crate::acpi::mcfg_ecam_bases(serial)
+        .into_iter()
+        .map(|b| b as usize)
+        .collect();
+    for &fallback in ECAM_CANDIDATES {
+        if !bases.contains(&fallback) {
+            bases.push(fallback);
+        }
+    }
+
     let mut root = None;
-    for &base in ECAM_CANDIDATES {
-        // SAFETY: each candidate is a board MMCONFIG window in identity-mapped
-        // device space; a wrong candidate reads 0x0000/0xFFFF vendor ids and
+    for &base in &bases {
+        // SAFETY: each base is a board MMCONFIG window in identity-mapped
+        // device space; a wrong base reads 0x0000/0xFFFF vendor ids and
         // is rejected below — reads are always to mapped addresses, never UB.
         let cam = unsafe { MmioCam::new(base as *mut u8, Cam::Ecam) };
         let candidate = PciRoot::new(cam);
