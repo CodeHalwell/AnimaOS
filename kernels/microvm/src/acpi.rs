@@ -102,9 +102,9 @@ fn sdt_length(header: &[u8]) -> Option<u32> {
 
 /// Parse the ECAM base addresses out of a complete MCFG table.
 ///
-/// Zero bases and partial/over-declared trailing entries are skipped; an
-/// over-long declared length is clamped to the buffer, so this never reads out
-/// of bounds regardless of the table contents.
+/// Zero bases, unaligned bases, and partial/over-declared trailing entries are
+/// skipped; an over-long declared length is clamped to the buffer, so this never
+/// reads out of bounds regardless of the table contents.
 pub fn parse_mcfg_bases(mcfg: &[u8]) -> Vec<u64> {
     let mut bases = Vec::new();
     if mcfg.len() < MCFG_ALLOC_OFFSET || sdt_signature(mcfg) != Some(*MCFG_SIG) {
@@ -116,7 +116,9 @@ pub fn parse_mcfg_bases(mcfg: &[u8]) -> Vec<u64> {
     let mut off = MCFG_ALLOC_OFFSET;
     while off + MCFG_ALLOC_LEN <= end {
         let base = u64::from_le_bytes(mcfg[off..off + 8].try_into().unwrap());
-        if base != 0 {
+        // A real ECAM/MMCONFIG window is always page-aligned; reject anything
+        // unaligned so a corrupt table cannot hand an unaligned base to MMIO.
+        if base != 0 && base % 4096 == 0 {
             bases.push(base);
         }
         off += MCFG_ALLOC_LEN;
@@ -160,6 +162,9 @@ unsafe fn map_bytes<'a>(phys: u64, len: usize) -> Option<&'a [u8]> {
     if phys == 0 || len == 0 {
         return None;
     }
+    // Reject an address+length that would wrap past the 64-bit space — a corrupt
+    // pointer near u64::MAX must not produce a slice spanning the wrap-around.
+    phys.checked_add(len as u64)?;
     // SAFETY: see the function contract; the address is identity-mapped firmware
     // memory and `len` is bounded by the caller.
     Some(core::slice::from_raw_parts(phys as *const u8, len))
@@ -198,9 +203,23 @@ pub fn mcfg_ecam_bases(serial: &impl Fn(&str)) -> Vec<u64> {
         return Vec::new();
     };
 
-    // SAFETY: `rsdp_phys` comes straight from the UEFI configuration table,
-    // which the firmware populated with a valid, identity-mapped RSDP pointer.
-    let Some(rsdp) = (unsafe { map_bytes(rsdp_phys, 36) }) else {
+    // An ACPI 1.0 RSDP is only 20 bytes; an ACPI 2.0+ RSDP is 36. Map the 20-byte
+    // minimum first to read the revision, then extend to the full size only when
+    // the revision says it is present — so a 20-byte RSDP at the end of a
+    // firmware page is never over-read.
+    // SAFETY: `rsdp_phys` comes straight from the UEFI configuration table, which
+    // the firmware populated with a valid, identity-mapped RSDP pointer.
+    let Some(head) = (unsafe { map_bytes(rsdp_phys, 20) }) else {
+        return Vec::new();
+    };
+    if head.len() < 20 || &head[0..8] != RSDP_SIG {
+        serial("[E6.5] ACPI RSDP signature invalid — MCFG scan skipped\n");
+        return Vec::new();
+    }
+    let rsdp_len = if head[15] >= 2 { 36 } else { 20 };
+    // SAFETY: `rsdp_len` matches the revision the 20-byte header just reported, so
+    // we never map more of the RSDP than the firmware actually published.
+    let Some(rsdp) = (unsafe { map_bytes(rsdp_phys, rsdp_len) }) else {
         return Vec::new();
     };
     let Some(root) = parse_rsdp(rsdp) else {
