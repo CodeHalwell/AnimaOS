@@ -386,7 +386,10 @@ impl ConsoleServer {
                 // like POST /approvals/approve (no ID) would make the slice
                 // start > end and panic.
                 if path.len() >= prefix_len + suffix_len {
-                    let id = path[prefix_len..path.len() - suffix_len].to_string();
+                    // URL-decode the segment: the dashboard uses
+                    // encodeURIComponent so adapter IDs with '@' arrive as
+                    // '%40' and must be decoded before the queue lookup.
+                    let id = percent_decode(&path[prefix_len..path.len() - suffix_len]);
                     if !id.is_empty() {
                         return self.serve_approval_action(
                             &mut out,
@@ -662,14 +665,39 @@ impl ConsoleServer {
             );
         }
 
-        // Parse the optional `{"reason":"…"}` body.
+        // Parse the optional `{"reason":"…"}` body.  When Content-Length > 0
+        // the body must be valid UTF-8 JSON; malformed input returns 400 so the
+        // caller knows the request was not processed (rather than silently
+        // mutating queue state with an empty reason).
         let reason = if content_length > 0 {
             let mut raw = vec![0u8; content_length];
             reader.read_exact(&mut raw)?;
-            String::from_utf8(raw)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string))
+            let text = match String::from_utf8(raw) {
+                Ok(s) => s,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        400,
+                        "Bad Request",
+                        br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+                    )
+                }
+            };
+            let parsed = match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(v) => v,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        400,
+                        "Bad Request",
+                        br#"{"ok":false,"error":"request body is not valid JSON"}"#,
+                    )
+                }
+            };
+            parsed
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(str::to_string)
                 .unwrap_or_default()
         } else {
             String::new()
@@ -764,6 +792,37 @@ fn priority_label(p: SensoryPriority) -> &'static str {
         SensoryPriority::High => "High",
         SensoryPriority::Critical => "Critical",
     }
+}
+
+/// Decode `%XX` percent-encoded sequences in a URL path segment.
+///
+/// The dashboard uses `encodeURIComponent` when building approval URLs, so
+/// proposal IDs that contain special characters (e.g. `@` in adapter IDs
+/// like `adapter123@sha256:…`) arrive as `%40`.  Without decoding, the queue
+/// lookup would fail with "not found" for any such ID.
+///
+/// Only valid ASCII `%XX` sequences are decoded; anything else is left as-is.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // The decoded bytes are guaranteed to be valid UTF-8 only if the original
+    // IDs were ASCII; fall back to lossy conversion for robustness.
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn truncate(s: &str, max: usize) -> String {
