@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use console_proto::{json, OperatorEvent, Priority};
-use lifecycle::ApprovalQueue;
+use lifecycle::{ApprovalQueue, ProposalKind};
 use senses::{SensoryBridge, SensoryBridgeError, SensoryPriority};
 use skills::SkillRegistry;
 use vita::{AuditEntry, AuditLog};
@@ -157,6 +157,9 @@ pub struct ConsoleServer {
     /// as `AuditEntry::ApprovalProposalDecided` alongside the somatic-loop log
     /// so the operator has a complete audit trail across both paths.
     audit_log: Option<Arc<Mutex<AuditLog>>>,
+    /// Agent identifier written into `ApprovalProposalDecided` audit entries so
+    /// digest consumers can attribute dashboard decisions to the right agent.
+    agent_id: String,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -206,6 +209,7 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             audit_log: None,
+            agent_id: "anima".to_string(),
         }
     }
 
@@ -234,6 +238,14 @@ impl ConsoleServer {
     /// broadcast as SSE events; the audit log simply won't contain them.
     pub fn with_audit_log(mut self, log: Arc<Mutex<AuditLog>>) -> Self {
         self.audit_log = Some(log);
+        self
+    }
+
+    /// Set the agent identifier written into `ApprovalProposalDecided` audit
+    /// entries. Defaults to `"anima"`. Pass the same value as `ANIMA_AGENT_ID`
+    /// so digest consumers can group/filter dashboard decisions by agent.
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = id.into();
         self
     }
 
@@ -738,16 +750,23 @@ impl ConsoleServer {
             }
         };
 
-        // For skill proposals, lifecycle::SkillApprovalBridge maps
-        // proposal_id == skill_id (see enqueue_skill_proposal).  When the
-        // registry is also wired, promote the matching skill so the approval
-        // gate actually makes it available to the agent — mirroring what the
-        // bridge's approve() method does.  Tool/adapter proposals have no
-        // matching skill entry so the promote() call returns NotFound, which
-        // is silently ignored.
+        // For NewSkill proposals only: proposal_id == skill_id by convention
+        // (lifecycle::SkillApprovalBridge::enqueue_skill_proposal).  Promote
+        // the registry entry so the approval actually makes the skill available.
+        // Guard on the proposal kind so a tool or adapter proposal whose id
+        // coincidentally matches a registry skill id does not activate it.
         if approve && result.is_ok() {
-            if let Some(registry) = &self.skill_registry {
-                let _ = registry.lock().expect("poisoned").promote(id);
+            let is_skill = self.approval_queue.as_ref().is_some_and(|q| {
+                q.lock()
+                    .expect("poisoned")
+                    .get(id)
+                    .map(|p| matches!(p.kind, ProposalKind::NewSkill { .. }))
+                    .unwrap_or(false)
+            });
+            if is_skill {
+                if let Some(registry) = &self.skill_registry {
+                    let _ = registry.lock().expect("poisoned").promote(id);
+                }
             }
         }
 
@@ -780,7 +799,7 @@ impl ConsoleServer {
                         .lock()
                         .expect("poisoned")
                         .push(AuditEntry::ApprovalProposalDecided {
-                            agent_id: "console".to_string(),
+                            agent_id: self.agent_id.clone(),
                             proposal_id: id.to_string(),
                             decision: action.to_string(),
                             reason: if reason.is_empty() {

@@ -78,6 +78,7 @@ pub struct Console {
     approval_queue: Option<Arc<Mutex<ApprovalQueue>>>,
     skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
     audit_log: Option<Arc<Mutex<AuditLog>>>,
+    agent_id: Option<String>,
 }
 
 impl Console {
@@ -95,6 +96,7 @@ impl Console {
             approval_queue: None,
             skill_registry: None,
             audit_log: None,
+            agent_id: None,
         }
     }
 
@@ -120,6 +122,14 @@ impl Console {
     /// appends are safe on Linux.
     pub fn with_audit_log(mut self, log: Arc<Mutex<AuditLog>>) -> Self {
         self.audit_log = Some(log);
+        self
+    }
+
+    /// Set the agent identifier recorded in dashboard approval audit entries.
+    /// Defaults to `"anima"`. Pass `ANIMA_AGENT_ID` so audit consumers can
+    /// attribute decisions to the correct agent in multi-agent deployments.
+    pub fn with_agent_id(mut self, id: impl Into<String>) -> Self {
+        self.agent_id = Some(id.into());
         self
     }
 
@@ -151,6 +161,9 @@ impl Console {
         }
         if let Some(l) = self.audit_log.clone() {
             server = server.with_audit_log(l);
+        }
+        if let Some(id) = self.agent_id.clone() {
+            server = server.with_agent_id(id);
         }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
