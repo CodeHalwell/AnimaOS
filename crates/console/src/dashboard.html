@@ -591,9 +591,14 @@
           '<div class="aq-prov">' + esc(p.provenance) + '</div>' +
           '<div class="aq-status ' + esc(st) + '">' + esc(st) + '</div>' +
           (isPending ? '<div class="aq-actions">' +
-            '<button class="aq-btn approve" data-id="' + esc(p.id) + '" data-act="approve">Approve</button>' +
-            '<button class="aq-btn reject"  data-id="' + esc(p.id) + '" data-act="reject">Reject</button>' +
+            '<button class="aq-btn approve" data-act="approve">Approve</button>' +
+            '<button class="aq-btn reject"  data-act="reject">Reject</button>' +
             '</div>' : '');
+        // Set data-id via dataset (not innerHTML) so proposal IDs containing
+        // quotes or other HTML-special characters cannot inject attributes.
+        if (isPending) {
+          el.querySelectorAll('.aq-btn').forEach(btn => { btn.dataset.id = p.id; });
+        }
         list.appendChild(el);
       }
     } catch (e) { /* silently skip — offline or not wired */ }

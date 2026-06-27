@@ -967,26 +967,30 @@ fn truncate(s: &str, max: usize) -> String {
 /// Decode a percent-encoded URL path segment (`%2F` → `/`, `%40` → `@`, etc.).
 ///
 /// Only `%XX` sequences with valid hex digits are decoded; everything else is
-/// passed through unchanged. Used to round-trip `encodeURIComponent`-encoded
-/// proposal IDs from the dashboard back to their original form.
+/// passed through unchanged. Decoded bytes are collected first and then
+/// interpreted as UTF-8, so multi-byte sequences such as `%C3%A9` (é) are
+/// reconstructed correctly rather than being pushed as individual Latin-1
+/// scalars. Invalid UTF-8 is replaced with U+FFFD. Used to round-trip
+/// `encodeURIComponent`-encoded proposal IDs from the dashboard.
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut decoded: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
             if let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2)) {
                 if let (Some(h), Some(l)) = (hex_nibble(hi), hex_nibble(lo)) {
-                    out.push(char::from(h << 4 | l));
+                    decoded.push(h << 4 | l);
                     i += 3;
                     continue;
                 }
             }
         }
-        out.push(char::from(bytes[i]));
+        decoded.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8(decoded)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -1939,6 +1943,21 @@ mod tests {
             queue.lock().unwrap().get(raw_id).unwrap().is_approved(),
             "proposal should be approved"
         );
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_sequences() {
+        // é = U+00E9 = UTF-8 bytes [0xC3, 0xA9] = %C3%A9 (as encodeURIComponent produces)
+        assert_eq!(percent_decode("%C3%A9"), "é");
+        // ASCII round-trips unchanged.
+        assert_eq!(percent_decode("hello-world"), "hello-world");
+        // @ (ASCII but encoded by encodeURIComponent) decodes correctly.
+        assert_eq!(percent_decode("adapter%40abc123"), "adapter@abc123");
+        // Incomplete sequence is passed through literally (graceful degradation).
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%2"), "%2");
+        // Invalid hex nibble is left as-is.
+        assert_eq!(percent_decode("%GG"), "%GG");
     }
 
     // ── E11 S11.1: /skills endpoint ───────────────────────────────────────────
