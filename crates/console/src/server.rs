@@ -140,6 +140,15 @@ pub struct ConsoleServer {
     bridge: SensoryBridge,
     config: ServerConfig,
     limiter: AuthRateLimiter,
+    /// Path to the vita audit JSONL file for `GET /digest`. `None` when not
+    /// wired (the server returns 503 rather than panicking).
+    digest_path: Option<std::path::PathBuf>,
+    /// Agent ID used as the `agent_id` argument to `generate_digest`.
+    digest_agent_id: String,
+    /// Mtime-based cache for the serialised digest JSON: `(mtime, json)`.
+    /// Avoids re-reading the full audit JSONL on every `GET /digest` call when
+    /// the file has not changed.
+    digest_cache: Mutex<Option<(std::time::SystemTime, String)>>,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -186,7 +195,22 @@ impl ConsoleServer {
             bridge,
             config,
             limiter: AuthRateLimiter::default(),
+            digest_path: None,
+            digest_agent_id: "anima".to_string(),
+            digest_cache: Mutex::new(None),
         }
+    }
+
+    /// Wire the `GET /digest` endpoint to read from `path` and fold over the
+    /// entries using `agent_id`. Without this the endpoint returns 503.
+    pub fn with_digest(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        self.digest_path = Some(path.into());
+        self.digest_agent_id = agent_id.into();
+        self
     }
 
     /// Bind the listener (so the caller learns the resolved local address) and
@@ -349,6 +373,8 @@ impl ConsoleServer {
             ),
             ("GET", "/events") => self.serve_events(out, last_event_id),
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
+            // S15.1 — "While you were away" activity digest
+            ("GET", "/digest") => self.serve_digest(&mut out),
             // E21 — Prometheus metrics endpoint
             ("GET", "/metrics") => {
                 let body = self.hub.render_metrics();
@@ -553,6 +579,67 @@ impl ConsoleServer {
             ),
         }
     }
+
+    /// Serve the S15.1 "while you were away" activity digest as JSON.
+    ///
+    /// Reads the audit JSONL file at `digest_path`, folds the entries with
+    /// [`lifecycle::digest::generate_digest`], and returns the serialised
+    /// [`lifecycle::digest::ActivityDigest`].  Returns 503 if the server was not
+    /// wired with [`ConsoleServer::with_digest`]; returns an empty digest (no
+    /// error) if the file does not exist yet.
+    fn serve_digest(&self, out: &mut TcpStream) -> std::io::Result<()> {
+        let Some(ref path) = self.digest_path else {
+            return write_json(
+                out,
+                503,
+                "Service Unavailable",
+                br#"{"error":"digest not configured"}"#,
+            );
+        };
+        // Check mtime; serve the cached JSON if the file has not changed since
+        // the last request, avoiding a full audit-log read on every call.
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        {
+            let cache = self.digest_cache.lock().expect("poisoned");
+            if let (Some(mt), Some((cached_mt, cached_json))) = (mtime, cache.as_ref()) {
+                if mt == *cached_mt {
+                    return write_json(out, 200, "OK", cached_json.as_bytes());
+                }
+            }
+        }
+        let entries = read_audit_entries(path);
+        let digest = lifecycle::digest::generate_digest(&self.digest_agent_id, &entries);
+        match serde_json::to_string(&digest) {
+            Ok(json) => {
+                if let Some(mt) = mtime {
+                    *self.digest_cache.lock().expect("poisoned") = Some((mt, json.clone()));
+                }
+                write_json(out, 200, "OK", json.as_bytes())
+            }
+            Err(_) => write_json(
+                out,
+                500,
+                "Internal Server Error",
+                br#"{"error":"serialization failed"}"#,
+            ),
+        }
+    }
+}
+
+/// Read and parse all complete lines from a vita audit JSONL file.
+///
+/// Missing or unreadable files return an empty vec; malformed lines are
+/// silently skipped so a partially-written tail entry never blocks the digest.
+fn read_audit_entries(path: &std::path::Path) -> Vec<vita::AuditEntry> {
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    BufReader::new(file)
+        .lines()
+        .map_while(|l| l.ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect()
 }
 
 fn priority_label(p: SensoryPriority) -> &'static str {
@@ -1264,5 +1351,77 @@ mod tests {
             resp_with_token.contains("200 OK"),
             "should accept valid token: {resp_with_token}"
         );
+    }
+
+    // ── S15.1: GET /digest ────────────────────────────────────────────────────
+
+    #[test]
+    fn digest_endpoint_503_when_not_configured() {
+        // A server created without with_digest() must return 503, not panic.
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /digest HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            resp.contains("503"),
+            "expected 503 without digest source: {resp}"
+        );
+    }
+
+    #[test]
+    fn digest_endpoint_returns_json_when_wired() {
+        use std::io::Write as IoWrite;
+
+        let dir = std::env::temp_dir().join(format!("anima-digest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.jsonl");
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(senses::HumanGuidance::new("t"));
+        let server = ConsoleServer::new(
+            hub.clone(),
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_digest(path.clone(), "agent-a".to_string());
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        // Write one completed task into the audit log.
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"TaskCompleted":{{"agent_id":"agent-a","task_id":1,"tokens_emitted":42,"response":"ok"}}}}"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let resp = http_request(
+            addr,
+            "GET /digest HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        assert!(
+            resp.contains("application/json"),
+            "must be JSON content-type: {resp}"
+        );
+        assert!(
+            resp.contains("tasks_completed"),
+            "digest payload must include tasks_completed: {resp}"
+        );
+        // The one entry we wrote should be counted.
+        assert!(
+            resp.contains(r#""tasks_completed":1"#),
+            "tasks_completed should be 1: {resp}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

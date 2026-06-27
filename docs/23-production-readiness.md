@@ -77,7 +77,10 @@ TUI and COM1 serial bridge for the kernel.
       tools, adapters) — the human-in-the-loop half of Pillar 4.
 - [ ] Skills/tools registry view (what the agent can do, what it has
       proposed) and an adapter-library view (Pillar 4 provenance).
-- [ ] "While you were away" digest (E15 S15.1) rendered on connect.
+- [x] "While you were away" digest (E15 S15.1) rendered on connect.
+      `GET /digest` endpoint reads the audit JSONL, calls `lifecycle::generate_digest`,
+      returns JSON; the browser dashboard fetches it on connect and shows a
+      dismissible summary panel (suppressed when the agent has no recorded history).
 - [ ] Auth beyond the bearer token for non-loopback deployments (per-user
       identity exists in `crates/users` / E17; wire it to the console).
 

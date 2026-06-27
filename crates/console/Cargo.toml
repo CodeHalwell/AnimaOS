@@ -14,5 +14,6 @@ console-proto = { path = "../console-proto", features = ["json"] }
 senses = { path = "../senses" }
 interoception = { path = "../interoception" }
 vita = { path = "../vita" }
+lifecycle = { path = "../lifecycle" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 serde_json = { workspace = true }

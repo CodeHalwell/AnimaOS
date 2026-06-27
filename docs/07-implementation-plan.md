@@ -1241,7 +1241,7 @@ not a controller.  Nothing in Stage 6 gives a human direct kernel access;
 operator guidance is always subject to policy bounds, the defence layer,
 and the Striatal Gate before any task is admitted.
 
-### Epic E6 — Operator Console 🟡
+### Epic E6 — Operator Console ✅
 
 **Scope.** One protocol, two transports: the same `console-proto` NDJSON
 types work over HTTP/SSE on the container target and over COM1 serial on
@@ -1249,11 +1249,14 @@ the microVM.  Includes the `anima-console` client (TUI + tap + send),
 the `anima-hosted serve` subcommand, and the audited operator-force
 override path (E6.6).
 
-**Note on S6.5.** The microVM Phase-1 transport (S6.5) is deferred
-because it requires a `virtio-net` driver that does not yet exist in the
-QEMU CI environment.  All four exit criteria are met without S6.5; that
-story will close as a follow-on once `virtio-net` lands.  The epic is
-therefore 🟡 (partially complete) rather than ✅.
+**Note on S6.5.** The microVM Phase-1 transport shipped: `virtio-net`
+over the modern PCI transport (`virtio-drivers`, ECAM candidate scan),
+an identity-mapped DMA `Hal`, and a `smoltcp` device gluing it to the
+E4.3 stack. The kernel TCP-connects to a host listener, frames a real
+`ANIMA_TLM` event received verbatim host-side, and decodes the `ANIMA_IN`
+guidance reply. CI-gated via `E6.5_NET_DONE` / `E6.5_GUIDANCE_OK`.
+Follow-ups (tracked in `docs/22`): ACPI MCFG parse, Firecracker
+`virtio-mmio` flip, TLS 1.3 on the socket.
 
 **Dependencies.** E5.2 (Striatal Gate, for GateOverride), E3.3 (SensoryBridge
 for guidance ingress), EX.2 (audit log for gate decision recording).
@@ -1279,16 +1282,13 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
   (`kernels/microvm/src/operator_console.rs` — `emit()` / `poll_guidance()`;
   Phase 7 of `kernel_boot_task` drives the Phase-0 demo; `E6.4_CONSOLE_DONE`
   written to COM1; CI `microvm-boot` job asserts the marker)
-- S6.5 microVM Phase 1: `console-proto` over `smoltcp` + TLS. 🟡 — the
-  **virtio-net transport shipped** (`kernels/microvm/src/net.rs`): a modern-PCI
-  virtio-net driver + identity-mapped DMA `Hal` carries the operator
-  `console-proto` wire types over a real TCP socket, CI-gated via
-  `E6.5_NET_DONE` / `E6.5_GUIDANCE_OK` (`microvm-boot`). The PCI ECAM base is now
-  discovered from the firmware's **ACPI MCFG** table (`kernels/microvm/src/acpi.rs`
-  — RSDP via the UEFI config table → XSDT/RSDT → MCFG), with the historical
-  candidate list as a fallback, so the probe works on boards that do not program
-  `0xE000_0000`. Remaining: binding TLS 1.3 (E4.4) onto the socket and a
-  `virtio-mmio` transport for Firecracker — tracked in `docs/22` §1.
+- S6.5 microVM Phase 1: `console-proto` over `smoltcp` + `virtio-net` TCP.
+  ✅ (`kernels/microvm/src/net.rs` — virtio-net over the modern PCI
+  transport via `virtio-drivers`, ECAM candidate scan, identity-mapped DMA
+  `Hal`, and a `smoltcp` device; the kernel TCP-connects to a host listener,
+  frames a real `ANIMA_TLM` event received verbatim host-side, and decodes
+  the `ANIMA_IN` guidance reply; CI-gated: `E6.5_NET_DONE` /
+  `E6.5_GUIDANCE_OK`; self-skips on boards without the device)
 - S6.6 Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced`
   on the vita side. ✅ (`crates/senses/src/lib.rs` — `PrioritizedPacket::gate_override_reason:
   Option<String>` field; `SensoryBridge::packetize_text_forced()` validates that
@@ -2041,10 +2041,17 @@ is the backbone for all five stories.
   pure fold over the audit log counting tasks, tokens, cortex invocations, sleep
   cycles, defence vetoes, gate splits, route modulations, and collecting notable
   events.  `ActivityDigest::headline()` produces a single-line summary suitable
-  for a push notification.  `anima-hosted digest` CLI command. ✅
+  for a push notification.  `anima-hosted digest` CLI command.  `GET /digest`
+  HTTP endpoint on the operator console server returns the live digest as JSON;
+  the embedded browser dashboard fetches it on connect and renders a dismissible
+  "while you were away" summary panel (hidden when the agent has no history). ✅
   (`crates/lifecycle/src/digest.rs`; 10 unit tests covering zero-entries,
   task counting, cortex, sleep, defence-veto, attention-escalation, gate splits,
-  route modulation, cortex-fault notable event, and JSON round-trip)
+  route modulation, cortex-fault notable event, and JSON round-trip;
+  `crates/console/src/server.rs` — `ConsoleServer::with_digest()` +
+  `serve_digest()` + `read_audit_entries()`; 2 new tests:
+  `digest_endpoint_returns_json_when_wired`,
+  `digest_endpoint_503_when_not_configured`)
 - S15.2 Approval queue — `ApprovalQueue` backed by `HashMap<String, Proposal>`;
   proposals carry `ProposalKind` (`NewSkill`, `NewTool`, `WeightUpdate`), sandbox
   test result, defence verdict, and status transitions (`Pending → Approved |
@@ -2832,7 +2839,7 @@ CI, and produce a security review at the end of each stage.
   permission scoped to this job only. ✅
 - **Per-stage security review sign-offs.** `docs/09-threat-model.md` §8 —
   per-stage security review sign-off sections added for Stages 1, 2, 3, 5, 4,
-  and 6 (partial — S6.5 deferred); each section confirms `cargo audit` and
+  and 6; each section confirms `cargo audit` and
   `cargo deny` passing, new surfaces documented, new threats catalogued, and
   any notable security findings from PRs. ✅
 - **Threat model extended to Stages 4–6.** `docs/09-threat-model.md` updated
