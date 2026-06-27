@@ -380,15 +380,22 @@ impl ConsoleServer {
                 } else {
                     "/reject".len()
                 };
-                let id = path["/approvals/".len()..path.len() - suffix_len].to_string();
-                if !id.is_empty() {
-                    return self.serve_approval_action(
-                        &mut out,
-                        &id,
-                        approve,
-                        &mut reader,
-                        content_length,
-                    );
+                let prefix_len = "/approvals/".len();
+                // Guard: path must be long enough to hold a non-empty ID
+                // between the prefix and the suffix.  Without this, a request
+                // like POST /approvals/approve (no ID) would make the slice
+                // start > end and panic.
+                if path.len() >= prefix_len + suffix_len {
+                    let id = path[prefix_len..path.len() - suffix_len].to_string();
+                    if !id.is_empty() {
+                        return self.serve_approval_action(
+                            &mut out,
+                            &id,
+                            approve,
+                            &mut reader,
+                            content_length,
+                        );
+                    }
                 }
             }
         }

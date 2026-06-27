@@ -574,9 +574,14 @@
     }
     emptyEl.style.display = "none";
     list.innerHTML = "";
+    // Map PascalCase ProposalKind tags from serde to the kebab-case CSS
+    // class names defined for .kind-badge (NewSkill → new-skill, etc.).
+    const kindCssMap = { NewSkill: "new-skill", NewTool: "new-tool", WeightUpdate: "weight-update" };
     for (const p of pending) {
       const k = p.kind || {};
-      const label = k.kind || "unknown";
+      const rawLabel = k.kind || "unknown";
+      const cssClass = kindCssMap[rawLabel] || rawLabel.toLowerCase();
+      const label = rawLabel;
       const name = k.name || k.model_id || p.id;
       const desc = k.description || k.training_summary || "";
       const prov = p.provenance || "";
@@ -585,7 +590,7 @@
       el.className = "prop";
       el.innerHTML =
         '<div class="prop-header">' +
-          '<span class="kind-badge ' + esc(label) + '">' + esc(label) + "</span>" +
+          '<span class="kind-badge ' + cssClass + '">' + esc(label) + "</span>" +
           '<span class="prop-name">' + esc(name) + "</span>" +
         "</div>" +
         (desc ? '<div class="prop-desc">' + esc(desc) + "</div>" : "") +
