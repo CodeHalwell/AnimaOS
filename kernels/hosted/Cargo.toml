@@ -19,6 +19,7 @@ console = { path = "../../crates/console" }
 lifecycle = { path = "../../crates/lifecycle" }
 llm-backends = { path = "../../llm-backends" }
 skills = { path = "../../crates/skills" }
+anima-finetune = { path = "../../crates/finetune" }
 actuators = { path = "../../crates/actuators" }
 praxis = { path = "../../crates/praxis" }
 serde_json = { workspace = true }

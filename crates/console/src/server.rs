@@ -1077,7 +1077,7 @@ fn write_json(out: &mut TcpStream, code: u16, reason: &str, body: &[u8]) -> std:
 fn write_cors_preflight(out: &mut TcpStream) -> std::io::Result<()> {
     let header = "HTTP/1.1 204 No Content\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Methods: GET, OPTIONS\r\n\
          Access-Control-Allow-Headers: Authorization, Content-Type\r\n\
          Content-Length: 0\r\n\
          Connection: close\r\n\
