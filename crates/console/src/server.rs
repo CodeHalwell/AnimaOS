@@ -721,6 +721,19 @@ impl ConsoleServer {
             }
         };
 
+        // For skill proposals, lifecycle::SkillApprovalBridge maps
+        // proposal_id == skill_id (see enqueue_skill_proposal).  When the
+        // registry is also wired, promote the matching skill so the approval
+        // gate actually makes it available to the agent — mirroring what the
+        // bridge's approve() method does.  Tool/adapter proposals have no
+        // matching skill entry so the promote() call returns NotFound, which
+        // is silently ignored.
+        if approve && result.is_ok() {
+            if let Some(registry) = &self.skill_registry {
+                let _ = registry.lock().expect("poisoned").promote(id);
+            }
+        }
+
         match result {
             Ok(()) => {
                 let action = if approve { "approved" } else { "rejected" };

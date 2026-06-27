@@ -6772,8 +6772,26 @@ fn cmd_serve() {
         println!("  motivation: enabled (drive-augmented Striatal Gate)");
     }
 
+    // E11 / Pillar 3: wire the skill registry so the console's /skills panel
+    // reflects the live registry.  The manager's Dreaming phase registers
+    // agent-authored Proposed drafts into this same Arc; the console reads it.
+    manager.enable_skill_reflection(skills::SkillRegistry::with_builtins());
+    let skill_registry_handle = manager
+        .skill_registry_handle()
+        .expect("just installed via enable_skill_reflection");
+
+    // E15 / Pillar 3: shared approval queue surfaced by the console's
+    // /approvals panel.  In serve mode the queue is populated when the hosted
+    // kernel drains Proposed skills from the registry through
+    // SkillApprovalBridge (future integration); for now the console at least
+    // returns [] rather than 503 and accept/reject calls are plumbed.
+    let approval_queue_handle =
+        std::sync::Arc::new(std::sync::Mutex::new(lifecycle::ApprovalQueue::new()));
+
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
-    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
+    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
+        .with_skill_registry(std::sync::Arc::clone(&skill_registry_handle))
+        .with_approval_queue(std::sync::Arc::clone(&approval_queue_handle));
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
