@@ -776,8 +776,10 @@ impl ConsoleServer {
                 // dashboard approval path leaves the same evidence as the
                 // CLI approval path (main.rs `cmd_skills_approval`).
                 if let Some(audit) = &self.audit_log {
-                    audit.lock().expect("poisoned").push(
-                        AuditEntry::ApprovalProposalDecided {
+                    audit
+                        .lock()
+                        .expect("poisoned")
+                        .push(AuditEntry::ApprovalProposalDecided {
                             agent_id: "console".to_string(),
                             proposal_id: id.to_string(),
                             decision: action.to_string(),
@@ -786,8 +788,7 @@ impl ConsoleServer {
                             } else {
                                 reason.clone()
                             },
-                        },
-                    );
+                        });
                 }
                 write_json(out, 200, "OK", br#"{"ok":true}"#)
             }
