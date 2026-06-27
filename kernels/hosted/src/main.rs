@@ -6781,12 +6781,76 @@ fn cmd_serve() {
         .expect("just installed via enable_skill_reflection");
 
     // E15 / Pillar 3: shared approval queue surfaced by the console's
-    // /approvals panel.  In serve mode the queue is populated when the hosted
-    // kernel drains Proposed skills from the registry through
-    // SkillApprovalBridge (future integration); for now the console at least
-    // returns [] rather than 503 and accept/reject calls are plumbed.
+    // /approvals panel.  A background drain thread periodically scans the
+    // registry for Proposed agent-authored skills and enqueues them here so
+    // the dashboard's approval panel shows real pending proposals.
     let approval_queue_handle =
         std::sync::Arc::new(std::sync::Mutex::new(lifecycle::ApprovalQueue::new()));
+
+    // Background drain: every 30 s, move any newly-Proposed skills from the
+    // registry into the approval queue.  vita registers drafts during Dreaming
+    // but deliberately has no lifecycle dep; the hosted kernel bridges the gap
+    // here (the canonical pattern documented in vita::LifecycleManager).
+    {
+        use lifecycle::skill_bridge::SkillApprovalBridge;
+        use skills::{ProposalAction, ProposalOutcome, SkillAuthor, SkillProposal, SkillState};
+        let drain_reg = std::sync::Arc::clone(&skill_registry_handle);
+        let drain_q = std::sync::Arc::clone(&approval_queue_handle);
+        std::thread::Builder::new()
+            .name("anima-skill-drain".to_string())
+            .spawn(move || {
+                // SkillApprovalBridge persists across iterations so it
+                // remembers which proposals it has already enqueued.
+                let mut bridge = SkillApprovalBridge::new();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    // Snapshot Proposed entries (cloned to escape the lock).
+                    let proposed: Vec<skills::SkillEntry> = {
+                        let reg = drain_reg.lock().expect("poisoned");
+                        reg.list_all()
+                            .into_iter()
+                            .filter(|e| matches!(e.state, SkillState::Proposed))
+                            .cloned()
+                            .collect()
+                    };
+                    for entry in proposed {
+                        // Skip if already in the queue (bridge/queue dedup by ID).
+                        if drain_q.lock().expect("poisoned").get(&entry.id).is_some() {
+                            continue;
+                        }
+                        let body_text = drain_reg
+                            .lock()
+                            .expect("poisoned")
+                            .load_body(&entry.id)
+                            .ok()
+                            .map(|b| b.instructions.clone())
+                            .unwrap_or_default();
+                        let skill_text = format!(
+                            "---\nname: {name}\ndescription: {desc}\n---\n{body}",
+                            name = entry.manifest.name,
+                            desc = entry.manifest.description,
+                            body = body_text,
+                        );
+                        let proposal = SkillProposal {
+                            skill_text,
+                            authored_by: SkillAuthor::Agent,
+                            proposed_at_ns: entry.provenance.proposed_at_ns,
+                            source_episode: entry.provenance.source_episode.clone(),
+                        };
+                        let outcome = ProposalOutcome {
+                            artifact_id: Some(entry.id.clone()),
+                            action: ProposalAction::PendingApproval,
+                        };
+                        let _ = bridge.enqueue_skill(
+                            &mut drain_q.lock().expect("poisoned"),
+                            &outcome,
+                            &proposal,
+                        );
+                    }
+                }
+            })
+            .expect("spawn skill-drain thread");
+    }
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
