@@ -413,18 +413,20 @@ impl ConsoleServer {
         // contain a proposal ID segment that is only known at runtime.
         if method == "POST" {
             if let Some(rest) = path.strip_prefix("/approval-queue/") {
-                if let Some(id) = rest.strip_suffix("/approve") {
+                if let Some(raw_id) = rest.strip_suffix("/approve") {
+                    let id = percent_decode(raw_id);
                     return self.serve_approval_action(
-                        id,
+                        &id,
                         true,
                         content_length,
                         &mut reader,
                         &mut out,
                     );
                 }
-                if let Some(id) = rest.strip_suffix("/reject") {
+                if let Some(raw_id) = rest.strip_suffix("/reject") {
+                    let id = percent_decode(raw_id);
                     return self.serve_approval_action(
-                        id,
+                        &id,
                         false,
                         content_length,
                         &mut reader,
@@ -959,6 +961,40 @@ fn truncate(s: &str, max: usize) -> String {
         let mut t: String = s.chars().take(max).collect();
         t.push('…');
         t
+    }
+}
+
+/// Decode a percent-encoded URL path segment (`%2F` → `/`, `%40` → `@`, etc.).
+///
+/// Only `%XX` sequences with valid hex digits are decoded; everything else is
+/// passed through unchanged. Used to round-trip `encodeURIComponent`-encoded
+/// proposal IDs from the dashboard back to their original form.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2)) {
+                if let (Some(h), Some(l)) = (hex_nibble(hi), hex_nibble(lo)) {
+                    out.push(char::from(h << 4 | l));
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(char::from(bytes[i]));
+        i += 1;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1848,6 +1884,61 @@ mod tests {
         );
         let resp = http_request(addr, &req);
         assert!(resp.contains("422"), "expected 422: {resp}");
+    }
+
+    #[test]
+    fn percent_encoded_proposal_id_is_decoded_server_side() {
+        use lifecycle::approval::{Proposal, ProposalKind, ProposalStatus};
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let queue = Arc::new(Mutex::new(lifecycle::approval::ApprovalQueue::new()));
+        // Proposal whose id contains characters that encodeURIComponent encodes.
+        // '@' → %40  (WeightUpdate ids)   '?' → %3F  (hypothetical edge-case)
+        let raw_id = "adapter@abc123";
+        queue.lock().unwrap().enqueue(Proposal {
+            id: raw_id.to_string(),
+            kind: ProposalKind::NewSkill {
+                name: "x".into(),
+                description: "x".into(),
+                prompt_hash: "x".into(),
+            },
+            created_at_ns: 1,
+            provenance: "test".into(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        // Client sends the id percent-encoded (as encodeURIComponent would).
+        let encoded_id = "adapter%40abc123";
+        let body = r#"{}"#;
+        let req = format!(
+            "POST /approval-queue/{encoded_id}/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{{}}",
+            body.len()
+        );
+        let resp = http_request(addr, &req);
+        assert!(
+            resp.contains("200 OK"),
+            "server should decode %40 to @ and find the proposal: {resp}"
+        );
+        assert!(
+            queue.lock().unwrap().get(raw_id).unwrap().is_approved(),
+            "proposal should be approved"
+        );
     }
 
     // ── E11 S11.1: /skills endpoint ───────────────────────────────────────────

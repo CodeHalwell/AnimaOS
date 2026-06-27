@@ -606,7 +606,7 @@
     const id = btn.dataset.id;
     const act = btn.dataset.act; // "approve" or "reject"
     try {
-      const r = await fetch("/approval-queue/" + id + "/" + act, {
+      const r = await fetch("/approval-queue/" + encodeURIComponent(id) + "/" + act, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "" }),
