@@ -169,6 +169,21 @@
   .sk-name { font-weight: 600; color: var(--ink); }
   .sk-desc { color: var(--muted); font-size: 11.5px; }
 
+  /* ── Adapter library panel ───────────────────────────────────────── */
+  #adapterpanel { display: none; }
+  #adapterpanel.ready { display: block; }
+  #adlist { max-height: 180px; overflow-y: auto; }
+  .ad-item {
+    display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+    border-bottom: 1px solid var(--line-soft); font-size: 12px;
+  }
+  .ad-item:last-child { border-bottom: 0; }
+  .ad-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .ad-dot.MountableAdapter { background: var(--ok); }
+  .ad-dot.BakedVariant { background: var(--accent2); }
+  .ad-name { font-weight: 600; color: var(--ink); }
+  .ad-desc { color: var(--muted); font-size: 11.5px; }
+
   /* ── Conversation column ─────────────────────────────────────────── */
   #chatpanel { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
   #chatpanel h2 { padding: 16px 18px 0; margin-bottom: 6px; }
@@ -314,6 +329,12 @@
     <div class="panel" id="skillpanel">
       <h2>Skills <span id="skillcount" style="font-weight:400"></span></h2>
       <div id="skilllist"><div class="aq-empty">No skills registered.</div></div>
+    </div>
+
+    <!-- E17 — Adapter library: hidden until the endpoint confirms it is wired -->
+    <div class="panel" id="adapterpanel">
+      <h2>Adapters <span id="adcount" style="font-weight:400"></span></h2>
+      <div id="adlist"><div class="aq-empty">No adapters loaded.</div></div>
     </div>
   </div>
 
@@ -653,11 +674,41 @@
     } catch (e) { /* silently skip */ }
   }
 
-  // Poll approval queue and skills every 8 seconds.
+  /* ── Adapter library ─────────────────────────────────────────────── */
+  async function refreshAdapters() {
+    try {
+      const r = await fetch("/adapters", { headers: authHeaders });
+      if (r.status === 404) return; // not wired
+      if (!r.ok) return;
+      const adapters = await r.json();
+      $("adapterpanel").classList.add("ready");
+      $("adcount").textContent = "· " + adapters.length;
+      const list = $("adlist");
+      list.innerHTML = "";
+      if (!adapters.length) {
+        list.innerHTML = '<div class="aq-empty">No adapters loaded.</div>';
+        return;
+      }
+      for (const ad of adapters) {
+        const tier = ad.serving_tier || "";
+        const el = document.createElement("div");
+        el.className = "ad-item";
+        el.innerHTML =
+          '<span class="ad-dot ' + esc(tier) + '" title="' + esc(tier) + '"></span>' +
+          '<div><div class="ad-name">' + esc(ad.adapter_id) + '</div>' +
+          '<div class="ad-desc">' + esc(ad.description || "") + '</div></div>';
+        list.appendChild(el);
+      }
+    } catch (e) { /* silently skip */ }
+  }
+
+  // Poll approval queue, skills, and adapters every 8 seconds.
   refreshApprovalQueue();
   refreshSkills();
+  refreshAdapters();
   setInterval(refreshApprovalQueue, 8000);
   setInterval(refreshSkills, 8000);
+  setInterval(refreshAdapters, 8000);
 
   /* ── Transport ──────────────────────────────────────────────────── */
   const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
