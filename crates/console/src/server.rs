@@ -859,17 +859,66 @@ impl ConsoleServer {
             String::new()
         };
 
-        let result = {
-            let mut q = queue.lock().expect("poisoned");
-            if approve {
+        // Capture WeightUpdate (adapter_id, weights_digest) inside the same
+        // lock acquisition as approve/reject to avoid TOCTOU races. The adapter
+        // library is then updated *outside* the queue lock to prevent
+        // simultaneous lock ordering issues.
+        let (result, weight_op) = {
+            let mut q = match queue.lock() {
+                Ok(q) => q,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"ok":false,"error":"queue lock poisoned"}"#,
+                    );
+                }
+            };
+            // For WeightUpdate proposals, record the (adapter_id, digest) pair
+            // so we can forward the operator decision to the adapter library.
+            // ID format is "{adapter_id}@{weights_digest}" (adapter_bridge.rs).
+            let weight_op = q.get(proposal_id).and_then(|p| {
+                if let lifecycle::approval::ProposalKind::WeightUpdate {
+                    ref adapter_hash, ..
+                } = p.kind
+                {
+                    let adapter_id = match p.id.rfind('@') {
+                        Some(i) => p.id[..i].to_string(),
+                        None => p.id.clone(),
+                    };
+                    Some((adapter_id, adapter_hash.clone()))
+                } else {
+                    None
+                }
+            });
+            let result = if approve {
                 q.approve(proposal_id, &reason)
             } else {
                 q.reject(proposal_id, &reason)
-            }
+            };
+            (result, weight_op)
         };
 
         match result {
-            Ok(()) => write_json(out, 200, "OK", br#"{"ok":true}"#),
+            Ok(()) => {
+                // Synchronise WeightUpdate decisions with the adapter library so
+                // that mount_gated sees operator sign-off (approve) or its
+                // revocation (reject), completing the human half of the two-stage
+                // adoption gate (S8.4.8 / AdapterLibrary::mount_gated).
+                if let (Some((adapter_id, weights_digest)), Some(library)) =
+                    (weight_op, &self.adapter_library)
+                {
+                    if let Ok(mut lib) = library.lock() {
+                        if approve {
+                            lib.record_operator_approval(&adapter_id, &weights_digest);
+                        } else {
+                            lib.revoke_operator_approval(&adapter_id, &weights_digest);
+                        }
+                    }
+                }
+                write_json(out, 200, "OK", br#"{"ok":true}"#)
+            }
             Err(e) => {
                 let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e));
                 write_json(out, 422, "Unprocessable Entity", body.as_bytes())
@@ -1880,5 +1929,100 @@ mod tests {
         assert!(resp.contains("200 OK"), "status: {resp}");
         assert!(resp.contains("application/json"), "content-type: {resp}");
         assert!(resp.contains("[]"), "empty array expected: {resp}");
+    }
+
+    // ── WeightUpdate approval → adapter library wiring ────────────────────────
+
+    #[test]
+    fn approving_weight_update_proposal_calls_record_operator_approval() {
+        use anima_finetune::{
+            AdapterLibrary, AdoptionDecision, FineTuneConfig, FineTuneJob, FineTuner,
+            FixtureFineTuner, TrainingPair, TrainingSet,
+        };
+        use lifecycle::approval::{ApprovalQueue, Proposal, ProposalKind, ProposalStatus};
+
+        // Train a deterministic fixture adapter so we get a real artifact with a
+        // populated weights_digest, which record_adoption validates against.
+        let tuner = FixtureFineTuner::new();
+        let cfg = FineTuneConfig::new("base-q4", "episodic://test", "nightly-adapter");
+        let job = FineTuneJob::new("test-job".to_string(), cfg);
+        let pairs = vec![TrainingPair::new("q?", "a")];
+        let set = TrainingSet::from_pairs(&pairs);
+        let artifact = tuner.run_job(&job, set.pairs()).unwrap();
+        let adapter_id = artifact.adapter_id.clone();
+        let weights_digest = artifact.weights_digest.clone();
+
+        // Register the adapter and record automated adoption so only operator
+        // sign-off is missing before mount_gated would succeed.
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(artifact.clone()).unwrap();
+        lib.record_adoption(&AdoptionDecision {
+            adapter_id: adapter_id.clone(),
+            weights_digest: weights_digest.clone(),
+            approved: true,
+            eval_passed: true,
+            alignment_passed: true,
+            reasons: vec![],
+        });
+        assert!(
+            lib.is_adopted(&adapter_id),
+            "precondition: adoption recorded"
+        );
+        assert!(
+            !lib.is_operator_approved(&adapter_id),
+            "precondition: not yet operator-approved"
+        );
+        let library = Arc::new(Mutex::new(lib));
+
+        // Enqueue a WeightUpdate proposal whose ID carries the same adapter_id@digest.
+        let proposal_id = format!("{adapter_id}@{weights_digest}");
+        let mut queue = ApprovalQueue::new();
+        queue.enqueue(Proposal {
+            id: proposal_id.clone(),
+            kind: ProposalKind::WeightUpdate {
+                model_id: "base-q4".to_string(),
+                adapter_hash: weights_digest.clone(),
+                rank: None,
+                training_summary: "1 pair".to_string(),
+            },
+            created_at_ns: 1,
+            provenance: "adoption gate".to_string(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+        let shared_queue = Arc::new(Mutex::new(queue));
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&shared_queue))
+        .with_adapter_library(Arc::clone(&library));
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        let body = r#"{"reason":"operator approved"}"#;
+        let req = format!(
+            "POST /approval-queue/{}/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            proposal_id,
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &req);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(
+            library.lock().unwrap().is_operator_approved(&adapter_id),
+            "adapter library should reflect operator approval after the endpoint returns"
+        );
     }
 }
