@@ -48,6 +48,7 @@ pub use console_proto::{self, OperatorEvent, OperatorInput, Priority};
 // extra crate imports on top of `console`.
 pub use lifecycle::ApprovalQueue;
 pub use skills::SkillRegistry;
+pub use vita::AuditLog;
 
 /// The self-contained browser dashboard served at `GET /`.
 pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
@@ -76,6 +77,7 @@ pub struct Console {
     config: ServerConfig,
     approval_queue: Option<Arc<Mutex<ApprovalQueue>>>,
     skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
+    audit_log: Option<Arc<Mutex<AuditLog>>>,
 }
 
 impl Console {
@@ -92,6 +94,7 @@ impl Console {
             config,
             approval_queue: None,
             skill_registry: None,
+            audit_log: None,
         }
     }
 
@@ -106,6 +109,17 @@ impl Console {
     /// the live registry contents.
     pub fn with_skill_registry(mut self, r: Arc<Mutex<SkillRegistry>>) -> Self {
         self.skill_registry = Some(r);
+        self
+    }
+
+    /// Wire a durable audit log so dashboard approve/reject decisions are
+    /// persisted as [`vita::AuditEntry::ApprovalProposalDecided`] entries.
+    ///
+    /// Pass a second `AuditLog::with_file` handle opened against the same path
+    /// as the somatic-loop log; both writers use `O_APPEND` so concurrent line
+    /// appends are safe on Linux.
+    pub fn with_audit_log(mut self, log: Arc<Mutex<AuditLog>>) -> Self {
+        self.audit_log = Some(log);
         self
     }
 
@@ -134,6 +148,9 @@ impl Console {
         }
         if let Some(r) = self.skill_registry.clone() {
             server = server.with_skill_registry(r);
+        }
+        if let Some(l) = self.audit_log.clone() {
+            server = server.with_audit_log(l);
         }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)

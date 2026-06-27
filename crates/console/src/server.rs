@@ -47,6 +47,7 @@ use console_proto::{json, OperatorEvent, Priority};
 use lifecycle::ApprovalQueue;
 use senses::{SensoryBridge, SensoryBridgeError, SensoryPriority};
 use skills::SkillRegistry;
+use vita::{AuditEntry, AuditLog};
 
 use crate::hub::ConsoleHub;
 
@@ -152,6 +153,10 @@ pub struct ConsoleServer {
     /// E11 / Pillar 3: skill registry view.
     /// `None` means the endpoint serves an empty list (safe default).
     skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
+    /// Durable audit sink — when wired, approve/reject decisions are persisted
+    /// as `AuditEntry::ApprovalProposalDecided` alongside the somatic-loop log
+    /// so the operator has a complete audit trail across both paths.
+    audit_log: Option<Arc<Mutex<AuditLog>>>,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -200,6 +205,7 @@ impl ConsoleServer {
             limiter: AuthRateLimiter::default(),
             approval_queue: None,
             skill_registry: None,
+            audit_log: None,
         }
     }
 
@@ -217,6 +223,17 @@ impl ConsoleServer {
     /// Without this call the skills endpoint returns an empty list.
     pub fn with_skill_registry(mut self, r: Arc<Mutex<SkillRegistry>>) -> Self {
         self.skill_registry = Some(r);
+        self
+    }
+
+    /// Wire a durable audit log so dashboard approve/reject decisions are
+    /// persisted as [`vita::AuditEntry::ApprovalProposalDecided`] entries
+    /// alongside the entries written by the somatic loop.
+    ///
+    /// Without this call decisions are still applied to the in-memory queue and
+    /// broadcast as SSE events; the audit log simply won't contain them.
+    pub fn with_audit_log(mut self, log: Arc<Mutex<AuditLog>>) -> Self {
+        self.audit_log = Some(log);
         self
     }
 
@@ -755,6 +772,23 @@ impl ConsoleServer {
                     },
                     detail,
                 });
+                // Persist the decision to the durable audit log so the
+                // dashboard approval path leaves the same evidence as the
+                // CLI approval path (main.rs `cmd_skills_approval`).
+                if let Some(audit) = &self.audit_log {
+                    audit.lock().expect("poisoned").push(
+                        AuditEntry::ApprovalProposalDecided {
+                            agent_id: "console".to_string(),
+                            proposal_id: id.to_string(),
+                            decision: action.to_string(),
+                            reason: if reason.is_empty() {
+                                "operator approved via dashboard".to_string()
+                            } else {
+                                reason.clone()
+                            },
+                        },
+                    );
+                }
                 write_json(out, 200, "OK", br#"{"ok":true}"#)
             }
             Err(e) => {

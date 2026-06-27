@@ -6852,10 +6852,21 @@ fn cmd_serve() {
             .expect("spawn skill-drain thread");
     }
 
+    // Open a second append-only handle on the same JSONL path so dashboard
+    // approve/reject decisions are persisted as ApprovalProposalDecided entries
+    // alongside the somatic-loop entries (both use O_APPEND; concurrent line
+    // appends are atomic for the small payloads written here).
+    let console_audit_log = vita::AuditLog::with_file(&audit_path)
+        .map(|l| std::sync::Arc::new(std::sync::Mutex::new(l)))
+        .ok();
+
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
-    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
+    let mut console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
         .with_skill_registry(std::sync::Arc::clone(&skill_registry_handle))
         .with_approval_queue(std::sync::Arc::clone(&approval_queue_handle));
+    if let Some(al) = console_audit_log {
+        console = console.with_audit_log(al);
+    }
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
