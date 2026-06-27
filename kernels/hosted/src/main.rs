@@ -6726,6 +6726,15 @@ fn cmd_serve() {
     // The shared bridge: POSTed guidance lands in the very queue the loop drains.
     let bridge = SensoryBridge::new(HumanGuidance::new("operator-console"));
 
+    // Create the audit log once so the console can share the same file sink
+    // and HMAC integrity chain.  AuditLog::clone shares both via Arc, meaning
+    // the lifecycle and the console extend the same chain rather than opening
+    // two independent chains (which would make verify_audit_chain report
+    // tampering on every interleaved write).
+    let shared_audit = vita::AuditLog::from_env(&agent_id);
+    // Keep a clone for the console before we consume shared_audit into the manager.
+    let console_audit_clone = shared_audit.clone();
+
     let mut manager = LifecycleManager::new(
         &agent_id,
         bridge.clone(),
@@ -6736,6 +6745,9 @@ fn cmd_serve() {
         None, // run forever
     )
     .with_tier_backends(tier_backends);
+    // Replace the manager's internally-created audit log with the shared one so
+    // the console clone and the somatic loop write to the same chain.
+    manager.audit = shared_audit;
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
@@ -6852,33 +6864,15 @@ fn cmd_serve() {
             .expect("spawn skill-drain thread");
     }
 
-    // Open a second append-only handle on the same JSONL path so dashboard
-    // approve/reject decisions are persisted as ApprovalProposalDecided entries
-    // alongside the somatic-loop entries (both use O_APPEND; concurrent line
-    // appends are atomic for the small payloads written here).  Mirror
-    // AuditLog::from_env: use HMAC-chaining when ANIMA_AUDIT_HMAC_KEY is set
-    // so the tamper-evidence sidecar covers dashboard decisions too.
-    let console_audit_log = {
-        let hmac_key = std::env::var("ANIMA_AUDIT_HMAC_KEY")
-            .ok()
-            .filter(|k| !k.is_empty());
-        let opened = match &hmac_key {
-            Some(k) => vita::AuditLog::with_file_hmac(&audit_path, k.as_bytes()),
-            None => vita::AuditLog::with_file(&audit_path),
-        };
-        opened
-            .map(|l| std::sync::Arc::new(std::sync::Mutex::new(l)))
-            .ok()
-    };
+    // Wire the console audit clone (same file sink + HMAC chain as the manager).
+    let console_audit_log = std::sync::Arc::new(std::sync::Mutex::new(console_audit_clone));
 
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let mut console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
         .with_skill_registry(std::sync::Arc::clone(&skill_registry_handle))
         .with_approval_queue(std::sync::Arc::clone(&approval_queue_handle))
         .with_agent_id(&agent_id);
-    if let Some(al) = console_audit_log {
-        console = console.with_audit_log(al);
-    }
+    console = console.with_audit_log(console_audit_log);
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
