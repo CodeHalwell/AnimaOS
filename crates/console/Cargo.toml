@@ -15,4 +15,7 @@ senses = { path = "../senses" }
 interoception = { path = "../interoception" }
 vita = { path = "../vita" }
 metrics-endpoint = { path = "../metrics-endpoint" }
+# E15 / E11: approval-queue surface + skills-registry view (Pillar 3).
+lifecycle = { path = "../lifecycle" }
+skills = { path = "../skills" }
 serde_json = { workspace = true }

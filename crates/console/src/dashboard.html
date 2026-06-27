@@ -194,6 +194,51 @@
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   }
+
+  /* ── Approval queue + Skills registry panels ─────────────────────── */
+  .col.left { overflow-y: auto; }
+
+  .prop { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+  .prop:last-child { border-bottom: none; }
+  .prop .prop-header { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .prop .kind-badge {
+    font: 600 9.5px var(--mono); letter-spacing: .08em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 5px;
+  }
+  .prop .kind-badge.new-skill { color: var(--accent); background: rgba(92,200,255,.1); border: 1px solid rgba(92,200,255,.3); }
+  .prop .kind-badge.new-tool  { color: var(--warn);   background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.3); }
+  .prop .kind-badge.weight-update { color: var(--accent2); background: rgba(139,124,246,.1); border: 1px solid rgba(139,124,246,.3); }
+  .prop .prop-name { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+  .prop .prop-desc { font-size: 11.5px; color: var(--muted); margin: 3px 0 6px; }
+  .prop .prop-prov { font: 10px var(--mono); color: var(--faint); margin-bottom: 7px; }
+  .prop .prop-actions { display: flex; gap: 7px; align-items: center; }
+  .prop input.reason {
+    flex: 1; font: 11px var(--mono); background: #0a0e17; border: 1px solid var(--line);
+    color: var(--ink); padding: 5px 8px; border-radius: 7px; outline: none;
+  }
+  .prop input.reason:focus { border-color: var(--accent); }
+  .prop button.approve, .prop button.reject {
+    font: 600 10px var(--mono); letter-spacing: .06em; padding: 5px 11px;
+    border-radius: 7px; border: 0; cursor: pointer; white-space: nowrap; transition: filter .2s;
+  }
+  .prop button.approve { background: rgba(74,222,128,.18); color: var(--ok); border: 1px solid rgba(74,222,128,.4); }
+  .prop button.reject  { background: rgba(248,113,113,.12); color: var(--crit); border: 1px solid rgba(248,113,113,.35); }
+  .prop button:hover   { filter: brightness(1.2); }
+  .prop button:disabled { opacity: .4; cursor: default; }
+
+  .empty-hint { color: var(--faint); font-size: 11.5px; padding: 6px 0; }
+
+  .skill-entry { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+  .skill-entry:last-child { border-bottom: none; }
+  .skill-entry .skill-row { display: flex; align-items: center; gap: 7px; }
+  .skill-entry .state-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .skill-entry .state-dot.active     { background: var(--ok); }
+  .skill-entry .state-dot.proposed   { background: var(--warn); }
+  .skill-entry .state-dot.quarantined{ background: var(--crit); }
+  .skill-entry .state-dot.rolledback { background: var(--faint); }
+  .skill-entry .skill-name { font-size: 12px; font-weight: 600; color: var(--ink); }
+  .skill-entry .skill-author { font: 10px var(--mono); color: var(--faint); margin-left: auto; }
+  .skill-entry .skill-desc  { font-size: 11px; color: var(--muted); margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -239,6 +284,24 @@
       <div class="duel"><div class="v" id="gateval" style="width:0%"></div><div class="t" id="gatethr" style="left:0%"></div></div>
       <div class="kv" style="padding:0"><span>value vs threshold</span><b id="gatenums">—</b></div>
       <div class="why" id="gatewhy">No gate decisions yet — the agent is idle until a sense wakes it.</div>
+    </div>
+
+    <!-- E15 / Pillar 3: approval-queue surface -->
+    <div class="panel" id="approvalpanel">
+      <h2>Approval queue <span id="pendingcount" style="font-weight:400;color:var(--warn)"></span>
+        <button onclick="loadApprovals()" title="Refresh" style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:13px;padding:0">↻</button>
+      </h2>
+      <div id="approvallist"></div>
+      <div id="approval-empty" class="empty-hint">No pending proposals — agent-proposed skills, tools, and adapters appear here for operator sign-off.</div>
+    </div>
+
+    <!-- E11 / Pillar 3: skills/tools registry view -->
+    <div class="panel" id="skillspanel">
+      <h2>Skills registry <span id="skillcount" style="font-weight:400"></span>
+        <button onclick="loadSkills()" title="Refresh" style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:13px;padding:0">↻</button>
+      </h2>
+      <div id="skilllist"></div>
+      <div id="skills-empty" class="empty-hint">No skills loaded.</div>
     </div>
   </div>
 
@@ -483,6 +546,148 @@
     };
   }
   connect();
+
+  /* ── Approval queue ─────────────────────────────────────────────── */
+  function authHeaders() {
+    return token ? { "Authorization": "Bearer " + token } : {};
+  }
+
+  async function loadApprovals() {
+    try {
+      const r = await fetch("/approvals", { headers: authHeaders() });
+      if (!r.ok) return;
+      renderApprovals(await r.json());
+    } catch (_) {}
+  }
+
+  function renderApprovals(proposals) {
+    const list = $("approvallist");
+    const emptyEl = $("approval-empty");
+    const pending = proposals.filter(p => p.status && p.status.status === "Pending");
+    const count = $("pendingcount");
+    count.textContent = pending.length ? "(" + pending.length + " pending)" : "";
+
+    if (pending.length === 0) {
+      list.innerHTML = "";
+      emptyEl.style.display = "";
+      return;
+    }
+    emptyEl.style.display = "none";
+    list.innerHTML = "";
+    for (const p of pending) {
+      const k = p.kind || {};
+      const label = k.kind || "unknown";
+      const name = k.name || k.model_id || p.id;
+      const desc = k.description || k.training_summary || "";
+      const prov = p.provenance || "";
+
+      const el = document.createElement("div");
+      el.className = "prop";
+      el.innerHTML =
+        '<div class="prop-header">' +
+          '<span class="kind-badge ' + esc(label) + '">' + esc(label) + "</span>" +
+          '<span class="prop-name">' + esc(name) + "</span>" +
+        "</div>" +
+        (desc ? '<div class="prop-desc">' + esc(desc) + "</div>" : "") +
+        (prov ? '<div class="prop-prov">from: ' + esc(prov) + "</div>" : "") +
+        '<div class="prop-actions">' +
+          '<input class="reason" type="text" placeholder="reason (optional)" />' +
+          '<button class="approve" data-id="' + esc(p.id) + '">Approve</button>' +
+          '<button class="reject"  data-id="' + esc(p.id) + '">Reject</button>' +
+        "</div>";
+
+      el.querySelector(".approve").addEventListener("click", function () {
+        const reason = el.querySelector(".reason").value.trim();
+        doApprovalAction(p.id, true, reason, this);
+      });
+      el.querySelector(".reject").addEventListener("click", function () {
+        const reason = el.querySelector(".reason").value.trim();
+        doApprovalAction(p.id, false, reason, this);
+      });
+
+      list.appendChild(el);
+    }
+  }
+
+  async function doApprovalAction(id, approve, reason, btn) {
+    btn.disabled = true;
+    const action = approve ? "approve" : "reject";
+    try {
+      const r = await fetch("/approvals/" + encodeURIComponent(id) + "/" + action, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+      if (r.ok) {
+        await loadApprovals();
+      } else {
+        const j = await r.json().catch(() => ({}));
+        addFeed("audit", "approval", (j.error || "HTTP " + r.status));
+      }
+    } catch (e) {
+      addFeed("audit", "approval", String(e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ── Skills registry ────────────────────────────────────────────── */
+  async function loadSkills() {
+    try {
+      const r = await fetch("/skills", { headers: authHeaders() });
+      if (!r.ok) return;
+      renderSkills(await r.json());
+    } catch (_) {}
+  }
+
+  function renderSkills(skills) {
+    const list = $("skilllist");
+    const emptyEl = $("skills-empty");
+    $("skillcount").textContent = "(" + skills.length + ")";
+    if (skills.length === 0) {
+      list.innerHTML = "";
+      emptyEl.style.display = "";
+      return;
+    }
+    emptyEl.style.display = "none";
+    list.innerHTML = "";
+    for (const s of skills) {
+      const m = s.manifest || {};
+      const stateName = stateLabel(s.state);
+      const author = (s.provenance && s.provenance.authored_by) ? s.provenance.authored_by.toLowerCase() : "unknown";
+      const el = document.createElement("div");
+      el.className = "skill-entry";
+      el.innerHTML =
+        '<div class="skill-row">' +
+          '<span class="state-dot ' + stateName + '" title="' + stateName + '"></span>' +
+          '<span class="skill-name">' + esc(m.name || s.id) + "</span>" +
+          '<span class="skill-author">' + esc(author) + "</span>" +
+        "</div>" +
+        (m.description ? '<div class="skill-desc">' + esc(m.description) + "</div>" : "");
+      list.appendChild(el);
+    }
+  }
+
+  // SkillState serialises as a plain string for unit variants ("Active",
+  // "Proposed", "RolledBack") and as {"Quarantined":{"reason":"..."}} for the
+  // struct variant — no serde tag wrapper.
+  function stateLabel(state) {
+    if (!state) return "unknown";
+    if (typeof state === "string") {
+      if (state === "Active")     return "active";
+      if (state === "Proposed")   return "proposed";
+      if (state === "RolledBack") return "rolledback";
+    }
+    if (typeof state === "object" && state.Quarantined) return "quarantined";
+    return "unknown";
+  }
+
+  // Initial load on page open; skills rarely change so no auto-refresh.
+  loadApprovals();
+  loadSkills();
+  // Refresh approvals every 30 s so newly-queued proposals appear without
+  // a manual click.
+  setInterval(loadApprovals, 30000);
 
   /* ── Composer ───────────────────────────────────────────────────── */
   $("composer").addEventListener("submit", async (e) => {

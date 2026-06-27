@@ -44,10 +44,15 @@ pub use server::{ConsoleServer, ServerConfig};
 // Re-export the protocol so downstream binaries need only depend on `console`.
 pub use console_proto::{self, OperatorEvent, OperatorInput, Priority};
 
+// Re-export the queue/registry types so callers that wire them don't need
+// extra crate imports on top of `console`.
+pub use lifecycle::ApprovalQueue;
+pub use skills::SkillRegistry;
+
 /// The self-contained browser dashboard served at `GET /`.
 pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A fully-wired console: the broadcast hub, the HTTP/SSE server, and the audit
 /// tailer that feeds the hub from a `vita` audit JSONL file.
@@ -55,11 +60,22 @@ use std::sync::Arc;
 /// This is the one-call wiring used by the hosted `serve` command. Construct it
 /// with the *same* `SensoryBridge` the lifecycle owns (a clone), point it at
 /// the agent's audit log path, and call [`Console::start`].
+///
+/// Optionally wire the E15 approval queue and E11 skill registry for the
+/// Pillar 3 dashboard panels:
+///
+/// ```ignore
+/// let console = Console::new(bridge, audit_path, config)
+///     .with_approval_queue(Arc::clone(&queue))
+///     .with_skill_registry(Arc::clone(&registry));
+/// ```
 pub struct Console {
     hub: Arc<ConsoleHub>,
     bridge: senses::SensoryBridge,
     audit_path: std::path::PathBuf,
     config: ServerConfig,
+    approval_queue: Option<Arc<Mutex<ApprovalQueue>>>,
+    skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
 }
 
 impl Console {
@@ -74,7 +90,23 @@ impl Console {
             bridge,
             audit_path: audit_path.into(),
             config,
+            approval_queue: None,
+            skill_registry: None,
         }
+    }
+
+    /// Wire the E15 approval queue so the dashboard's approval-queue panel
+    /// can list, approve, and reject pending proposals.
+    pub fn with_approval_queue(mut self, q: Arc<Mutex<ApprovalQueue>>) -> Self {
+        self.approval_queue = Some(q);
+        self
+    }
+
+    /// Wire the E11 skill registry so the dashboard's skills panel shows
+    /// the live registry contents.
+    pub fn with_skill_registry(mut self, r: Arc<Mutex<SkillRegistry>>) -> Self {
+        self.skill_registry = Some(r);
+        self
     }
 
     /// The shared event hub — also usable as an `interoception::SignalPublisher`
@@ -96,7 +128,13 @@ impl Console {
     /// returning the resolved server address.
     pub fn start(&self) -> std::io::Result<std::net::SocketAddr> {
         AuditTailer::new(self.audit_path.clone(), self.hub()).spawn();
-        let server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone());
+        let mut server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone());
+        if let Some(q) = self.approval_queue.clone() {
+            server = server.with_approval_queue(q);
+        }
+        if let Some(r) = self.skill_registry.clone() {
+            server = server.with_skill_registry(r);
+        }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
     }

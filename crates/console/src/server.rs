@@ -1,14 +1,18 @@
 //! A dependency-free HTTP/1.1 server exposing the operator console.
 //!
-//! Three routes, all on one loopback-friendly port:
+//! Routes, all on one loopback-friendly port:
 //!
-//! | Method + path     | Purpose                                                        |
-//! |-------------------|----------------------------------------------------------------|
-//! | `GET /`           | The self-contained browser dashboard (HTML + vanilla JS).      |
-//! | `GET /events`     | Server-Sent Events: the live [`OperatorEvent`] stream.         |
-//! | `POST /guidance`  | Afferent ingress — an [`OperatorInput`] becomes a sensory packet. |
-//! | `GET /healthz`    | Liveness probe.                                                |
-//! | `GET /metrics`    | Prometheus exposition-format metrics (E21).                    |
+//! | Method + path                    | Purpose                                                         |
+//! |----------------------------------|-----------------------------------------------------------------|
+//! | `GET /`                          | The self-contained browser dashboard (HTML + vanilla JS).       |
+//! | `GET /events`                    | Server-Sent Events: the live [`OperatorEvent`] stream.          |
+//! | `POST /guidance`                 | Afferent ingress — an [`OperatorInput`] becomes a sensory packet. |
+//! | `GET /healthz`                   | Liveness probe.                                                 |
+//! | `GET /metrics`                   | Prometheus exposition-format metrics (E21).                     |
+//! | `GET /approvals`                 | E15 approval queue — all proposals as JSON (Pillar 3).          |
+//! | `POST /approvals/{id}/approve`   | Approve a pending proposal.                                     |
+//! | `POST /approvals/{id}/reject`    | Reject a pending proposal.                                      |
+//! | `GET /skills`                    | E11 skill registry — all entries as JSON (Pillar 3).            |
 //!
 //! It is hand-rolled on `std::net` (thread-per-connection) precisely so the
 //! `console` crate pulls in **no** third-party HTTP stack — keeping the
@@ -40,7 +44,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use console_proto::{json, OperatorEvent, Priority};
+use lifecycle::ApprovalQueue;
 use senses::{SensoryBridge, SensoryBridgeError, SensoryPriority};
+use skills::SkillRegistry;
 
 use crate::hub::ConsoleHub;
 
@@ -140,6 +146,12 @@ pub struct ConsoleServer {
     bridge: SensoryBridge,
     config: ServerConfig,
     limiter: AuthRateLimiter,
+    /// E15 / Pillar 3: approval queue for pending self-extension proposals.
+    /// `None` means the endpoint serves an empty list (safe default).
+    approval_queue: Option<Arc<Mutex<ApprovalQueue>>>,
+    /// E11 / Pillar 3: skill registry view.
+    /// `None` means the endpoint serves an empty list (safe default).
+    skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -186,7 +198,26 @@ impl ConsoleServer {
             bridge,
             config,
             limiter: AuthRateLimiter::default(),
+            approval_queue: None,
+            skill_registry: None,
         }
+    }
+
+    /// Wire the E15 approval queue so `GET /approvals` and the approve/reject
+    /// actions operate on a live queue shared with the lifecycle loop.
+    ///
+    /// Without this call the approval endpoints return an empty list.
+    pub fn with_approval_queue(mut self, q: Arc<Mutex<ApprovalQueue>>) -> Self {
+        self.approval_queue = Some(q);
+        self
+    }
+
+    /// Wire the E11 skill registry so `GET /skills` returns live registry data.
+    ///
+    /// Without this call the skills endpoint returns an empty list.
+    pub fn with_skill_registry(mut self, r: Arc<Mutex<SkillRegistry>>) -> Self {
+        self.skill_registry = Some(r);
+        self
     }
 
     /// Bind the listener (so the caller learns the resolved local address) and
@@ -336,6 +367,32 @@ impl ConsoleServer {
             }
         }
 
+        // ── Pillar 3: variable-path approval actions ─────────────────────────────
+        // These can't be matched with a simple `(method, path)` tuple because
+        // the proposal id is part of the path.  Handle them before the main
+        // dispatch so the fallthrough `_` arm below stays authoritative.
+        if method == "POST" && path.starts_with("/approvals/") {
+            let approve = path.ends_with("/approve");
+            let reject = path.ends_with("/reject");
+            if approve || reject {
+                let suffix_len = if approve {
+                    "/approve".len()
+                } else {
+                    "/reject".len()
+                };
+                let id = path["/approvals/".len()..path.len() - suffix_len].to_string();
+                if !id.is_empty() {
+                    return self.serve_approval_action(
+                        &mut out,
+                        &id,
+                        approve,
+                        &mut reader,
+                        content_length,
+                    );
+                }
+            }
+        }
+
         match (method.as_str(), path.as_str()) {
             ("GET", "/healthz") => {
                 write_response(&mut out, 200, "OK", "text/plain; charset=utf-8", b"ok\n")
@@ -360,6 +417,10 @@ impl ConsoleServer {
                     body.as_bytes(),
                 )
             }
+            // E15 / Pillar 3 — approval queue list
+            ("GET", "/approvals") => self.serve_approvals(&mut out),
+            // E11 / Pillar 3 — skill registry view
+            ("GET", "/skills") => self.serve_skills(&mut out),
             _ => write_response(
                 &mut out,
                 404,
@@ -552,6 +613,140 @@ impl ConsoleServer {
                 br#"{"ok":false,"error":"invalid input"}"#,
             ),
         }
+    }
+
+    // ── E15 / Pillar 3: approval-queue endpoints ──────────────────────────────
+
+    /// `GET /approvals` — all proposals as a JSON array.
+    ///
+    /// Returns `[]` when no approval queue has been wired via
+    /// [`ConsoleServer::with_approval_queue`].
+    fn serve_approvals(&self, out: &mut TcpStream) -> std::io::Result<()> {
+        let body = match &self.approval_queue {
+            Some(q) => {
+                let q = q.lock().expect("poisoned");
+                serde_json::to_string(&q.all()).unwrap_or_else(|_| "[]".to_string())
+            }
+            None => "[]".to_string(),
+        };
+        write_json(out, 200, "OK", body.as_bytes())
+    }
+
+    /// `POST /approvals/{id}/approve` or `/reject` — operator decision on a
+    /// pending proposal.
+    ///
+    /// Accepts an optional JSON body `{"reason":"…"}`.  Emits an `Audit` event
+    /// to the live feed so every connected operator sees the decision.
+    fn serve_approval_action(
+        &self,
+        out: &mut TcpStream,
+        id: &str,
+        approve: bool,
+        reader: &mut BufReader<TcpStream>,
+        content_length: usize,
+    ) -> std::io::Result<()> {
+        const MAX_BODY: usize = 4096;
+        if content_length > MAX_BODY {
+            return write_json(
+                out,
+                413,
+                "Payload Too Large",
+                br#"{"ok":false,"error":"body exceeds 4 KiB"}"#,
+            );
+        }
+
+        // Parse the optional `{"reason":"…"}` body.
+        let reason = if content_length > 0 {
+            let mut raw = vec![0u8; content_length];
+            reader.read_exact(&mut raw)?;
+            String::from_utf8(raw)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let Some(q) = &self.approval_queue else {
+            return write_json(
+                out,
+                503,
+                "Service Unavailable",
+                br#"{"ok":false,"error":"approval queue not wired"}"#,
+            );
+        };
+
+        let result = {
+            let mut q = q.lock().expect("poisoned");
+            if approve {
+                q.approve(id, reason.as_str())
+            } else {
+                q.reject(id, reason.as_str())
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                let action = if approve { "approved" } else { "rejected" };
+                let detail = format!(
+                    "proposal {} {}: {}",
+                    id,
+                    action,
+                    if reason.is_empty() {
+                        "(no reason given)"
+                    } else {
+                        &reason
+                    }
+                );
+                self.hub.publish(OperatorEvent::Audit {
+                    kind: if approve {
+                        "ProposalApproved".to_string()
+                    } else {
+                        "ProposalRejected".to_string()
+                    },
+                    detail,
+                });
+                write_json(out, 200, "OK", br#"{"ok":true}"#)
+            }
+            Err(e) => {
+                let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e));
+                write_json(out, 422, "Unprocessable Entity", body.as_bytes())
+            }
+        }
+    }
+
+    // ── E11 / Pillar 3: skills registry endpoint ──────────────────────────────
+
+    /// `GET /skills` — all skill registry entries as a JSON array.
+    ///
+    /// Each entry carries `id`, `manifest` (name, description, version,
+    /// capabilities), `state` (Active / Proposed / Quarantined / RolledBack),
+    /// and `provenance` (authored_by, proposed_at_ns, source_episode).
+    ///
+    /// Returns `[]` when no registry has been wired via
+    /// [`ConsoleServer::with_skill_registry`].
+    fn serve_skills(&self, out: &mut TcpStream) -> std::io::Result<()> {
+        let body = match &self.skill_registry {
+            Some(r) => {
+                let r = r.lock().expect("poisoned");
+                let entries: Vec<serde_json::Value> = r
+                    .list_all()
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id": e.id,
+                            "manifest": e.manifest,
+                            "state": e.state,
+                            "provenance": e.provenance,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+            }
+            None => "[]".to_string(),
+        };
+        write_json(out, 200, "OK", body.as_bytes())
     }
 }
 
@@ -1263,6 +1458,247 @@ mod tests {
         assert!(
             resp_with_token.contains("200 OK"),
             "should accept valid token: {resp_with_token}"
+        );
+    }
+
+    // ── E15 / Pillar 3: /approvals endpoint ───────────────────────────────────
+
+    #[test]
+    fn approvals_returns_empty_array_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /approvals HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains("application/json"), "content-type: {resp}");
+        // Body is the JSON array `[]`
+        assert!(
+            resp.ends_with("[]") || resp.contains("\r\n\r\n[]"),
+            "body: {resp}"
+        );
+    }
+
+    #[test]
+    fn approvals_lists_pending_proposals_when_wired() {
+        use lifecycle::{ApprovalQueue, Proposal, ProposalKind, ProposalStatus};
+        use std::sync::{Arc, Mutex};
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(senses::HumanGuidance::new("t"));
+        let queue = Arc::new(Mutex::new(ApprovalQueue::new()));
+        {
+            let mut q = queue.lock().unwrap();
+            q.enqueue(Proposal {
+                id: "skill-abc".to_string(),
+                kind: ProposalKind::NewSkill {
+                    name: "summariser".to_string(),
+                    description: "Summarises text.".to_string(),
+                    prompt_hash: "aabbcc".to_string(),
+                },
+                created_at_ns: 1_000_000,
+                provenance: "dreaming".to_string(),
+                sandbox_result: None,
+                defence_verdict: None,
+                status: ProposalStatus::Pending,
+            });
+        }
+
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().unwrap();
+
+        let resp = http_request(
+            addr,
+            "GET /approvals HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(
+            resp.contains("summariser"),
+            "proposal should be listed: {resp}"
+        );
+        assert!(resp.contains("Pending"), "status should be Pending: {resp}");
+    }
+
+    #[test]
+    fn approve_action_transitions_proposal_to_approved() {
+        use lifecycle::{ApprovalQueue, Proposal, ProposalKind, ProposalStatus};
+        use std::sync::{Arc, Mutex};
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(senses::HumanGuidance::new("t"));
+        let queue = Arc::new(Mutex::new(ApprovalQueue::new()));
+        {
+            let mut q = queue.lock().unwrap();
+            q.enqueue(Proposal {
+                id: "tool-xyz".to_string(),
+                kind: ProposalKind::NewTool {
+                    name: "calculator".to_string(),
+                    description: "Arithmetic.".to_string(),
+                    wasm_hash: "deadbeef".to_string(),
+                    requested_capabilities: vec![],
+                },
+                created_at_ns: 2_000_000,
+                provenance: "mastery".to_string(),
+                sandbox_result: None,
+                defence_verdict: None,
+                status: ProposalStatus::Pending,
+            });
+        }
+
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().unwrap();
+
+        let body = r#"{"reason":"looks safe"}"#;
+        let raw = format!(
+            "POST /approvals/tool-xyz/approve HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let resp = http_request(addr, &raw);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains(r#""ok":true"#), "body: {resp}");
+
+        // Verify the proposal is now Approved in the shared queue.
+        let q = queue.lock().unwrap();
+        assert!(
+            q.get("tool-xyz").unwrap().is_approved(),
+            "should be approved"
+        );
+    }
+
+    #[test]
+    fn reject_action_transitions_proposal_to_rejected() {
+        use lifecycle::{ApprovalQueue, Proposal, ProposalKind, ProposalStatus};
+        use std::sync::{Arc, Mutex};
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(senses::HumanGuidance::new("t"));
+        let queue = Arc::new(Mutex::new(ApprovalQueue::new()));
+        {
+            let mut q = queue.lock().unwrap();
+            q.enqueue(Proposal {
+                id: "skill-reject-me".to_string(),
+                kind: ProposalKind::NewSkill {
+                    name: "risky-skill".to_string(),
+                    description: "Does something risky.".to_string(),
+                    prompt_hash: "bad0bad".to_string(),
+                },
+                created_at_ns: 3_000_000,
+                provenance: "dreaming".to_string(),
+                sandbox_result: None,
+                defence_verdict: None,
+                status: ProposalStatus::Pending,
+            });
+        }
+
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().unwrap();
+
+        let body = r#"{"reason":"capability too broad"}"#;
+        let raw = format!(
+            "POST /approvals/skill-reject-me/reject HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let resp = http_request(addr, &raw);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+
+        let q = queue.lock().unwrap();
+        let p = q.get("skill-reject-me").unwrap();
+        assert!(
+            matches!(p.status, lifecycle::ProposalStatus::Rejected { .. }),
+            "should be rejected: {:?}",
+            p.status
+        );
+    }
+
+    #[test]
+    fn approve_returns_503_when_queue_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let body = r#"{"reason":"ok"}"#;
+        let raw = format!(
+            "POST /approvals/some-id/approve HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let resp = http_request(addr, &raw);
+        assert!(
+            resp.contains("503"),
+            "should get 503 when queue not wired: {resp}"
+        );
+    }
+
+    // ── E11 / Pillar 3: /skills endpoint ──────────────────────────────────────
+
+    #[test]
+    fn skills_returns_empty_array_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /skills HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains("application/json"), "content-type: {resp}");
+        assert!(
+            resp.ends_with("[]") || resp.contains("\r\n\r\n[]"),
+            "body: {resp}"
+        );
+    }
+
+    #[test]
+    fn skills_lists_registry_entries_when_wired() {
+        use skills::SkillRegistry;
+        use std::sync::{Arc, Mutex};
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(senses::HumanGuidance::new("t"));
+        let registry = Arc::new(Mutex::new(SkillRegistry::with_builtins()));
+
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_skill_registry(Arc::clone(&registry));
+        let (addr, _h) = server.spawn().unwrap();
+
+        let resp = http_request(
+            addr,
+            "GET /skills HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        // Built-ins include "web-research".
+        assert!(
+            resp.contains("web-research"),
+            "built-in skills should appear: {resp}"
+        );
+        assert!(
+            resp.contains("Active"),
+            "active state should be serialised: {resp}"
         );
     }
 }

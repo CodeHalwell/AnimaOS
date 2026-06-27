@@ -72,11 +72,17 @@ vs threshold, rationale); filterable telemetry feed. Plus the `anima-console`
 TUI and COM1 serial bridge for the kernel.
 
 **Remaining.**
-- [ ] Approval-queue surface: `crates/lifecycle` (E15) has the queue; the
-      dashboard needs a pane to review/approve pending promotions (skills,
-      tools, adapters) — the human-in-the-loop half of Pillar 4.
-- [ ] Skills/tools registry view (what the agent can do, what it has
-      proposed) and an adapter-library view (Pillar 4 provenance).
+- [x] Approval-queue surface: `crates/lifecycle` (E15) has the queue; the
+      dashboard now has a pane (`GET /approvals`, `POST /approvals/{id}/approve`,
+      `POST /approvals/{id}/reject`) to list, approve, and reject pending
+      promotions (skills, tools, adapters) — the human-in-the-loop half of
+      Pillar 4. `ConsoleServer` and `Console` accept the queue via builder
+      methods; the dashboard panel auto-refreshes every 30 s.
+- [x] Skills/tools registry view: `GET /skills` exposes the live
+      `SkillRegistry` as JSON; the dashboard panel renders each entry with
+      a state indicator (active / proposed / quarantined / rolled-back),
+      manifest metadata, provenance, and description. Three-stage progressive
+      disclosure visible to the operator.
 - [ ] "While you were away" digest (E15 S15.1) rendered on connect.
 - [ ] Auth beyond the bearer token for non-loopback deployments (per-user
       identity exists in `crates/users` / E17; wire it to the console).
