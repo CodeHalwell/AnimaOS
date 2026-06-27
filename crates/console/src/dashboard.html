@@ -606,7 +606,7 @@
     const id = btn.dataset.id;
     const act = btn.dataset.act; // "approve" or "reject"
     try {
-      const r = await fetch("/approval-queue/" + encodeURIComponent(id) + "/" + act, {
+      const r = await fetch("/approval-queue/" + id + "/" + act, {
         method: "POST",
         headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "" }),
@@ -627,7 +627,7 @@
       if (!r.ok) return;
       const skills = await r.json();
       $("skillpanel").classList.add("ready");
-      const active = skills.filter(s => s.state === "Active" || (s.state && s.state.status === "Active") || s.state === "Active").length;
+      const active = skills.filter(s => statusLabel(s.state) === "Active").length;
       $("skillcount").textContent = "· " + active + "/" + skills.length;
       const list = $("skilllist");
       list.innerHTML = "";
@@ -636,7 +636,7 @@
         return;
       }
       for (const sk of skills) {
-        const st = typeof sk.state === "string" ? sk.state : (sk.state?.status || Object.keys(sk.state || {})[0] || "?");
+        const st = statusLabel(sk.state);
         const el = document.createElement("div");
         el.className = "sk-item";
         el.innerHTML =

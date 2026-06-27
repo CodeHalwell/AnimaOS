@@ -471,16 +471,26 @@ impl ConsoleServer {
                         br#"{"error":"approval queue not available"}"#,
                     );
                 };
-                let proposals: Vec<_> = queue
-                    .lock()
-                    .expect("poisoned")
-                    .all()
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                let body = serde_json::to_vec(&proposals)
-                    .unwrap_or_else(|_| br#"{"error":"serialisation failed"}"#.to_vec());
-                write_json(&mut out, 200, "OK", &body)
+                let proposals = match queue.lock() {
+                    Ok(q) => q.all().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"queue lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&proposals) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
             }
             // E11 S11.1 — Skills registry: list all skill entries.
             // Returns 404 when the skill registry has not been wired in.
@@ -493,16 +503,26 @@ impl ConsoleServer {
                         br#"{"error":"skill registry not available"}"#,
                     );
                 };
-                let entries: Vec<_> = registry
-                    .lock()
-                    .expect("poisoned")
-                    .list_all()
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                let body = serde_json::to_vec(&entries)
-                    .unwrap_or_else(|_| br#"{"error":"serialisation failed"}"#.to_vec());
-                write_json(&mut out, 200, "OK", &body)
+                let entries = match registry.lock() {
+                    Ok(r) => r.list_all().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"registry lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&entries) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
             }
             // E8 — Adapter library: list all registered adapters.
             // Returns 404 when the adapter library has not been wired in.
@@ -515,16 +535,26 @@ impl ConsoleServer {
                         br#"{"error":"adapter library not available"}"#,
                     );
                 };
-                let adapters: Vec<_> = library
-                    .lock()
-                    .expect("poisoned")
-                    .list()
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                let body = serde_json::to_vec(&adapters)
-                    .unwrap_or_else(|_| br#"{"error":"serialisation failed"}"#.to_vec());
-                write_json(&mut out, 200, "OK", &body)
+                let adapters = match library.lock() {
+                    Ok(l) => l.list().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"library lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&adapters) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
             }
             _ => write_response(
                 &mut out,
@@ -801,8 +831,25 @@ impl ConsoleServer {
         let reason = if content_length > 0 {
             let mut buf = vec![0u8; content_length];
             reader.read_exact(&mut buf)?;
-            let text = String::from_utf8(buf).unwrap_or_default();
-            let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+            let Ok(text) = String::from_utf8(buf) else {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+                );
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        400,
+                        "Bad Request",
+                        br#"{"ok":false,"error":"request body is not valid JSON"}"#,
+                    );
+                }
+            };
             value
                 .get("reason")
                 .and_then(|r| r.as_str())
