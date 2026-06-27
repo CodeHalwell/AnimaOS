@@ -47,7 +47,7 @@ pub use console_proto::{self, OperatorEvent, OperatorInput, Priority};
 /// The self-contained browser dashboard served at `GET /`.
 pub const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A fully-wired console: the broadcast hub, the HTTP/SSE server, and the audit
 /// tailer that feeds the hub from a `vita` audit JSONL file.
@@ -60,6 +60,9 @@ pub struct Console {
     bridge: senses::SensoryBridge,
     audit_path: std::path::PathBuf,
     config: ServerConfig,
+    approval_queue: Option<Arc<Mutex<lifecycle::approval::ApprovalQueue>>>,
+    skill_registry: Option<Arc<Mutex<skills::SkillRegistry>>>,
+    adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
 }
 
 impl Console {
@@ -74,7 +77,35 @@ impl Console {
             bridge,
             audit_path: audit_path.into(),
             config,
+            approval_queue: None,
+            skill_registry: None,
+            adapter_library: None,
         }
+    }
+
+    /// Wire in a shared approval queue so the console can serve
+    /// `GET /approval-queue` and the approve/reject action endpoints.
+    pub fn with_approval_queue(
+        mut self,
+        queue: Arc<Mutex<lifecycle::approval::ApprovalQueue>>,
+    ) -> Self {
+        self.approval_queue = Some(queue);
+        self
+    }
+
+    /// Wire in a shared skill registry so the console can serve `GET /skills`.
+    pub fn with_skill_registry(mut self, registry: Arc<Mutex<skills::SkillRegistry>>) -> Self {
+        self.skill_registry = Some(registry);
+        self
+    }
+
+    /// Wire in a shared adapter library so the console can serve `GET /adapters`.
+    pub fn with_adapter_library(
+        mut self,
+        library: Arc<Mutex<anima_finetune::AdapterLibrary>>,
+    ) -> Self {
+        self.adapter_library = Some(library);
+        self
     }
 
     /// The shared event hub — also usable as an `interoception::SignalPublisher`
@@ -97,8 +128,17 @@ impl Console {
     pub fn start(&self) -> std::io::Result<std::net::SocketAddr> {
         AuditTailer::new(self.audit_path.clone(), self.hub()).spawn();
         let agent_id = std::env::var("ANIMA_AGENT_ID").unwrap_or_else(|_| "anima".to_string());
-        let server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone())
+        let mut server = ConsoleServer::new(self.hub(), self.bridge.clone(), self.config.clone())
             .with_digest(self.audit_path.clone(), agent_id);
+        if let Some(q) = &self.approval_queue {
+            server = server.with_approval_queue(Arc::clone(q));
+        }
+        if let Some(r) = &self.skill_registry {
+            server = server.with_skill_registry(Arc::clone(r));
+        }
+        if let Some(l) = &self.adapter_library {
+            server = server.with_adapter_library(Arc::clone(l));
+        }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
     }

@@ -16,4 +16,6 @@ interoception = { path = "../interoception" }
 vita = { path = "../vita" }
 lifecycle = { path = "../lifecycle" }
 metrics = { path = "../metrics" }
+skills = { path = "../skills" }
+anima-finetune = { path = "../finetune" }
 serde_json = { workspace = true }

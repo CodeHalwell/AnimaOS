@@ -342,12 +342,14 @@ dependencies = [
 name = "console"
 version = "0.1.0"
 dependencies = [
+ "anima-finetune",
  "console-proto",
  "interoception",
  "lifecycle",
  "metrics",
  "senses",
  "serde_json",
+ "skills",
  "vita",
 ]
 

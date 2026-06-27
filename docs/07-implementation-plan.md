@@ -1275,8 +1275,19 @@ for guidance ingress), EX.2 (audit log for gate decision recording).
   `kernels/hosted/src/main.rs` — `cmd_serve()` boots agent + console)
 - S6.3 Operator UIs: `anima-console` TUI (pure ANSI) + embedded browser
   dashboard. ✅ (`crates/console/src/bin/anima-console.rs` — `tui`, `tap`, `send`
-  subcommands; `crates/console/src/dashboard.rs` — self-contained HTML+JS; zero
+  subcommands; `crates/console/src/dashboard.html` — self-contained HTML+JS; zero
   third-party HTTP deps)
+  - **S6.3 extension: approval-queue + skills/adapters dashboard surface.** ✅
+    `GET /approval-queue` returns all proposals as JSON; `POST /approval-queue/{id}/approve`
+    and `POST /approval-queue/{id}/reject` enable operator decisions; `GET /skills`
+    returns all skill entries; `GET /adapters` returns all adapter artifacts. The
+    browser dashboard polls these endpoints and renders a live approval-queue panel
+    (with per-proposal Approve / Reject buttons) and a Skills panel (coloured
+    state-dot rows). All three panels self-hide when their endpoint is not wired.
+    `ConsoleServer::with_approval_queue` / `with_skill_registry` / `with_adapter_library`
+    builder methods inject the shared state; `Console::with_*` mirrors them.
+    (`crates/console/src/server.rs`; `crates/console/src/dashboard.html`; 9 new
+    unit tests; `crates/skills/src/registry.rs`: `SkillEntry` derives `serde::Serialize`)
 - S6.4 microVM Phase 0: `ANIMA_TLM`/`ANIMA_IN` serial framing + `anima-console
   serial` host bridge; `E6.4_CONSOLE_DONE` boot marker. ✅
   (`kernels/microvm/src/operator_console.rs` — `emit()` / `poll_guidance()`;

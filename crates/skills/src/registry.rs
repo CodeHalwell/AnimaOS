@@ -22,7 +22,7 @@ use crate::provenance::{SkillAuthor, SkillProvenance, SkillState};
 // ── SkillEntry ────────────────────────────────────────────────────────────────
 
 /// One entry in the registry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillEntry {
     /// Stable identifier: `name` lowercased with spaces replaced by `-`.
     pub id: String,

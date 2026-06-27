@@ -72,11 +72,20 @@ vs threshold, rationale); filterable telemetry feed. Plus the `anima-console`
 TUI and COM1 serial bridge for the kernel.
 
 **Remaining.**
-- [ ] Approval-queue surface: `crates/lifecycle` (E15) has the queue; the
-      dashboard needs a pane to review/approve pending promotions (skills,
-      tools, adapters) — the human-in-the-loop half of Pillar 4.
-- [ ] Skills/tools registry view (what the agent can do, what it has
-      proposed) and an adapter-library view (Pillar 4 provenance).
+- [x] Approval-queue surface: `GET /approval-queue` lists all proposals as JSON;
+      `POST /approval-queue/{id}/approve` and `POST /approval-queue/{id}/reject`
+      let the operator act; the dashboard polls the endpoint and renders a live
+      approval-queue panel with per-proposal Approve / Reject buttons. Wire
+      `Console::with_approval_queue(Arc<Mutex<ApprovalQueue>>)` from the hosted
+      serve path to activate. (`crates/console/src/server.rs` + `dashboard.html`;
+      9 unit tests covering 404-when-not-wired, listing, approve, reject, 422 on
+      unknown id, skills listing, adapters listing)
+- [x] Skills/tools registry view: `GET /skills` returns all `SkillEntry` values
+      as JSON; `GET /adapters` returns all `AdapterArtifact` values. The
+      dashboard polls these endpoints and renders a Skills panel (coloured state
+      dots: active/proposed/quarantined/rolled-back) and hides both panels when
+      the endpoints are not wired. Wire `Console::with_skill_registry` /
+      `Console::with_adapter_library` to activate.
 - [x] "While you were away" digest (E15 S15.1) rendered on connect.
       `GET /digest` endpoint reads the audit JSONL, calls `lifecycle::generate_digest`,
       returns JSON; the browser dashboard fetches it on connect and shows a
