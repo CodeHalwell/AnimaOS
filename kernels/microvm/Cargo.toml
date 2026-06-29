@@ -163,7 +163,7 @@ sha2 = { version = "0.11", default-features = false }
 sha2_soft_v010 = { package = "sha2", version = "0.10", default-features = false, features = ["force-soft"] }
 hmac = { version = "0.13", default-features = false }
 hkdf = { version = "0.13", default-features = false }
-aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+aes-gcm = { version = "0.11", default-features = false, features = ["aes"] }
 rand_core = { version = "0.10", default-features = false }
 der = { version = "0.8", default-features = false, features = ["alloc"] }
 virtio-drivers = { version = "0.13", default-features = false, features = ["alloc"] }
