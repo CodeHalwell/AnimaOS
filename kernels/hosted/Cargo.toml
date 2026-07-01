@@ -22,6 +22,9 @@ skills = { path = "../../crates/skills" }
 actuators = { path = "../../crates/actuators" }
 praxis = { path = "../../crates/praxis" }
 serde_json = { workspace = true }
+# Async-signal-safe SIGTERM/SIGINT handling for graceful shutdown (KERN-3).
+# Pure-Rust, no unsafe in our code; installs an atomic-store handler.
+signal-hook = "0.3"
 users = { path = "../../crates/users" }
 quota = { path = "../../crates/quota" }
 config = { path = "../../crates/config" }

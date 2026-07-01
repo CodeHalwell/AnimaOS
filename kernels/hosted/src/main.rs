@@ -6812,18 +6812,81 @@ fn cmd_serve() {
          anima-console tui --url http://{addr}\n"
     );
 
-    // Drive the somatic loop forever on a worker thread; the audit tailer +
-    // SSE server (already running) surface everything it does.
+    // Drive the somatic loop on a worker thread; the audit tailer + SSE server
+    // (already running) surface everything it does.
     let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
     monitor.record_ttft(1.0);
+
+    // Graceful shutdown (KERN-3): flip the somatic loop's cooperative shutdown
+    // flag on SIGTERM/SIGINT so the agent stops between iterations — instead of
+    // being hard-killed mid-task — letting sleep-phase state settle on disk.
+    let shutdown = manager.shutdown_handle();
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        if let Err(e) = signal_hook::flag::register(sig, Arc::clone(&shutdown)) {
+            eprintln!("anima-hosted: could not install shutdown handler for signal {sig}: {e}");
+        }
+    }
+
+    // Supervise the loop (KERN-2): a single dispatch/backend error or panic must
+    // not kill PID 1 — restart it with bounded backoff instead of exiting.
     let worker = std::thread::Builder::new()
         .name("anima-somatic-loop".to_string())
-        .spawn(move || {
-            block_on(somatic_execution_loop(&mut manager, &monitor))
-                .expect("somatic execution loop failed");
-        })
+        .spawn(move || supervise_somatic_loop(&mut manager, &monitor))
         .expect("spawn somatic loop");
-    worker.join().expect("somatic loop thread panicked");
+    if worker.join().is_err() {
+        eprintln!("anima-hosted: somatic-loop supervisor thread panicked");
+    } else {
+        println!("\nanima-hosted: somatic loop stopped; shut down cleanly.");
+    }
+}
+
+/// Maximum consecutive somatic-loop restarts before the supervisor gives up.
+const MAX_SOMATIC_RESTARTS: u32 = 100;
+
+/// Supervises the PID-1 somatic loop (KERN-2).
+///
+/// A single dispatch/backend error or panic must not terminate the agent, so
+/// each run is wrapped in `catch_unwind`; on error or panic the loop restarts
+/// with bounded exponential backoff. A run that stayed healthy for a while
+/// resets the crash counter, so isolated faults far apart never accumulate to
+/// the give-up cap — only a genuine crash-loop (many rapid failures) backs off
+/// and eventually stops. Returns when the loop exits cleanly via the
+/// cooperative shutdown flag (KERN-3) or the restart budget is exhausted.
+fn supervise_somatic_loop(manager: &mut LifecycleManager, monitor: &HomeostaticMonitor) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        if manager.is_shutting_down() {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            block_on(somatic_execution_loop(manager, monitor))
+        }));
+        let ran_for = started.elapsed();
+
+        match outcome {
+            Ok(Ok(())) => return, // clean cooperative shutdown
+            Ok(Err(e)) => eprintln!("anima-somatic-loop: error: {e:?}; restarting"),
+            Err(_) => eprintln!("anima-somatic-loop: panic caught; restarting"),
+        }
+
+        // A run that lasted a while was healthy; reset the crash counter so
+        // faults spread across a long lifetime never reach the give-up cap.
+        if ran_for >= std::time::Duration::from_secs(60) {
+            consecutive_failures = 0;
+        }
+        consecutive_failures += 1;
+        if consecutive_failures >= MAX_SOMATIC_RESTARTS {
+            eprintln!(
+                "anima-somatic-loop: {consecutive_failures} consecutive failures — giving up"
+            );
+            return;
+        }
+        let backoff_ms = (100u64 << consecutive_failures.min(6)).min(6_400);
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+    }
 }
 
 // ── `anima digest` subcommand (E15 S15.1) ────────────────────────────────────

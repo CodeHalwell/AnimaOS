@@ -117,6 +117,7 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use senses::sync::{lock_recover, Mutex};
 #[cfg(feature = "std")]
 use std::time::Duration;
@@ -172,6 +173,11 @@ impl From<SensoryBridgeError> for LifecycleError {
 pub struct LifecycleManager {
     /// Human-readable agent identifier (carried into audit entries).
     pub agent_id: String,
+    /// Cooperative shutdown flag (KERN-3). When set — e.g. by a host SIGTERM
+    /// handler via [`shutdown_handle`](Self::shutdown_handle) — the somatic loop
+    /// exits cleanly at its next iteration so the agent can flush state and
+    /// transition to sleep instead of being hard-killed mid-task.
+    shutdown: Arc<AtomicBool>,
     /// Human sensory bridge.
     pub senses: SensoryBridge,
     /// Active working memory (L1 token-count tracker).
@@ -388,6 +394,7 @@ impl LifecycleManager {
         let audit = AuditLog::new();
         Self {
             agent_id,
+            shutdown: Arc::new(AtomicBool::new(false)),
             senses,
             memory,
             l1_memory: L1PruningStore::new(),
@@ -629,6 +636,25 @@ impl LifecycleManager {
     /// Safe to call from any thread that holds a reference to the manager.
     pub fn cancel_current_task(&self) {
         lock_recover(&self.task_cancel).cancel();
+    }
+
+    /// Returns a handle to the cooperative shutdown flag (KERN-3).
+    ///
+    /// A host may set it from a signal handler (e.g. SIGTERM/SIGINT); the
+    /// somatic loop polls it each iteration and exits cleanly when it is set,
+    /// letting the host flush state instead of hard-killing the agent mid-task.
+    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
+    /// Requests a cooperative shutdown of the somatic loop.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a cooperative shutdown has been requested.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown.load(Ordering::Relaxed)
     }
 
     /// Installs a fresh [`CancellationToken`] and returns a clone bound to it.
@@ -1059,6 +1085,13 @@ pub async fn somatic_execution_loop(
     #[cfg(feature = "std")]
     let mut last_snapshot_ns: u64 = 0;
     loop {
+        // ── 0. Cooperative shutdown (KERN-3) ─────────────────────────────────
+        // Exit the loop cleanly so the host can flush the sleep-phase corpus and
+        // transition to sleep, rather than being hard-killed mid-iteration.
+        if lifecycle.shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // ── 1. Starvation-prevention boost ───────────────────────────────────
         lifecycle.scheduler.check_and_boost(&mut lifecycle.agenda);
 
@@ -1356,6 +1389,20 @@ mod tests {
     }
 
     // ── Existing tests (backward-compat) ──────────────────────────────────────
+
+    #[test]
+    fn somatic_loop_exits_promptly_on_shutdown_request() {
+        // With the flag pre-set, the loop returns cleanly at its first iteration
+        // (before running any work), so a host can stop the agent gracefully
+        // rather than hard-killing it mid-task (KERN-3).
+        let mut m = manager("shutdown-agent", Some(10_000));
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
+        assert!(!m.is_shutting_down());
+        m.request_shutdown();
+        assert!(m.is_shutting_down());
+        let result = block_on(somatic_execution_loop(&mut m, &monitor));
+        assert!(result.is_ok(), "loop must exit Ok on cooperative shutdown");
+    }
 
     #[test]
     fn lifecycle_enters_sleep_when_idle_and_low_stress() {
