@@ -138,8 +138,20 @@ impl FinancialBudgetSensor {
         // Prune stale records (any day other than the current UTC day) before
         // appending.  `spend_usd_on_day` only sums records from today, so
         // historical records accumulate unused and would cause O(N) growth.
+        //
+        // Prune against the most recent day observed — either the incoming
+        // record's day or the newest already in the ledger — never the raw
+        // incoming day. An out-of-order (older) timestamp from NTP skew or a
+        // batched replay must not wipe the current day's spend and silently
+        // reset the daily budget (CORE-5).
         const DAY_NS: u64 = 86_400_000_000_000;
-        let current_day = timestamp_ns / DAY_NS;
+        let incoming_day = timestamp_ns / DAY_NS;
+        let current_day = self
+            .ledger
+            .iter()
+            .map(|r| r.timestamp_ns / DAY_NS)
+            .max()
+            .map_or(incoming_day, |newest| newest.max(incoming_day));
         self.ledger
             .retain(|r| r.timestamp_ns / DAY_NS == current_day);
         self.ledger.push(SpendRecord {
@@ -260,6 +272,22 @@ mod tests {
                                                                    // total = $5 / $10 = 0.5
         let scalar = sensor.financial_budget_scalar(ts(1, 12));
         assert!((scalar - 0.5).abs() < 1e-5, "expected 0.5, got {scalar}");
+    }
+
+    #[test]
+    fn out_of_order_older_timestamp_does_not_wipe_todays_spend() {
+        let mut sensor = sensor_at_ten_dollars_per_million();
+        // Spend half the daily budget on day 5.
+        sensor.record_spend("anthropic", 500_000, "model", ts(5, 10)); // $5
+        assert!((sensor.financial_budget_scalar(ts(5, 12)) - 0.5).abs() < 1e-5);
+        // A late/out-of-order record from the PREVIOUS day must not prune
+        // day 5's ledger and reset the budget scalar back toward 1.0 (CORE-5).
+        sensor.record_spend("anthropic", 100_000, "model", ts(4, 23)); // day 4
+        let scalar = sensor.financial_budget_scalar(ts(5, 12));
+        assert!(
+            (scalar - 0.5).abs() < 1e-5,
+            "day-5 spend must survive an out-of-order day-4 record, got {scalar}"
+        );
     }
 
     #[test]

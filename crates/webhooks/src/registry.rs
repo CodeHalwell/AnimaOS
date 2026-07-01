@@ -12,6 +12,8 @@ pub enum RegistryError {
     AlreadyExists(String),
     /// No endpoint with this ID was found.
     NotFound(String),
+    /// The endpoint URL failed validation (bad scheme or an SSRF-unsafe host).
+    InvalidUrl(String),
     /// Disk I/O failed.
     Io(String),
 }
@@ -21,9 +23,85 @@ impl std::fmt::Display for RegistryError {
         match self {
             RegistryError::AlreadyExists(id) => write!(f, "endpoint '{id}' already exists"),
             RegistryError::NotFound(id) => write!(f, "endpoint '{id}' not found"),
+            RegistryError::InvalidUrl(msg) => write!(f, "invalid webhook URL: {msg}"),
             RegistryError::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
+}
+
+/// Validates a webhook target URL before it is registered.
+///
+/// The registry is the natural security boundary for outbound delivery: it
+/// rejects non-`http(s)` schemes and hosts that resolve to loopback, private
+/// (RFC1918), link-local, or the cloud metadata endpoint, so a webhook cannot
+/// be used as an SSRF primitive once a real sender is wired (OPS-1). The
+/// resolved IP should be re-checked at connect time by the sender to close the
+/// DNS-rebinding TOCTOU gap.
+pub fn validate_webhook_url(url: &str) -> Result<(), RegistryError> {
+    let invalid = |m: &str| RegistryError::InvalidUrl(m.to_string());
+    let scheme_end = url.find("://").ok_or_else(|| invalid("missing scheme"))?;
+    match &url[..scheme_end] {
+        "https" | "http" => {}
+        other => return Err(invalid(&format!("unsupported scheme '{other}'"))),
+    }
+    let host = webhook_host(url);
+    if host.is_empty() {
+        return Err(invalid("URL has no host"));
+    }
+    if host_is_ssrf_unsafe(&host) {
+        return Err(invalid(&format!(
+            "host '{host}' is loopback/private/link-local/metadata"
+        )));
+    }
+    Ok(())
+}
+
+/// Extracts the lowercase host from a URL (scheme, userinfo, port, and path
+/// stripped). IPv6 literals keep their inner address.
+fn webhook_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Returns `true` for hosts a webhook must never target.
+fn host_is_ssrf_unsafe(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if host == "169.254.169.254" || host == "metadata.google.internal" {
+        return true;
+    }
+    if host.contains(':') {
+        // IPv6 literal.
+        return host == "::1"
+            || host.starts_with("fc")
+            || host.starts_with("fd")
+            || host.starts_with("fe80");
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == 4 {
+        if let (Ok(a), Ok(b)) = (octets[0].parse::<u8>(), octets[1].parse::<u8>()) {
+            return a == 127
+                || a == 10
+                || (a == 169 && b == 254)
+                || (a == 192 && b == 168)
+                || (a == 172 && (16..=31).contains(&b));
+        }
+    }
+    false
 }
 
 /// Persisted store contents.
@@ -83,6 +161,7 @@ impl WebhookRegistry {
     /// Register a new endpoint.  Returns `AlreadyExists` if an endpoint with
     /// the same ID is already present.
     pub fn register(&mut self, endpoint: WebhookEndpoint) -> Result<(), RegistryError> {
+        validate_webhook_url(&endpoint.url)?;
         if self.store.endpoints.contains_key(&endpoint.id) {
             return Err(RegistryError::AlreadyExists(endpoint.id.clone()));
         }
@@ -199,6 +278,36 @@ mod tests {
         r.register(ep("wh-dup")).unwrap();
         let err = r.register(ep("wh-dup")).unwrap_err();
         assert_eq!(err, RegistryError::AlreadyExists("wh-dup".to_string()));
+    }
+
+    #[test]
+    fn register_rejects_ssrf_and_bad_scheme_urls() {
+        let mut r = WebhookRegistry::in_memory();
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1/hook",
+            "https://localhost/hook",
+            "http://10.1.2.3/x",
+            "https://192.168.0.5/x",
+            "https://[::1]/x",
+            "ftp://example.com/x",
+            "not-a-url",
+        ] {
+            let ep = WebhookEndpoint::new("x", bad, None, EventFilter::All);
+            assert!(
+                matches!(r.register(ep), Err(RegistryError::InvalidUrl(_))),
+                "must reject {bad}"
+            );
+        }
+        // A public https URL still registers.
+        assert!(r
+            .register(WebhookEndpoint::new(
+                "ok",
+                "https://hooks.example.com/a",
+                None,
+                EventFilter::All
+            ))
+            .is_ok());
     }
 
     #[test]

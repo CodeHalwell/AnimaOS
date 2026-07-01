@@ -7,9 +7,50 @@
 and (where relevant) its callers/tests. The highest-impact findings were independently
 re-verified; those are marked ✔ below.
 
-This is a **triage document**, not a set of applied changes. Findings are grouped by
-systemic theme (the useful lens for prioritization), with per-area finding tables and
-test-coverage summaries following. File:line references are current as of the date above.
+Findings are grouped by systemic theme (the useful lens for prioritization), with
+per-area finding tables and test-coverage summaries following. File:line references are
+current as of the date above.
+
+> **A high-confidence subset has since been fixed on this branch** (see next section).
+> The remaining findings stay as a triage backlog.
+
+---
+
+## Fixes applied on this branch
+
+The following were implemented and verified (`cargo test --workspace --all-targets` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean; microVM UEFI target and the
+`xtask` workspace both build; new regression tests added for each behavioural change):
+
+| Finding | Fix |
+|---|---|
+| **AUT-1 / AUT-3** | Constitution now matches keywords on **whole-word boundaries** (`skill` no longer trips `kill`); operator bounds require all meaningful words. |
+| **MEM-1** | Motor-gate filesystem screen **lexically resolves `.`/`..`** and matches critical prefixes on component boundaries (`/var/../etc/passwd` and `./etc/passwd` are caught; `/etcd` is not). |
+| **MEM-2** | Injection detector **normalizes** text (lowercase, strip zero-width, collapse whitespace) before matching — defeats space/tab/newline/`U+200B` evasions. |
+| **MEM-5** | Reward-hack detector uses leading word-boundary matching — `"incomplete."` / `"unfinished."` no longer read as completion claims. |
+| **MEM-6** | Motor-gate network screen **parses the host**, blocks loopback/RFC1918/link-local/metadata by default, and matches the blocklist by host+subdomain (no more `10.0.0.1`⊃`10.0.0.10`). |
+| **MEM-4** | WASM sandbox **caps table growth** (`table_growing` enforces a limit) — closes the unbounded-host-allocation gap. |
+| **MEM-12** | `SandboxedMathEvaluator` emits `null` for non-finite results instead of invalid JSON (`{"result":inf}`). |
+| **VITA-1** | Interoceptive snapshot is **rate-limited to ~1 Hz** (was ~1 kHz) — stops the audit-ring/disk flood that erased forensics. |
+| **VITA-2 / CORE-6 / OPS-15 / KERN-14** | Poison-tolerant locking (`lock_recover` shim, cfg-split for std/`no_std`) on the somatic loop, `senses`, `tool-cache`, and `console` — one panic no longer permanently bricks PID 1. |
+| **CORE-3** | Scheduler dispatch history is a `VecDeque` (O(1) `pop_front` eviction instead of O(n) front-drain). |
+| **CORE-5** | Financial-budget pruning keys off the newest observed day, so an out-of-order older timestamp can't wipe today's spend and reset the budget. |
+| **AUT-4** | Skill `linked_files` extraction rejects `..`, absolute, and Windows-drive paths (closes the latent arbitrary-file-read). |
+| **AUT-7** | Motivation priority/eviction comparisons use `f32::total_cmp` (no `partial_cmp().unwrap()` panic on a stray NaN). |
+| **AUT-8** | `PriorityLattice` clamps the suppression denominator (no divide-by-zero → inf/NaN in drive weights). |
+| **OPS-1** | Webhook registry **validates URLs on register** — rejects non-`http(s)` schemes and loopback/private/link-local/metadata hosts (SSRF gate). |
+| **INF-2** | `concurrency: cancel-in-progress` added to `ci`/`bench`/`docker` workflows. |
+| **INF-7** | `cortex/transformers_worker.py` enforces the 64 MiB frame cap that `ipc.py` already had. |
+| **INF-8** | `deny.toml` now sets `yanked = "deny"`. |
+| **INF-16** | `trainer/sleep_phase.py` guards `__doc__` so it doesn't crash under `python -OO`. |
+
+**Deliberately deferred** (need a product decision or a larger change): the fixture-only
+frontier backends + retry/streaming rework (IO-1/2/9), `metrics`↔`metrics-endpoint`
+consolidation (OPS-9), the `JsonStore<T>` unification (OPS persistence contract), hosted
+`main.rs`/`LifecycleManager` factoring, hosted supervision + graceful shutdown (KERN-2/3),
+wiring the E14 cognitive suite (VITA-3), enforcing constitution `hmac_verified` (AUT-2),
+and the audit/kv-trace `VecDeque` swaps (VITA-5/MEM-15 — VITA-5's impact is already largely
+removed by the VITA-1 rate-limit). These remain in the tables below.
 
 ---
 

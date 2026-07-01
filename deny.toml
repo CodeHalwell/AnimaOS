@@ -15,7 +15,8 @@
 # The advisory database is fetched fresh on each CI run from the RustSec repo.
 ignore = []
 # yanked crate versions are flagged as warnings by default; promote to error
-# if any yanked crate appears in Cargo.lock.
+# if any yanked crate appears in Cargo.lock (INF-8).
+yanked = "deny"
 
 # ---------------------------------------------------------------------------
 # Licenses — every dependency must carry a permissive licence compatible with

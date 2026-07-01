@@ -111,9 +111,17 @@ struct CallState {
     /// Set to `true` the first time `memory_growing` rejects a request.
     /// Read after the call to distinguish `MemoryExhausted` from other traps.
     memory_exceeded: bool,
+    /// Set to `true` the first time `table_growing` rejects a request.
+    table_exceeded: bool,
     /// Bytes captured via the stdout host function (when capability granted).
     output: Vec<u8>,
 }
+
+/// Hard cap on table elements any sandboxed module may allocate. Fuel bounds
+/// pure compute and `memory_growing` bounds the heap, but without this an
+/// adversarial `(table 4000000000 funcref)` would consume unbounded host
+/// memory and escape the sandbox's resource caps (MEM-4).
+const MAX_TABLE_ELEMENTS: usize = 100_000;
 
 impl wasmtime::ResourceLimiter for CallState {
     fn memory_growing(
@@ -133,10 +141,15 @@ impl wasmtime::ResourceLimiter for CallState {
     fn table_growing(
         &mut self,
         _current: usize,
-        _desired: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(true)
+        if desired > MAX_TABLE_ELEMENTS {
+            self.table_exceeded = true;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
     }
 }
 
@@ -216,7 +229,7 @@ impl WasmSandbox {
         linker
             .instantiate(&mut store, &module)
             .map_err(|e| {
-                if store.data().memory_exceeded {
+                if store.data().memory_exceeded || store.data().table_exceeded {
                     SandboxError::MemoryExhausted
                 } else {
                     SandboxError::Trap(e.to_string())
@@ -231,7 +244,7 @@ impl WasmSandbox {
                     .map_err(|_| SandboxError::FunctionNotFound(entry_fn.to_string()))?;
 
                 let call_result = func.call(&mut store, ());
-                let mem_exceeded = store.data().memory_exceeded;
+                let mem_exceeded = store.data().memory_exceeded || store.data().table_exceeded;
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
 
                 call_result.map_err(|e| {
@@ -280,7 +293,7 @@ impl WasmSandbox {
             .map_err(|_| SandboxError::FunctionNotFound(fn_name.to_string()))?;
 
         let call_result = func.call(&mut store, (a, b));
-        let mem_exceeded = store.data().memory_exceeded;
+        let mem_exceeded = store.data().memory_exceeded || store.data().table_exceeded;
         let fuel_remaining = store.get_fuel().unwrap_or(0);
         let fuel_consumed = config.fuel_limit.saturating_sub(fuel_remaining);
         let output = store.into_data().output;
@@ -308,6 +321,7 @@ impl WasmSandbox {
         let state = CallState {
             memory_limit: config.memory_limit_bytes,
             memory_exceeded: false,
+            table_exceeded: false,
             output: Vec::new(),
         };
         let mut store = Store::new(&self.engine, state);
@@ -427,7 +441,14 @@ impl ToolDriver for SandboxedMathEvaluator {
             .call_f64_binary(MATH_EVALUATOR_WAT.as_bytes(), op, a, b, &config)
             .map_err(|e| ToolInvocationError::ExecutionFailed(e.to_string()))?;
 
-        Ok(format!("{{\"result\":{result}}}").into_bytes())
+        // JSON has no inf/NaN literal, so a non-finite result (e.g. division by
+        // zero) must serialise as `null` rather than emit invalid JSON (MEM-12).
+        let result_json = if result.is_finite() {
+            result.to_string()
+        } else {
+            "null".to_string()
+        };
+        Ok(format!("{{\"result\":{result_json}}}").into_bytes())
     }
 }
 

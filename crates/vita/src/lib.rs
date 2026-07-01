@@ -117,7 +117,7 @@ use alloc::{
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-use senses::sync::Mutex;
+use senses::sync::{lock_recover, Mutex};
 #[cfg(feature = "std")]
 use std::time::Duration;
 
@@ -560,7 +560,7 @@ impl LifecycleManager {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         let agent_id = self.agent_id.clone();
-        let mut guard = registry.lock().expect("skill_registry poisoned");
+        let mut guard = lock_recover(&registry);
         sleep::run_self_improvement_reflection(
             &agent_id,
             &self.recent_episode_summaries,
@@ -622,13 +622,13 @@ impl LifecycleManager {
     /// Clones share state with the live token, so tripping the clone cancels
     /// the running backend stream.
     pub fn current_cancel_handle(&self) -> CancellationToken {
-        self.task_cancel.lock().expect("poisoned").clone()
+        lock_recover(&self.task_cancel).clone()
     }
 
     /// Trips the cancellation token for the dispatch currently in flight.
     /// Safe to call from any thread that holds a reference to the manager.
     pub fn cancel_current_task(&self) {
-        self.task_cancel.lock().expect("poisoned").cancel();
+        lock_recover(&self.task_cancel).cancel();
     }
 
     /// Installs a fresh [`CancellationToken`] and returns a clone bound to it.
@@ -637,7 +637,7 @@ impl LifecycleManager {
     fn install_fresh_cancel(&self) -> CancellationToken {
         let fresh = CancellationToken::new();
         let handle = fresh.clone();
-        *self.task_cancel.lock().expect("poisoned") = fresh;
+        *lock_recover(&self.task_cancel) = fresh;
         handle
     }
 
@@ -1051,6 +1051,13 @@ pub async fn somatic_execution_loop(
     lifecycle: &mut LifecycleManager,
     monitor: &HomeostaticMonitor,
 ) -> Result<(), LifecycleError> {
+    // Interoceptive snapshots are published at ~1 Hz (E5.7 S5.7.1). The idle
+    // loop iterates at ~1 kHz, so this tracks the last publication and gates the
+    // push, keeping the bounded audit ring (and any audit sink on disk) from
+    // being flooded — which would otherwise evict forensic entries within
+    // seconds (VITA-1).
+    #[cfg(feature = "std")]
+    let mut last_snapshot_ns: u64 = 0;
     loop {
         // ── 1. Starvation-prevention boost ───────────────────────────────────
         lifecycle.scheduler.check_and_boost(&mut lifecycle.agenda);
@@ -1113,7 +1120,7 @@ pub async fn somatic_execution_loop(
                 let decision = if let Some(mg) = motivated {
                     #[cfg(feature = "std")]
                     {
-                        let guard = mg.lock().expect("motivated_gate poisoned");
+                        let guard = lock_recover(&mg);
                         let (decision, augmented, affect) =
                             guard.decide_motivated(&event_id, &event, &signals, &override_hint);
                         let snapshot = guard.drive_snapshot();
@@ -1174,41 +1181,45 @@ pub async fn somatic_execution_loop(
         let _stress_index =
             monitor.compute_systemic_stress_index(active_tokens, lifecycle.config.max_context);
 
-        // Publish interoceptive snapshot to the audit log on every iteration
-        // when a sensor bundle is configured (EX.2 wiring, E5.7 S5.7.1).
+        // Publish an interoceptive snapshot to the audit log at ~1 Hz when a
+        // sensor bundle is configured (E5.7 S5.7.1). Rate-limiting is essential:
+        // the idle loop runs at ~1 kHz, and an unthrottled push floods the
+        // bounded audit ring and any disk sink (VITA-1).
         #[cfg(feature = "std")]
         if let Some(ref bundle) = lifecycle.sensor_bundle {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
-            let signals = bundle.tick(
-                monitor,
-                active_tokens,
-                lifecycle.config.max_context,
-                now_ns,
-                &NullPublisher,
-            );
-            lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
-                agent_id: lifecycle.agent_id.clone(),
-                tick_ns: now_ns,
-                thermal_load: signals.thermal_load,
-                compute_pressure: signals.compute_pressure,
-                memory_pressure: signals.memory_pressure,
-                power_budget: signals.power_budget,
-                financial_budget: signals.financial_budget,
-                attention_demand: signals.attention_demand,
-                aggregate_stress: signals.aggregate_stress(),
-            });
+            // ~1 Hz gate (first iteration always fires since last_snapshot_ns=0).
+            if now_ns.saturating_sub(last_snapshot_ns) >= 1_000_000_000 {
+                last_snapshot_ns = now_ns;
+                let signals = bundle.tick(
+                    monitor,
+                    active_tokens,
+                    lifecycle.config.max_context,
+                    now_ns,
+                    &NullPublisher,
+                );
+                lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
+                    agent_id: lifecycle.agent_id.clone(),
+                    tick_ns: now_ns,
+                    thermal_load: signals.thermal_load,
+                    compute_pressure: signals.compute_pressure,
+                    memory_pressure: signals.memory_pressure,
+                    power_budget: signals.power_budget,
+                    financial_budget: signals.financial_budget,
+                    attention_demand: signals.attention_demand,
+                    aggregate_stress: signals.aggregate_stress(),
+                });
 
-            // E12: refresh the motivated gate's drive registry from this tick's
-            // real interoceptive reading so drive urgencies (and thus the
-            // augmented value score) track the live homeostatic state at ~1 Hz.
-            if let Some(ref mg) = lifecycle.motivated_gate {
-                let h = HomeostaticSignals::from_interoceptive(&signals);
-                mg.lock()
-                    .expect("motivated_gate poisoned")
-                    .update_signals(&h);
+                // E12: refresh the motivated gate's drive registry from this
+                // tick's real interoceptive reading so drive urgencies (and thus
+                // the augmented value score) track the live homeostatic state.
+                if let Some(ref mg) = lifecycle.motivated_gate {
+                    let h = HomeostaticSignals::from_interoceptive(&signals);
+                    lock_recover(mg).update_signals(&h);
+                }
             }
         }
 

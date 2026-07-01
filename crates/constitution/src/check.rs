@@ -130,10 +130,13 @@ impl ConstitutionCheck {
     /// if none match.
     pub fn screen(&self, proposal: &ConstitutionProposal) -> CheckOutcome {
         let combined = format!("{} {}", proposal.intent, proposal.action_text).to_lowercase();
+        // Tokenise once into whole words so matching is anchored on word
+        // boundaries (AUT-1): `"skill"` must not trigger the `"kill"` keyword.
+        let text_words = word_tokens(&combined);
 
         // Screen core prohibitions first.
         for prohibition in &self.charter.core.prohibitions {
-            if let Some(kw) = first_keyword_match(&combined, prohibition) {
+            if let Some(kw) = first_keyword_match(&text_words, prohibition) {
                 return CheckOutcome::Veto(ClauseMatch {
                     prohibition_id: prohibition.id.clone(),
                     clause_text: prohibition.text.clone(),
@@ -146,8 +149,8 @@ impl ConstitutionCheck {
         // Screen operator additional bounds (plain-text match).
         for (i, bound) in self.charter.operator.additional_bounds.iter().enumerate() {
             let bound_lower = bound.to_lowercase();
-            // Check if any word from the bound appears in the combined text.
-            if plain_text_match(&combined, &bound_lower) {
+            // Veto only when every meaningful word from the bound is present.
+            if plain_text_match(&text_words, &bound_lower) {
                 return CheckOutcome::Veto(ClauseMatch {
                     prohibition_id: format!("OP{}", i + 1),
                     clause_text: bound.clone(),
@@ -168,25 +171,78 @@ impl ConstitutionCheck {
 
 // ── Keyword matching helpers ──────────────────────────────────────────────────
 
-/// Returns the first keyword from `prohibition.keywords` that appears in `text`.
-fn first_keyword_match<'k>(text: &str, prohibition: &'k Prohibition) -> Option<&'k str> {
+/// Splits `s` into alphanumeric word tokens, discarding punctuation and
+/// whitespace so matching is whole-word rather than raw-substring.
+/// `"modify constitution.toml"` → `["modify", "constitution", "toml"]`.
+fn word_tokens(s: &str) -> Vec<&str> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Word-boundary aware phrase match.
+///
+/// Returns `true` when the whole-word sequence of `keyword` appears as a
+/// contiguous run of words in `text_words`. Matching is anchored on word
+/// boundaries — so `"kill"` matches `"kill the process"` but **not** `"skill"`
+/// (AUT-1) — while the final keyword word is matched by prefix so simple
+/// inflections still trigger (`"harm human"` → `"harm humans"`). Both sides are
+/// assumed already lowercased.
+fn phrase_present(text_words: &[&str], keyword: &str) -> bool {
+    let kw = word_tokens(keyword);
+    if kw.is_empty() || kw.len() > text_words.len() {
+        return false;
+    }
+    let last = kw.len() - 1;
+    (0..=text_words.len() - kw.len()).any(|start| {
+        kw.iter().enumerate().all(|(i, &w)| {
+            let tw = text_words[start + i];
+            if i == last {
+                tw.starts_with(w)
+            } else {
+                tw == w
+            }
+        })
+    })
+}
+
+/// Returns the first keyword from `prohibition.keywords` that appears in the
+/// tokenised text as a whole-word phrase.
+fn first_keyword_match<'k>(text_words: &[&str], prohibition: &'k Prohibition) -> Option<&'k str> {
     prohibition
         .keywords
         .iter()
-        .find(|kw| text.contains(kw.to_lowercase().as_str()))
+        .find(|kw| phrase_present(text_words, &kw.to_lowercase()))
         .map(|kw| kw.as_str())
 }
 
-/// Returns `true` when any meaningful word (≥ 4 chars) from `bound` appears in `text`.
-fn plain_text_match(text: &str, bound: &str) -> bool {
-    bound
-        .split_whitespace()
+/// Returns `true` when **every** meaningful word (≥ 4 chars) of `bound` appears
+/// as a whole word in `text_words`. Requiring all of them (rather than any one)
+/// keeps a bound like "do not delete the production database" from vetoing an
+/// unrelated proposal that merely mentions "production" (AUT-3).
+fn plain_text_match(text_words: &[&str], bound: &str) -> bool {
+    let meaningful: Vec<&str> = word_tokens(bound)
+        .into_iter()
         .filter(|w| w.len() >= 4)
-        .any(|w| text.contains(w))
+        .collect();
+    if meaningful.is_empty() {
+        return false;
+    }
+    meaningful
+        .iter()
+        .all(|w| text_words.iter().any(|tw| tw == w))
 }
 
+/// The first meaningful (≥ 4 char) word of `s`, used to label an operator-bound
+/// match; falls back to the first word so the label is never empty.
 fn extract_first_word(s: &str) -> String {
-    s.split_whitespace().next().unwrap_or("").to_string()
+    let tokens = word_tokens(s);
+    tokens
+        .iter()
+        .find(|w| w.len() >= 4)
+        .or(tokens.first())
+        .map(|w| w.to_string())
+        .unwrap_or_default()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -412,6 +468,62 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // ── Word-boundary regression (AUT-1) ─────────────────────────────────────
+    // The "kill" P1 keyword must not substring-match "skill"/"skilled", or the
+    // agent's own self-extension flow is permanently vetoed.
+    #[test]
+    fn skill_text_does_not_trigger_kill_keyword() {
+        let check = check();
+        let benign = [
+            ("propose a new skill", "author a summarisation skill"),
+            ("use a skill", "invoke the skilled research skill"),
+            ("improve skills", "practise skillful writing"),
+        ];
+        for (intent, action) in &benign {
+            let p = proposal(intent, action);
+            assert!(
+                check.screen(&p).is_allowed(),
+                "'{intent}' / '{action}' must not match the 'kill' keyword"
+            );
+        }
+    }
+
+    #[test]
+    fn kill_keyword_still_vetoes_as_whole_word() {
+        let check = check();
+        for (intent, action) in &[
+            ("end it", "kill the operator"),
+            ("terminate", "kill the human in the loop"),
+        ] {
+            let outcome = check.screen(&proposal(intent, action));
+            assert!(outcome.is_vetoed(), "'{action}' must still veto P1");
+            if let CheckOutcome::Veto(m) = &outcome {
+                assert_eq!(m.prohibition_id, "P1");
+            }
+        }
+    }
+
+    #[test]
+    fn operator_bound_requires_all_meaningful_words() {
+        let mut charter = Charter::embedded().unwrap();
+        charter.operator.additional_bounds = vec!["delete the production database".to_string()];
+        let check = ConstitutionCheck::new(charter);
+
+        // Only mentions one bound word → allowed (previously over-blocked).
+        assert!(check
+            .screen(&proposal("inspect logs", "read the production logs"))
+            .is_allowed());
+        // Mentions every meaningful word → vetoed.
+        let outcome = check.screen(&proposal(
+            "clean up",
+            "delete the stale production database rows",
+        ));
+        assert!(outcome.is_vetoed());
+        if let CheckOutcome::Veto(m) = &outcome {
+            assert_eq!(m.layer, ClauseLayer::Operator);
         }
     }
 }

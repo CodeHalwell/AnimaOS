@@ -1,5 +1,12 @@
 name: CI
 
+# Cancel superseded runs on the same ref so a rapid push sequence does not run
+# the full 13-job pipeline (incl. the microVM build + QEMU boot) to completion
+# for every intermediate commit (INF-2).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main]

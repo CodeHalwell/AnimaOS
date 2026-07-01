@@ -22,6 +22,30 @@ pub use std::sync::{Mutex, MutexGuard};
 #[cfg(not(feature = "std"))]
 pub use no_std_impl::{Mutex, MutexGuard};
 
+/// Acquire `mutex`, recovering the guard even if a previous holder panicked
+/// while holding it.
+///
+/// On `std` a poisoned [`std::sync::Mutex`] is recovered via
+/// [`std::sync::PoisonError::into_inner`], so a single recoverable panic cannot
+/// permanently brick every subsequent lock on the always-on somatic path
+/// (VITA-2 / CORE-6). The critical sections guarded this way only push/pop or
+/// swap owned state, so observing a value left by a panicking section is safe.
+/// On the spin path locking never fails, so this is an infallible unwrap of an
+/// uninhabited error.
+#[cfg(feature = "std")]
+pub fn lock_recover<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// See the `std` variant above. On the bare-metal spin path the lock cannot be
+/// poisoned, so the `Err` arm is uninhabited.
+#[cfg(not(feature = "std"))]
+pub fn lock_recover<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+    }
+}
+
 #[cfg(not(feature = "std"))]
 mod no_std_impl {
     use core::fmt;

@@ -167,7 +167,7 @@ fn extract_local_links(text: &str) -> Vec<String> {
         let after_open = &rest[open + 2..];
         if let Some(close) = after_open.find(')') {
             let target = &after_open[..close];
-            if !target.is_empty() && !target.contains("://") && !target.starts_with('#') {
+            if is_safe_local_link(target) {
                 links.push(target.to_string());
             }
             rest = &after_open[close + 1..];
@@ -178,11 +178,48 @@ fn extract_local_links(text: &str) -> Vec<String> {
     links
 }
 
+/// Returns `true` for a Markdown link target that is a safe in-directory
+/// relative path: not a URL or anchor, not absolute (Unix `/` or Windows
+/// `\`/drive-letter), and with no `..` parent-traversal segment.
+///
+/// Agent-authored skills auto-promote by default and their `linked_files` are
+/// read from disk on stage-3 disclosure, so rejecting traversal here prevents a
+/// confused/adversarial skill from becoming an arbitrary-file-read primitive
+/// (AUT-4).
+fn is_safe_local_link(target: &str) -> bool {
+    if target.is_empty() || target.contains("://") || target.starts_with('#') {
+        return false;
+    }
+    if target.starts_with('/') || target.starts_with('\\') {
+        return false;
+    }
+    // Windows drive prefix, e.g. `C:\secrets`.
+    if target.as_bytes().get(1) == Some(&b':') {
+        return false;
+    }
+    !target.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traversal_and_absolute_links_are_rejected() {
+        let md = "[a](../../etc/passwd) [b](/etc/shadow) [c](notes/setup.md) \
+                  [d](sub/../up.md) [e](https://x.com/p) [f](#anchor)";
+        // Only the in-directory relative link survives (AUT-4).
+        assert_eq!(extract_local_links(md), vec!["notes/setup.md".to_string()]);
+    }
+
+    #[test]
+    fn windows_absolute_link_is_rejected() {
+        assert!(!is_safe_local_link("C:\\secrets\\key.txt"));
+        assert!(!is_safe_local_link("\\\\server\\share"));
+        assert!(is_safe_local_link("docs/guide.md"));
+    }
 
     const SAMPLE: &str = "\
 ---

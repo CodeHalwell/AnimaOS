@@ -144,13 +144,10 @@ impl CostBenefitAnalysis {
             .max_by(|a, b| {
                 let va = self.net_value(a.tier);
                 let vb = self.net_value(b.tier);
-                match va.partial_cmp(&vb).unwrap() {
+                match va.total_cmp(&vb) {
                     core::cmp::Ordering::Equal => {
                         // Tiebreak: prefer the cheaper tier.
-                        b.tier
-                            .relative_cost()
-                            .partial_cmp(&a.tier.relative_cost())
-                            .unwrap()
+                        b.tier.relative_cost().total_cmp(&a.tier.relative_cost())
                     }
                     other => other,
                 }
