@@ -18,14 +18,27 @@ use crate::types::{ActionKind, CortexProposal, VetoReason, VetoResult};
 #[derive(Debug, Clone)]
 pub struct ConstitutionGuard {
     check: ConstitutionCheck,
+    /// Whether the bound charter carried a present-and-verified HMAC seal.
+    /// Retained so the host can refuse to run (or loudly warn) when enforcing an
+    /// unsealed charter that could have been tampered with (AUT-2).
+    sealed: bool,
 }
 
 impl ConstitutionGuard {
     /// Creates a guard bound to the provided charter.
     pub fn new(charter: constitution::Charter) -> Self {
         Self {
+            sealed: charter.is_sealed(),
             check: ConstitutionCheck::new(charter),
         }
+    }
+
+    /// Whether the guard is enforcing a sealed (HMAC-verified) charter.
+    ///
+    /// A production supervisor should treat `false` as a fail-closed condition
+    /// (or at minimum audit it): an unsealed charter offers no tamper-evidence.
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
     }
 
     /// Screens a [`CortexProposal`] against the charter.
@@ -158,6 +171,13 @@ mod tests {
             result,
             VetoResult::Veto(VetoReason::CharterViolation { .. })
         ));
+    }
+
+    #[test]
+    fn guard_reports_charter_seal_status() {
+        // The embedded charter is unsealed (trust-on-first-use); the guard must
+        // surface that so a supervisor can fail closed (AUT-2).
+        assert!(!ConstitutionGuard::new(Charter::embedded().unwrap()).is_sealed());
     }
 
     #[test]

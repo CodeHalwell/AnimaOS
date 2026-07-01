@@ -1833,18 +1833,21 @@ pub fn load_entries_from_env(agent_id: &str) -> Vec<AuditEntry> {
 /// serialises the entry as a newline-delimited JSON record.
 /// Default cap on the number of entries retained in memory.
 ///
-/// The in-memory `Vec` is a bounded ring: once it reaches this many entries,
-/// each `push` evicts the oldest entry. When a durable file sink (and/or HMAC
-/// sidecar) is configured the evicted record has already been persisted, so
-/// dropping it from memory is safe and keeps long-lived agents from growing
-/// the somatic-loop heap without bound. The HMAC chaining state lives in
-/// [`IntegrityChain`] (not in the entry vec), so eviction never breaks the chain.
+/// The in-memory `Vec` is a bounded ring with a soft cap: it may overshoot by
+/// up to `max/8` before the overflow is drained in one batch, so eviction costs
+/// O(1) amortized per push instead of an O(n) front-shift every push past the
+/// cap (VITA-5). When a durable file sink (and/or HMAC sidecar) is configured
+/// the evicted record has already been persisted, so dropping it from memory is
+/// safe and keeps long-lived agents from growing the somatic-loop heap without
+/// bound. The HMAC chaining state lives in [`IntegrityChain`] (not in the entry
+/// vec), so eviction never breaks the chain.
 pub const DEFAULT_MAX_IN_MEMORY_ENTRIES: usize = 10_000;
 
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
-    /// Maximum number of entries retained in memory; older entries are evicted
-    /// once this cap is reached. Defaults to [`DEFAULT_MAX_IN_MEMORY_ENTRIES`].
+    /// Target number of entries retained in memory (a soft cap — the ring may
+    /// transiently hold up to `max_entries + max_entries/8` before a batched
+    /// drain). Defaults to [`DEFAULT_MAX_IN_MEMORY_ENTRIES`].
     max_entries: usize,
     /// Shared file sink — `Arc<Mutex<…>>` so `Clone` gives a shared handle
     /// (all clones of a manager write to the same audit file).
@@ -2089,9 +2092,17 @@ impl AuditLog {
         // persisted above, so dropping old in-memory entries loses nothing the
         // operator cannot recover from disk. The HMAC chain state lives in
         // `IntegrityChain`, so eviction here never affects chain verification.
-        if self.max_entries > 0 && self.entries.len() > self.max_entries {
-            let overflow = self.entries.len() - self.max_entries;
-            self.entries.drain(0..overflow);
+        // Amortized O(1) eviction: let the in-memory ring overshoot the cap by a
+        // slack margin, then drain the whole overflow in a single memmove rather
+        // than shifting every element on every push past the cap (VITA-5). This
+        // keeps the public slice `entries()` API unchanged while removing the
+        // per-push O(n) cost the 1 Hz snapshot (and any other producer) would pay.
+        if self.max_entries > 0 {
+            let slack = (self.max_entries / 8).max(1);
+            if self.entries.len() >= self.max_entries + slack {
+                let overflow = self.entries.len() - self.max_entries;
+                self.entries.drain(0..overflow);
+            }
         }
     }
 

@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -190,7 +191,9 @@ impl InvocationTrace {
 /// Dropped when the invocation ends if `config.enabled = false`.
 pub struct TraceCapture {
     config: TraceConfig,
-    records: Vec<BlockTraceRecord>,
+    // `VecDeque` ring so dropping the oldest record is `pop_front()` (O(1))
+    // rather than `Vec::remove(0)` (O(n) per capture once full) — MEM-15.
+    records: VecDeque<BlockTraceRecord>,
     invocation_id: String,
     route_id: String,
     started_at_secs: u64,
@@ -212,7 +215,7 @@ impl TraceCapture {
             .unwrap_or(0);
         Self {
             config,
-            records: Vec::new(),
+            records: VecDeque::new(),
             invocation_id: invocation_id.into(),
             route_id: route_id.into(),
             started_at_secs,
@@ -232,9 +235,9 @@ impl TraceCapture {
         }
         if self.records.len() >= self.config.buffer_capacity.max(1) {
             // Buffer full — drop oldest record to make room.
-            self.records.remove(0);
+            self.records.pop_front();
         }
-        self.records.push(BlockTraceRecord {
+        self.records.push_back(BlockTraceRecord {
             features,
             gate_score,
             retained,
@@ -254,7 +257,7 @@ impl TraceCapture {
             invocation_id: self.invocation_id,
             started_at_secs: self.started_at_secs,
             route_id: self.route_id,
-            blocks: self.records,
+            blocks: self.records.into(),
             provenance: self.config.provenance,
             turns,
             completed,

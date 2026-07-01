@@ -123,6 +123,10 @@ pub enum CharterError {
     ParseError(String),
     /// HMAC verification failed (charter may have been tampered with).
     HmacMismatch,
+    /// The charter carries no HMAC seal (trust-on-first-use) but a strict load
+    /// was requested (production must run a sealed charter). See
+    /// [`Charter::from_path_strict`] (AUT-2).
+    Unsealed,
     /// JSON serialisation of content for HMAC computation failed.
     SerialisationError(String),
 }
@@ -132,6 +136,10 @@ impl std::fmt::Display for CharterError {
         match self {
             Self::ParseError(e) => write!(f, "charter parse error: {e}"),
             Self::HmacMismatch => write!(f, "charter HMAC mismatch — possible tampering"),
+            Self::Unsealed => write!(
+                f,
+                "charter is unsealed (no HMAC) — run `anima constitution seal` before production use"
+            ),
             Self::SerialisationError(e) => write!(f, "charter serialisation error: {e}"),
         }
     }
@@ -174,10 +182,41 @@ impl Charter {
     }
 
     /// Load a charter from a file path.
+    ///
+    /// Loads permissively (trust-on-first-use for an unsealed charter) but emits
+    /// a loud warning to stderr when the loaded charter carries no HMAC seal, so
+    /// an unsealed production charter cannot pass unnoticed (AUT-2). Use
+    /// [`Charter::from_path_strict`] to fail closed instead.
     pub fn from_path(path: &std::path::Path) -> Result<Self, CharterError> {
         let toml =
             std::fs::read_to_string(path).map_err(|e| CharterError::ParseError(e.to_string()))?;
-        Self::from_toml_str(&toml, None)
+        let charter = Self::from_toml_str(&toml, None)?;
+        if !charter.hmac_verified {
+            eprintln!(
+                "anima-constitution: WARNING — charter at {} is UNSEALED (no HMAC); \
+                 anyone who can edit it can weaken prohibitions undetected. \
+                 Run `anima constitution seal` before production use.",
+                path.display()
+            );
+        }
+        Ok(charter)
+    }
+
+    /// Load a charter from a file path in **strict** mode: an unsealed
+    /// (trust-on-first-use) charter is rejected with [`CharterError::Unsealed`]
+    /// rather than accepted. Use this on production boot paths where the charter
+    /// must carry a verified HMAC seal (AUT-2).
+    pub fn from_path_strict(path: &std::path::Path) -> Result<Self, CharterError> {
+        let charter = Self::from_path(path)?;
+        if !charter.hmac_verified {
+            return Err(CharterError::Unsealed);
+        }
+        Ok(charter)
+    }
+
+    /// Whether this charter was loaded with a present and verified HMAC seal.
+    pub fn is_sealed(&self) -> bool {
+        self.hmac_verified
     }
 
     /// Compute the canonical HMAC for this charter's content.
@@ -242,11 +281,28 @@ fn verify_hmac(file: &CharterFile, explicit_key: Option<&[u8]>) -> Result<bool, 
     let payload = canonical_payload(&file.core, &file.operator)?;
     let expected = to_hex(&hmac_sha256(key, &[&payload]));
 
-    if expected == *stored {
+    // Constant-time comparison so a timing side-channel cannot be used to forge
+    // the seal byte-by-byte (AUT-2).
+    if ct_str_eq(&expected, stored) {
         Ok(true)
     } else {
         Err(CharterError::HmacMismatch)
     }
+}
+
+/// Constant-time string equality over the compared bytes. The length is
+/// revealed (the HMAC hex is always 64 chars), but the content comparison does
+/// not short-circuit on the first differing byte.
+fn ct_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// HMAC-SHA256 — same construction as vita/audit.rs (RFC 2104).
@@ -391,5 +447,49 @@ mod tests {
                 "drive ceiling must be in [0.0, 1.0]"
             );
         }
+    }
+
+    #[test]
+    fn is_sealed_reflects_hmac_state() {
+        assert!(
+            !Charter::embedded().unwrap().is_sealed(),
+            "embedded default is unsealed"
+        );
+        let c = Charter::embedded().unwrap();
+        let key = b"seal-key";
+        let hex = c.compute_hmac(key).unwrap();
+        let sealed_toml = format!(
+            "{}\n\n[meta]\ncharter_version = 1\nhmac_hex = \"{hex}\"",
+            &EMBEDDED_CHARTER[..EMBEDDED_CHARTER
+                .rfind("[meta]")
+                .unwrap_or(EMBEDDED_CHARTER.len())]
+                .trim()
+        );
+        assert!(Charter::from_toml_str(&sealed_toml, Some(key))
+            .unwrap()
+            .is_sealed());
+    }
+
+    #[test]
+    fn from_path_strict_rejects_unsealed_charter() {
+        // The embedded charter ships unsealed; a strict load must fail closed
+        // while the permissive load still succeeds (with a stderr warning).
+        let path = std::env::temp_dir().join(format!(
+            "anima-test-charter-strict-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, EMBEDDED_CHARTER).unwrap();
+        let strict = Charter::from_path_strict(&path);
+        let lax = Charter::from_path(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(strict, Err(CharterError::Unsealed)));
+        assert!(lax.is_ok());
+    }
+
+    #[test]
+    fn ct_str_eq_matches_std_equality() {
+        assert!(ct_str_eq("abc123", "abc123"));
+        assert!(!ct_str_eq("abc123", "abc124"));
+        assert!(!ct_str_eq("abc", "abcd"));
     }
 }
