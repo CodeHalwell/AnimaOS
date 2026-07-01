@@ -6772,6 +6772,17 @@ fn cmd_serve() {
         println!("  motivation: enabled (drive-augmented Striatal Gate)");
     }
 
+    // E14 (VITA-3): wire the cognitive suite into the running agent. The
+    // watchdog (stuck-loop / hallucination-spiral detection) and confidence
+    // tracker run on every completion; the prospective-memory store is ready to
+    // hold due intentions. Opt out with ANIMA_COGNITION=0 for a bare loop.
+    if std::env::var("ANIMA_COGNITION").as_deref() != Ok("0") {
+        manager.enable_watchdog(vita::watchdog::CognitiveWatchdog::with_defaults());
+        manager.enable_confidence(vita::metacognition::ConfidenceTracker::default());
+        manager.enable_intentions(vita::prospective::IntentionStore::in_memory());
+        println!("  cognition: watchdog + confidence + prospective memory enabled (E14)");
+    }
+
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
     let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
     let addr = console.start().unwrap_or_else(|e| {

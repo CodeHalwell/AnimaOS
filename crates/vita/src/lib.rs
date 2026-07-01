@@ -309,6 +309,21 @@ pub struct LifecycleManager {
     /// one registry — consistent with the other shared-state fields.
     #[cfg(feature = "std")]
     pub skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
+    /// E14 cognitive watchdog — detects stuck loops / hallucination spirals from
+    /// cortex output. Wired in [`somatic_execution_loop`]; enable via
+    /// [`enable_watchdog`](Self::enable_watchdog) (VITA-3).
+    #[cfg(feature = "std")]
+    watchdog: Option<watchdog::CognitiveWatchdog>,
+    /// E14 confidence tracker — per-completion self-assessment. Wired in
+    /// [`somatic_execution_loop`]; enable via
+    /// [`enable_confidence`](Self::enable_confidence).
+    #[cfg(feature = "std")]
+    confidence: Option<metacognition::ConfidenceTracker>,
+    /// E14 prospective-memory store — due intentions are injected into the agenda
+    /// each somatic iteration. Enable via
+    /// [`enable_intentions`](Self::enable_intentions).
+    #[cfg(feature = "std")]
+    intentions: Option<prospective::IntentionStore>,
     /// Reflection configuration applied during the Dreaming phase (E11 S11.5).
     ///
     /// Only consulted when [`skill_registry`](Self::skill_registry) is `Some`.
@@ -428,6 +443,12 @@ impl LifecycleManager {
             #[cfg(feature = "std")]
             skill_registry: None::<Arc<Mutex<SkillRegistry>>>,
             #[cfg(feature = "std")]
+            watchdog: None,
+            #[cfg(feature = "std")]
+            confidence: None,
+            #[cfg(feature = "std")]
+            intentions: None,
+            #[cfg(feature = "std")]
             reflection_config: ReflectionConfig::default(),
             // Operator gating by default: agent skills land as `Proposed`.
             #[cfg(feature = "std")]
@@ -478,6 +499,29 @@ impl LifecycleManager {
     #[cfg(feature = "std")]
     pub fn enable_motivation(&mut self, gate: MotivatedGate) {
         self.motivated_gate = Some(Arc::new(Mutex::new(gate)));
+    }
+
+    /// Enables the E14 cognitive watchdog on the somatic loop: after each
+    /// dispatch its output is fed to the watchdog, and a stuck-loop /
+    /// hallucination-spiral trip is recorded to the audit log (VITA-3).
+    #[cfg(feature = "std")]
+    pub fn enable_watchdog(&mut self, watchdog: watchdog::CognitiveWatchdog) {
+        self.watchdog = Some(watchdog);
+    }
+
+    /// Enables the E14 confidence tracker: each completion is scored for
+    /// self-assessed confidence, and low-confidence completions are recorded to
+    /// the audit log (VITA-3).
+    #[cfg(feature = "std")]
+    pub fn enable_confidence(&mut self, tracker: metacognition::ConfidenceTracker) {
+        self.confidence = Some(tracker);
+    }
+
+    /// Enables E14 prospective memory: due intentions in `store` are injected
+    /// into the agenda as tasks each somatic iteration (VITA-3).
+    #[cfg(feature = "std")]
+    pub fn enable_intentions(&mut self, store: prospective::IntentionStore) {
+        self.intentions = Some(store);
     }
 
     /// Builder variant of [`LifecycleManager::enable_motivation`] returning
@@ -1205,6 +1249,25 @@ pub async fn somatic_execution_loop(
             lifecycle.agenda.push(Task::new(task_id, tier, prompt));
         }
 
+        // E14 (VITA-3): inject any due prospective intentions into the agenda as
+        // tasks, so scheduled reminders/goals surface alongside sensory input.
+        #[cfg(feature = "std")]
+        if lifecycle.intentions.is_some() {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            const OVERDUE_GRACE_NS: u64 = 3_600_000_000_000; // 1 hour
+            if let Some(store) = lifecycle.intentions.as_mut() {
+                let _ = prospective::inject_due_intentions(
+                    store,
+                    &mut lifecycle.agenda,
+                    now_ns,
+                    OVERDUE_GRACE_NS,
+                );
+            }
+        }
+
         // ── 3. Policy update ──────────────────────────────────────────────────
         let human_guidance = lifecycle.senses.read_active_bounds()?;
         lifecycle.update_policy_bounds(human_guidance);
@@ -1316,6 +1379,36 @@ pub async fn somatic_execution_loop(
             match dispatch_result {
                 Ok(outcome) => {
                     lifecycle.memory.add_tokens(outcome.tokens_emitted);
+
+                    // E14 (VITA-3): feed the cognitive watchdog and confidence
+                    // tracker on each cortex completion. A watchdog trip
+                    // (stuck loop / hallucination spiral) is recorded to the
+                    // audit log so the operator can see it and intervene.
+                    #[cfg(feature = "std")]
+                    {
+                        let trip = lifecycle.watchdog.as_mut().and_then(|wd| {
+                            wd.record_invocation(&outcome.response, 0);
+                            let trip_count = wd.trip_count();
+                            wd.check_trip()
+                                .map(|t| AuditEntry::CognitiveWatchdogTripped {
+                                    agent_id: agent_id.clone(),
+                                    detector: t.detector.clone(),
+                                    reason: t.reason.clone(),
+                                    streak: t.streak,
+                                    trip_count,
+                                })
+                        });
+                        if let Some(entry) = trip {
+                            lifecycle.audit.push(entry);
+                        }
+                        if let Some(ct) = lifecycle.confidence.as_mut() {
+                            // Score the completion, then record it against the
+                            // dispatch outcome (success) as a calibration point.
+                            let score = ct.estimate_confidence(&outcome.response, 0);
+                            ct.record_outcome(score.value, true);
+                        }
+                    }
+
                     lifecycle.audit.push(AuditEntry::TaskCompleted {
                         agent_id,
                         task_id,
@@ -1402,6 +1495,29 @@ mod tests {
         assert!(m.is_shutting_down());
         let result = block_on(somatic_execution_loop(&mut m, &monitor));
         assert!(result.is_ok(), "loop must exit Ok on cooperative shutdown");
+    }
+
+    #[test]
+    fn due_intentions_are_injected_and_dispatched_by_the_loop() {
+        // E14 (VITA-3): a due prospective intention must be injected into the
+        // agenda and dispatched by the somatic loop, proving the wiring runs.
+        let mut m = manager("intention-agent", Some(3));
+        let mut store = crate::prospective::IntentionStore::in_memory();
+        store.add_once("review the overnight logs", 0, 0).unwrap();
+        m.enable_intentions(store);
+        let mut monitor = HomeostaticMonitor::new(1.0, 0.5, 8);
+        monitor.record_ttft(0.0);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+        let dispatched = m.audit.entries().iter().any(|e| {
+            matches!(
+                e,
+                AuditEntry::TaskStarted { .. } | AuditEntry::TaskCompleted { .. }
+            )
+        });
+        assert!(
+            dispatched,
+            "a due intention must be injected and dispatched by the loop"
+        );
     }
 
     #[test]
