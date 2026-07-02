@@ -44,13 +44,31 @@ The following were implemented and verified (`cargo test --workspace --all-targe
 | **INF-8** | `deny.toml` now sets `yanked = "deny"`. |
 | **INF-16** | `trainer/sleep_phase.py` guards `__doc__` so it doesn't crash under `python -OO`. |
 
-**Deliberately deferred** (need a product decision or a larger change): the fixture-only
-frontier backends + retry/streaming rework (IO-1/2/9), `metrics`↔`metrics-endpoint`
-consolidation (OPS-9), the `JsonStore<T>` unification (OPS persistence contract), hosted
-`main.rs`/`LifecycleManager` factoring, hosted supervision + graceful shutdown (KERN-2/3),
-wiring the E14 cognitive suite (VITA-3), enforcing constitution `hmac_verified` (AUT-2),
-and the audit/kv-trace `VecDeque` swaps (VITA-5/MEM-15 — VITA-5's impact is already largely
-removed by the VITA-1 rate-limit). These remain in the tables below.
+### Second wave (previously deferred, now done)
+
+A follow-up pass implemented the rest of the substantive backlog:
+
+| Finding | Fix |
+|---|---|
+| **AUT-2** | Constant-time HMAC compare, `CharterError::Unsealed` + `Charter::from_path_strict`, loud warning on unsealed file loads, and `ConstitutionGuard::is_sealed()` so a supervisor can refuse an unsealed charter. |
+| **VITA-5 / MEM-15** | Audit ring uses amortized-O(1) batch eviction (slice API kept); kv-trace uses a `VecDeque`. |
+| **KERN-2 / KERN-3** | Somatic loop runs under a `catch_unwind` + backoff **supervisor**; `LifecycleManager` gains a cooperative shutdown flag polled each iteration, with a `signal-hook` SIGTERM/SIGINT handler in the hosted kernel. |
+| **VITA-3** | Watchdog / prospective memory / confidence tracker are **wired** into the somatic loop (enabled by default in `serve`, `ANIMA_COGNITION=0` to opt out). |
+| **IO-2 / IO-4** | Shared jittered-backoff retry helper on the live provider paths; compat-live emits word-level token chunks so accounting isn't undercounted to 1. |
+| **IO-1** | Real Anthropic Messages client + OpenAI (via the compat client); factory routes to live when the API key is set, fixtures + a loud warning otherwise. |
+| **OPS-9** | `metrics-endpoint` merged into `metrics` (one Prometheus schema; CLI dump + `/metrics` share it). |
+| **OPS-6 / OPS-13** | New `jsonstore` crate (`state_dir()` safe fallback + `atomic_write()`) adopted across 7 stores; `jobs::record_run_result` now persists immediately. |
+| **VITA-7** | The two ~90-line sleep-maintenance methods share one `run_maintenance_and_postprocess()`. |
+
+**Still deferred** — two large maintainability-only refactors, each best done as a
+focused, separately-reviewed PR because they are high-churn/high-regression-risk with no
+functional change:
+
+- **KERN-9** — split the 7,519-line `kernels/hosted/src/main.rs` into a `commands/` module
+  per subcommand + a shared audit-view module (the 7 `print_*_audit` fns; `print_audit` was
+  verified free of private-helper coupling, so the extraction is clean, just voluminous).
+- **VITA-6** — regroup `LifecycleManager`'s ~30 fields into `Subsystems`/`SleepConfig`
+  structs (touches ~50 field-access sites). Its companion dedup (VITA-7) is done.
 
 ---
 
