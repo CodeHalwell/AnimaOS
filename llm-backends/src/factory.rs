@@ -248,7 +248,7 @@ impl TierBackendChoices {
     /// |-------------|--------------------------|-------------------------------------------|
     /// | cheap-local | `ANIMA_CHEAP_BACKEND`    | `ollama` if `ANIMA_OLLAMA*` hints, else mock |
     /// | mid-tier    | `ANIMA_MID_BACKEND`      | the cheap-local choice (open decision left to operator) |
-    /// | frontier    | `ANIMA_FRONTIER_BACKEND` | `anthropic` if `ANTHROPIC_API_KEY` set, else mock |
+    /// | frontier    | `ANIMA_FRONTIER_BACKEND` | `anthropic` if `ANTHROPIC_API_KEY` set, else `openai` if `OPENAI_API_KEY` set, else mock |
     ///
     /// As a convenience, a global `ANIMA_BACKEND` (the legacy single-backend
     /// selector) seeds every tier when set and no per-tier override is given, so
@@ -338,14 +338,21 @@ fn default_cheap_local_kind() -> BackendKind {
     }
 }
 
-/// Default frontier provider: `anthropic` when an API key is configured,
-/// otherwise the CI-safe `mock`.
+/// Default frontier provider: `anthropic` when `ANTHROPIC_API_KEY` is set, else
+/// `openai` when `OPENAI_API_KEY` is set (both resolve to a live client via
+/// [`BackendFactory::resolve`]), otherwise the CI-safe `mock`.
 fn default_frontier_kind() -> BackendKind {
-    if std::env::var("ANTHROPIC_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false)
-    {
+    let has_key = |var: &str| std::env::var(var).map(|k| !k.is_empty()).unwrap_or(false);
+    frontier_kind_for(has_key("ANTHROPIC_API_KEY"), has_key("OPENAI_API_KEY"))
+}
+
+/// Env-free frontier-provider precedence (Anthropic ≻ OpenAI ≻ mock), split out
+/// so the selection is unit-testable without mutating process environment.
+fn frontier_kind_for(has_anthropic_key: bool, has_openai_key: bool) -> BackendKind {
+    if has_anthropic_key {
         BackendKind::Anthropic
+    } else if has_openai_key {
+        BackendKind::OpenAi
     } else {
         BackendKind::Mock
     }
@@ -355,6 +362,16 @@ fn default_frontier_kind() -> BackendKind {
 mod tests {
     use super::*;
     use crate::capabilities::BackendCapabilities;
+
+    #[test]
+    fn frontier_default_prefers_anthropic_then_openai_then_mock() {
+        assert_eq!(frontier_kind_for(true, true), BackendKind::Anthropic);
+        assert_eq!(frontier_kind_for(true, false), BackendKind::Anthropic);
+        // OpenAI-only deployments now auto-select the live OpenAI frontier
+        // instead of silently staying on the mock backend.
+        assert_eq!(frontier_kind_for(false, true), BackendKind::OpenAi);
+        assert_eq!(frontier_kind_for(false, false), BackendKind::Mock);
+    }
 
     #[test]
     fn factory_returns_anthropic_backend() {

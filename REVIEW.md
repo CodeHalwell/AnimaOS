@@ -87,7 +87,8 @@ A Gemini note about `kv-controller`'s `VecDeque` import breaking `no_std` is a
 false positive: the `trace` module carrying that import is `#[cfg(feature = "std")]`,
 so it is never in the `no_std` build (the microVM CI build confirms it).
 
-**Known follow-ups** (deferred, not blocking):
+**Known follow-ups** (deferred, not blocking — each is a policy/architecture
+call left to the maintainer):
 
 - **E14 intention completion** — `inject_due_intentions` marks due intentions
   `dispatched` but nothing calls `IntentionStore::complete` after the injected
@@ -96,6 +97,14 @@ so it is never in the `no_std` build (the microVM CI build confirms it).
   execution) needs a task-completion hook threaded through the somatic loop;
   it's an opt-in E14 feature, so it's tracked here rather than patched with a
   semantics-changing complete-at-injection shortcut. (PR review, P2.)
+- **Fail-closed on unsealed charter (AUT-2)** — `ConstitutionGuard` records
+  `is_sealed()` but `screen()` still enforces an unsealed charter (advisory,
+  not fail-closed). This is deliberate: the **embedded/default charter is
+  unsealed by design** (no build-time HMAC), so making the guard reject unsealed
+  charters would brick every default/dev/CI deployment. Completing this needs a
+  product decision — most likely an opt-in strict mode (e.g. an env gate or
+  `new_strict` constructor) that production enables while the embedded flow stays
+  advisory — rather than flipping the default. (PR review, P2.)
 - **SSRF-helper dedup** — the host-canonicalization helpers are duplicated in
   `defence` and `webhooks`; a shared home (review theme E) would remove the
   drift risk.
