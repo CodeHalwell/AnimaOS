@@ -72,6 +72,34 @@ microVM targets):
 | **KERN-9** | `kernels/hosted/src/main.rs` split 7,519 → 476 lines: the 7 `print_*_audit` fns moved to an `audit_view` module, the 24 `cmd_*` handlers to a `commands` module (reached via `use super::*`, so a pure relocation), and the 25-branch `if`-ladder dispatch collapsed into one `match`. `main.rs` is now a thin entry point. |
 | **VITA-6** | `LifecycleManager`'s field list regrouped into `SleepConfig` (7 sleep-phase knobs) and `Subsystems` (8 optional `Option<_>` capabilities), dropping the top-level struct from ~30 to 20 fields. External coupling was two write sites — the god-object was already well encapsulated behind its `enable_*`/`with_*` builders. |
 
+### Fourth wave — PR review response (now done)
+
+Automated PR review (Copilot / Codex / Gemini) surfaced a further batch, addressed here:
+
+| Finding | Fix |
+|---|---|
+| **SSRF host canonicalization** | `defence` motor gate + `webhooks` registry now normalise the host (trailing DNS dot, IPv4-mapped IPv6, `inet_aton` integer/octal/hex/short forms, `0.0.0.0`) and use `std::net` range checks before the loopback/private/metadata veto; blocklist entries carrying a scheme or port are normalised too. |
+| **CORE-5 (future timestamps)** | The financial-budget ledger is bounded by record count instead of a fragile max-day anchor, so a future-dated (clock-skew / replay) spend record can no longer prune away the real day's spend and reset the budget toward 1.0. |
+| **Windows home dir** | `jsonstore::state_dir` restores the `USERPROFILE` fallback dropped during store unification. |
+| **RUSTSEC-2026-0190** | `anyhow` bumped 1.0.102 → 1.0.103 to clear the `cargo-deny` advisories gate. |
+
+A Gemini note about `kv-controller`'s `VecDeque` import breaking `no_std` is a
+false positive: the `trace` module carrying that import is `#[cfg(feature = "std")]`,
+so it is never in the `no_std` build (the microVM CI build confirms it).
+
+**Known follow-ups** (deferred, not blocking):
+
+- **E14 intention completion** — `inject_due_intentions` marks due intentions
+  `dispatched` but nothing calls `IntentionStore::complete` after the injected
+  task runs, so one-shot intentions re-fire after a restart and recurring ones
+  never advance their due time. The correct fix (complete after successful
+  execution) needs a task-completion hook threaded through the somatic loop;
+  it's an opt-in E14 feature, so it's tracked here rather than patched with a
+  semantics-changing complete-at-injection shortcut. (PR review, P2.)
+- **SSRF-helper dedup** — the host-canonicalization helpers are duplicated in
+  `defence` and `webhooks`; a shared home (review theme E) would remove the
+  drift risk.
+
 ---
 
 ## Overall health: strong
