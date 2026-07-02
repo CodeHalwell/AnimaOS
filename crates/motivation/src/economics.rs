@@ -67,6 +67,22 @@ pub struct CostBenefitAnalysis {
     pub tier_capabilities: [TierCapability; 3],
 }
 
+/// Clamps an estimate into `[0, 1]`, mapping `NaN` to `0.0`.
+///
+/// `f32::clamp` alone *preserves* `NaN`, which would violate the "every field is
+/// a finite `[0, 1]` estimate" invariant. A stray `NaN` from an upstream
+/// capability/budget estimate must not survive into `choose_tier`'s `total_cmp`
+/// ranking, where `NaN` sorts as greatest and could hijack tier selection.
+/// Treating a non-numeric estimate as `0.0` keeps routing finite and
+/// conservative (∞ still clamps to `1.0`, `-∞` to `0.0`).
+fn saturate01(x: f32) -> f32 {
+    if x.is_nan() {
+        0.0
+    } else {
+        x.clamp(0.0, 1.0)
+    }
+}
+
 impl CostBenefitAnalysis {
     /// Construct a new analysis.
     ///
@@ -81,21 +97,21 @@ impl CostBenefitAnalysis {
         frontier_capability: f32,
     ) -> Self {
         Self {
-            expected_drive_value: expected_drive_value.clamp(0.0, 1.0),
-            financial_budget: financial_budget.clamp(0.0, 1.0),
-            power_budget: power_budget.clamp(0.0, 1.0),
+            expected_drive_value: saturate01(expected_drive_value),
+            financial_budget: saturate01(financial_budget),
+            power_budget: saturate01(power_budget),
             tier_capabilities: [
                 TierCapability {
                     tier: ModelTier::CheapLocal,
-                    capability: cheap_capability.clamp(0.0, 1.0),
+                    capability: saturate01(cheap_capability),
                 },
                 TierCapability {
                     tier: ModelTier::MidTier,
-                    capability: mid_capability.clamp(0.0, 1.0),
+                    capability: saturate01(mid_capability),
                 },
                 TierCapability {
                     tier: ModelTier::Frontier,
-                    capability: frontier_capability.clamp(0.0, 1.0),
+                    capability: saturate01(frontier_capability),
                 },
             ],
         }
@@ -248,5 +264,28 @@ mod tests {
         ] {
             assert!(cba.net_value(tier) >= 0.0, "net value must be non-negative");
         }
+    }
+
+    #[test]
+    fn nan_estimates_are_sanitized_to_finite_fields() {
+        // Every constructor input is NaN — none may survive into the struct, or
+        // `choose_tier`'s `total_cmp` ranking could be hijacked (NaN sorts as
+        // greatest). All fields must be finite, and tier choice must stay sane.
+        let cba =
+            CostBenefitAnalysis::new(f32::NAN, f32::NAN, f32::NAN, f32::NAN, f32::NAN, f32::NAN);
+        assert!(cba.expected_drive_value.is_finite());
+        assert!(cba.financial_budget.is_finite());
+        assert!(cba.power_budget.is_finite());
+        for tc in &cba.tier_capabilities {
+            assert!(
+                tc.capability.is_finite(),
+                "NaN capability must be sanitized to a finite value"
+            );
+            assert!((0.0..=1.0).contains(&tc.capability));
+        }
+        // A NaN frontier estimate must not out-rank finite tiers.
+        let biased = CostBenefitAnalysis::new(1.0, 1.0, 1.0, 0.8, 0.5, f32::NAN);
+        assert_eq!(biased.choose_tier(), ModelTier::CheapLocal);
+        assert!(biased.net_value(ModelTier::Frontier).is_finite());
     }
 }

@@ -294,6 +294,10 @@ fn host_matches_block(host: &str, blocked: &str) -> bool {
     // component, so host-vs-host comparison stays correct after the switch away
     // from raw URL-substring matching (MEM-6).
     let blocked = extract_host(blocked.trim());
+    // Operators may use the leading-dot domain-wide form (`.evil.example.com`);
+    // strip it so the entry blocks the apex and its subdomains rather than
+    // comparing against an empty leading label (MEM-6).
+    let blocked = blocked.trim_start_matches('.');
     if blocked.is_empty() {
         return false;
     }
@@ -707,14 +711,25 @@ mod tests {
 
     #[test]
     fn url_shaped_blocklist_entries_still_match() {
-        // Entries carrying a scheme or port must normalise to the host so they
-        // keep matching after the move to host-component comparison.
-        for entry in ["https://evil.example.com", "evil.example.com:8443"] {
+        // Entries carrying a scheme, port, or the leading-dot domain-wide form
+        // must normalise to the host so they keep matching after the move to
+        // host-component comparison.
+        for entry in [
+            "https://evil.example.com",
+            "evil.example.com:8443",
+            ".evil.example.com",
+        ] {
             let g = UnsafeMotorActionGate::new().with_blocklisted_host(entry);
             assert!(
                 g.screen_network("https://evil.example.com/x", "GET")
                     .is_vetoed(),
-                "blocklist entry {entry:?} must still veto the host"
+                "blocklist entry {entry:?} must still veto the apex host"
+            );
+            // The leading-dot / bare forms must also catch subdomains.
+            assert!(
+                g.screen_network("https://cdn.evil.example.com/x", "GET")
+                    .is_vetoed(),
+                "blocklist entry {entry:?} must veto subdomains too"
             );
         }
     }
