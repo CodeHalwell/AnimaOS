@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Resolution order:
 /// 1. `ANIMA_STATE_DIR` (explicit operator override), when non-empty;
-/// 2. `$HOME/.anima`, when `HOME` is set and non-empty;
+/// 2. `$HOME/.anima` (or `%USERPROFILE%\.anima` on Windows, where `HOME` is
+///    usually unset), when the home variable is set and non-empty;
 /// 3. `/var/lib/anima` as a fail-closed default.
 ///
 /// Note the fallback is **never** `/tmp` (reboot-wiped, world-readable) or the
@@ -32,10 +33,14 @@ pub fn state_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Path::new(&home).join(".anima");
-        }
+    // `USERPROFILE` is the Windows home fallback — the pre-`jsonstore` webhook
+    // store checked it, so keep that behaviour to avoid a Windows regression.
+    if let Some(home) = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .filter(|home| !home.is_empty())
+    {
+        return Path::new(&home).join(".anima");
     }
     PathBuf::from("/var/lib/anima")
 }
