@@ -168,35 +168,17 @@ impl From<SensoryBridgeError> for LifecycleError {
     }
 }
 
-/// Primary autonomous lifecycle manager.
+/// Sleep-phase tuning consulted while the manager runs its
+/// maintenance/sleep routines (VITA-6).
+///
+/// Grouped out of [`LifecycleManager`] so the top-level struct is not a
+/// god-object; each knob is read only during a sleep cycle.
 #[derive(Clone)]
-pub struct LifecycleManager {
-    /// Human-readable agent identifier (carried into audit entries).
-    pub agent_id: String,
-    /// Cooperative shutdown flag (KERN-3). When set — e.g. by a host SIGTERM
-    /// handler via [`shutdown_handle`](Self::shutdown_handle) — the somatic loop
-    /// exits cleanly at its next iteration so the agent can flush state and
-    /// transition to sleep instead of being hard-killed mid-task.
-    shutdown: Arc<AtomicBool>,
-    /// Human sensory bridge.
-    pub senses: SensoryBridge,
-    /// Active working memory (L1 token-count tracker).
-    pub memory: VirtualContextManager,
-    /// L1 episodic memory store — the named-node layer that the pruning phase
-    /// operates on during each sleep cycle (E3.5).
-    pub l1_memory: L1PruningStore,
+pub struct SleepConfig {
     /// Elapsed seconds applied to each sleep-cycle pruning pass.  Defaults to
     /// `1.0`; callers may adjust this to match the wall-clock cadence of their
     /// sleep schedules.
     pub pruning_elapsed: f32,
-    /// L3 cerebral archive for memory consolidation across sleep cycles (E2.6).
-    ///
-    /// `None` when running without persistent storage (e.g. in tests that do not
-    /// require L3 persistence).
-    #[cfg(feature = "std")]
-    pub l3_archive: Option<memory::L3Archive>,
-    /// Monotonically increasing ID counter for L3 archive entries.
-    pub next_archive_id: u64,
     /// Replay configuration for the `GenerativeReplay` sleep phase (E3.6).
     ///
     /// Applied every sleep cycle when an L3 archive is configured.
@@ -211,38 +193,68 @@ pub struct LifecycleManager {
     /// `None` disables file output (compilation runs in-memory only, no JSONL files written).
     #[cfg(feature = "std")]
     pub compilation_config: Option<CompilationConfig>,
-    /// Task scheduler.
-    pub scheduler: IterationAwareMlfq,
-    /// Agenda of pending tasks.
-    pub agenda: TaskAgenda,
-    /// Active lifecycle state.
-    pub state: LifecycleState,
-    /// Current policy bounds consumed from the human signal channel.
-    pub policy_bounds: HumanGuidance,
-    /// Runtime configuration.
-    pub config: LifecycleConfig,
-    /// LLM backend used to execute dispatched tasks.
-    pub backend: Arc<dyn LlmBackend>,
-    /// Per-agent audit log.
-    pub audit: AuditLog,
-    /// Cancellation handle for the dispatch currently in flight.  A fresh
-    /// [`CancellationToken`] is installed before every dispatch; external
-    /// callers (signal handlers, stress monitors, timeouts) can trip the
-    /// running task via [`LifecycleManager::cancel_current_task`].
-    task_cancel: Arc<Mutex<CancellationToken>>,
-    /// Monotonically increasing counter for sensory-derived task IDs.
+    /// Reflection configuration applied during the Dreaming phase (E11 S11.5).
     ///
-    /// Persisted on the lifecycle (not reset per `somatic_execution_loop` call)
-    /// so that gate-decision audit entries carry unique event IDs even when the
-    /// loop is called multiple times on the same `LifecycleManager`.
-    /// Starts at `2^63` to avoid collisions with caller-supplied task IDs.
-    next_sensory_task_id: u64,
-    /// Optional iteration limit to allow bounded runs.
-    pub max_iterations: Option<u32>,
-    iterations: u32,
-    /// Last memory pressure level emitted to the audit log.  Used to suppress
-    /// duplicate `MemoryPressureEvent` entries — only transitions are logged.
-    last_pressure_level: memory::MemoryPressureEvent,
+    /// Only consulted when [`skill_registry`](Subsystems::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub reflection_config: ReflectionConfig,
+    /// Promotion-gate configuration for agent-authored skill drafts (E11 S11.5).
+    ///
+    /// Defaults to operator gating (`auto_promote_agent_skills: false`) so
+    /// reflection-authored skills land as `Proposed` and await approval through
+    /// the hosted approval-queue bridge.  Only consulted when
+    /// [`skill_registry`](Subsystems::skill_registry) is `Some`.
+    #[cfg(feature = "std")]
+    pub promotion_gate_config: PromotionGateConfig,
+    /// Optional E8 S8.4.3 sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
+    ///
+    /// `None` by default — when absent, PolicyCompilation produces training pairs
+    /// but does not pass them to a local model fine-tuner.  Install via
+    /// [`LifecycleManager::enable_consolidation`] /
+    /// [`LifecycleManager::with_consolidation`].  When `Some`, each sleep
+    /// cycle's PolicyCompilation output feeds [`consolidation::run_consolidation`],
+    /// emitting `ConsolidationStarted`, `ConsolidationCompleted`, or
+    /// `ConsolidationSkipped` audit entries.
+    #[cfg(feature = "std")]
+    pub consolidation_config: Option<consolidation::ConsolidationConfig>,
+}
+
+impl Default for SleepConfig {
+    fn default() -> Self {
+        Self {
+            pruning_elapsed: 1.0,
+            #[cfg(feature = "std")]
+            replay_config: memory::ReplayConfig::default(),
+            dream_config: DreamConfig::default(),
+            #[cfg(feature = "std")]
+            compilation_config: None,
+            #[cfg(feature = "std")]
+            reflection_config: ReflectionConfig::default(),
+            #[cfg(feature = "std")]
+            // Operator gating by default: agent skills land as `Proposed`.
+            promotion_gate_config: PromotionGateConfig {
+                auto_promote_agent_skills: false,
+            },
+            #[cfg(feature = "std")]
+            consolidation_config: None,
+        }
+    }
+}
+
+/// Optional additive subsystems installed after construction (VITA-6).
+///
+/// Every field is `None` until the matching `enable_*`/`with_*`/`set_*`
+/// builder installs it; absent, the somatic loop keeps its baseline
+/// behaviour. Grouped out of [`LifecycleManager`] to keep the
+/// optional-capability cluster in one place.
+#[derive(Clone, Default)]
+pub struct Subsystems {
+    /// L3 cerebral archive for memory consolidation across sleep cycles (E2.6).
+    ///
+    /// `None` when running without persistent storage (e.g. in tests that do not
+    /// require L3 persistence).
+    #[cfg(feature = "std")]
+    pub l3_archive: Option<memory::L3Archive>,
     /// Optional interoceptive sensor bundle for 1 Hz signal publication (E5.7).
     ///
     /// When `Some`, each somatic-loop iteration calls `tick()` on the bundle and
@@ -293,7 +305,7 @@ pub struct LifecycleManager {
     /// additively via [`LifecycleManager::enable_skill_reflection`] /
     /// [`LifecycleManager::with_skill_registry`].  When `Some`, each sleep
     /// cycle's Dreaming phase reflects over the buffered
-    /// [`recent_episode_summaries`](Self::recent_episode_summaries), drafts
+    /// [`recent_episode_summaries`](LifecycleManager::recent_episode_summaries), drafts
     /// skills for friction patterns above threshold, and registers
     /// agent-authored `Proposed` drafts into this registry (emitting
     /// `SkillReflectionCompleted` + `SkillRegistered` audit entries).
@@ -311,32 +323,72 @@ pub struct LifecycleManager {
     pub skill_registry: Option<Arc<Mutex<SkillRegistry>>>,
     /// E14 cognitive watchdog — detects stuck loops / hallucination spirals from
     /// cortex output. Wired in [`somatic_execution_loop`]; enable via
-    /// [`enable_watchdog`](Self::enable_watchdog) (VITA-3).
+    /// [`enable_watchdog`](LifecycleManager::enable_watchdog) (VITA-3).
     #[cfg(feature = "std")]
-    watchdog: Option<watchdog::CognitiveWatchdog>,
+    pub(crate) watchdog: Option<watchdog::CognitiveWatchdog>,
     /// E14 confidence tracker — per-completion self-assessment. Wired in
     /// [`somatic_execution_loop`]; enable via
-    /// [`enable_confidence`](Self::enable_confidence).
+    /// [`enable_confidence`](LifecycleManager::enable_confidence).
     #[cfg(feature = "std")]
-    confidence: Option<metacognition::ConfidenceTracker>,
+    pub(crate) confidence: Option<metacognition::ConfidenceTracker>,
     /// E14 prospective-memory store — due intentions are injected into the agenda
     /// each somatic iteration. Enable via
-    /// [`enable_intentions`](Self::enable_intentions).
+    /// [`enable_intentions`](LifecycleManager::enable_intentions).
     #[cfg(feature = "std")]
-    intentions: Option<prospective::IntentionStore>,
-    /// Reflection configuration applied during the Dreaming phase (E11 S11.5).
+    pub(crate) intentions: Option<prospective::IntentionStore>,
+}
+
+/// Primary autonomous lifecycle manager.
+#[derive(Clone)]
+pub struct LifecycleManager {
+    /// Human-readable agent identifier (carried into audit entries).
+    pub agent_id: String,
+    /// Cooperative shutdown flag (KERN-3). When set — e.g. by a host SIGTERM
+    /// handler via [`shutdown_handle`](Self::shutdown_handle) — the somatic loop
+    /// exits cleanly at its next iteration so the agent can flush state and
+    /// transition to sleep instead of being hard-killed mid-task.
+    shutdown: Arc<AtomicBool>,
+    /// Human sensory bridge.
+    pub senses: SensoryBridge,
+    /// Active working memory (L1 token-count tracker).
+    pub memory: VirtualContextManager,
+    /// L1 episodic memory store — the named-node layer that the pruning phase
+    /// operates on during each sleep cycle (E3.5).
+    pub l1_memory: L1PruningStore,
+    /// Monotonically increasing ID counter for L3 archive entries.
+    pub next_archive_id: u64,
+    /// Task scheduler.
+    pub scheduler: IterationAwareMlfq,
+    /// Agenda of pending tasks.
+    pub agenda: TaskAgenda,
+    /// Active lifecycle state.
+    pub state: LifecycleState,
+    /// Current policy bounds consumed from the human signal channel.
+    pub policy_bounds: HumanGuidance,
+    /// Runtime configuration.
+    pub config: LifecycleConfig,
+    /// LLM backend used to execute dispatched tasks.
+    pub backend: Arc<dyn LlmBackend>,
+    /// Per-agent audit log.
+    pub audit: AuditLog,
+    /// Cancellation handle for the dispatch currently in flight.  A fresh
+    /// [`CancellationToken`] is installed before every dispatch; external
+    /// callers (signal handlers, stress monitors, timeouts) can trip the
+    /// running task via [`LifecycleManager::cancel_current_task`].
+    task_cancel: Arc<Mutex<CancellationToken>>,
+    /// Monotonically increasing counter for sensory-derived task IDs.
     ///
-    /// Only consulted when [`skill_registry`](Self::skill_registry) is `Some`.
-    #[cfg(feature = "std")]
-    pub reflection_config: ReflectionConfig,
-    /// Promotion-gate configuration for agent-authored skill drafts (E11 S11.5).
-    ///
-    /// Defaults to operator gating (`auto_promote_agent_skills: false`) so
-    /// reflection-authored skills land as `Proposed` and await approval through
-    /// the hosted approval-queue bridge.  Only consulted when
-    /// [`skill_registry`](Self::skill_registry) is `Some`.
-    #[cfg(feature = "std")]
-    pub promotion_gate_config: PromotionGateConfig,
+    /// Persisted on the lifecycle (not reset per `somatic_execution_loop` call)
+    /// so that gate-decision audit entries carry unique event IDs even when the
+    /// loop is called multiple times on the same `LifecycleManager`.
+    /// Starts at `2^63` to avoid collisions with caller-supplied task IDs.
+    next_sensory_task_id: u64,
+    /// Optional iteration limit to allow bounded runs.
+    pub max_iterations: Option<u32>,
+    iterations: u32,
+    /// Last memory pressure level emitted to the audit log.  Used to suppress
+    /// duplicate `MemoryPressureEvent` entries — only transitions are logged.
+    last_pressure_level: memory::MemoryPressureEvent,
     /// Buffer of recent episode summaries the Dreaming-phase reflection consumes
     /// (E11 S11.5).
     ///
@@ -346,17 +398,10 @@ pub struct LifecycleManager {
     /// recorded.
     #[cfg(feature = "std")]
     pub recent_episode_summaries: Vec<EpisodeSummary>,
-    /// Optional E8 S8.4.3 sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
-    ///
-    /// `None` by default — when absent, PolicyCompilation produces training pairs
-    /// but does not pass them to a local model fine-tuner.  Install via
-    /// [`LifecycleManager::enable_consolidation`] /
-    /// [`LifecycleManager::with_consolidation`].  When `Some`, each sleep
-    /// cycle's PolicyCompilation output feeds [`consolidation::run_consolidation`],
-    /// emitting `ConsolidationStarted`, `ConsolidationCompleted`, or
-    /// `ConsolidationSkipped` audit entries.
-    #[cfg(feature = "std")]
-    pub consolidation_config: Option<consolidation::ConsolidationConfig>,
+    /// Sleep-phase tuning consulted during maintenance/sleep cycles (VITA-6).
+    pub sleep: SleepConfig,
+    /// Optional additive subsystems installed after construction (VITA-6).
+    pub subsystems: Subsystems,
 }
 
 impl core::fmt::Debug for LifecycleManager {
@@ -368,17 +413,18 @@ impl core::fmt::Debug for LifecycleManager {
             .field("policy_bounds", &self.policy_bounds)
             .field("agenda_len", &self.agenda.len())
             .field("l1_memory_nodes", &self.l1_memory.len())
-            .field("pruning_elapsed", &self.pruning_elapsed);
+            .field("pruning_elapsed", &self.sleep.pruning_elapsed);
         #[cfg(feature = "std")]
         s.field(
             "replay_config_threshold",
-            &self.replay_config.accuracy_threshold,
+            &self.sleep.replay_config.accuracy_threshold,
         );
-        s.field("dream_config_seed", &self.dream_config.seed);
+        s.field("dream_config_seed", &self.sleep.dream_config.seed);
         #[cfg(feature = "std")]
         s.field(
             "compilation_config",
             &self
+                .sleep
                 .compilation_config
                 .as_ref()
                 .map(|c| c.output_dir.display().to_string()),
@@ -413,15 +459,7 @@ impl LifecycleManager {
             senses,
             memory,
             l1_memory: L1PruningStore::new(),
-            pruning_elapsed: 1.0,
-            #[cfg(feature = "std")]
-            l3_archive: None,
             next_archive_id: 0,
-            #[cfg(feature = "std")]
-            replay_config: memory::ReplayConfig::default(),
-            dream_config: DreamConfig::default(),
-            #[cfg(feature = "std")]
-            compilation_config: None,
             scheduler: IterationAwareMlfq::default(),
             agenda: TaskAgenda::new(),
             state: LifecycleState::Awake,
@@ -435,30 +473,12 @@ impl LifecycleManager {
             iterations: 0,
             last_pressure_level: memory::MemoryPressureEvent::Normal,
             #[cfg(feature = "std")]
-            sensor_bundle: None::<Arc<InteroceptiveSensorBundle>>,
-            #[cfg(feature = "std")]
-            motivated_gate: None::<Arc<Mutex<MotivatedGate>>>,
-            #[cfg(feature = "std")]
-            tier_backends: None::<router::TierBackends>,
-            #[cfg(feature = "std")]
-            skill_registry: None::<Arc<Mutex<SkillRegistry>>>,
-            #[cfg(feature = "std")]
-            watchdog: None,
-            #[cfg(feature = "std")]
-            confidence: None,
-            #[cfg(feature = "std")]
-            intentions: None,
-            #[cfg(feature = "std")]
-            reflection_config: ReflectionConfig::default(),
-            // Operator gating by default: agent skills land as `Proposed`.
-            #[cfg(feature = "std")]
-            promotion_gate_config: PromotionGateConfig {
-                auto_promote_agent_skills: false,
-            },
-            #[cfg(feature = "std")]
             recent_episode_summaries: Vec::new(),
-            #[cfg(feature = "std")]
-            consolidation_config: None,
+            // Sleep-phase knobs and optional subsystems start at their defaults;
+            // callers install subsystems via the `enable_*`/`with_*` builders
+            // and adjust sleep tuning through the `sleep` field (VITA-6).
+            sleep: SleepConfig::default(),
+            subsystems: Subsystems::default(),
         }
     }
 
@@ -473,7 +493,7 @@ impl LifecycleManager {
     /// backend for backward-compatible behaviour through the new code path.
     #[cfg(feature = "std")]
     pub fn set_tier_backends(&mut self, tiers: router::TierBackends) {
-        self.tier_backends = Some(tiers);
+        self.subsystems.tier_backends = Some(tiers);
     }
 
     /// Builder variant of [`LifecycleManager::set_tier_backends`] returning
@@ -487,7 +507,7 @@ impl LifecycleManager {
     /// `true` when the per-tier backend map is installed and active.
     #[cfg(feature = "std")]
     pub fn tier_dispatch_enabled(&self) -> bool {
-        self.tier_backends.is_some()
+        self.subsystems.tier_backends.is_some()
     }
 
     /// Enables the E12 motivated Striatal Gate on this manager (additive).
@@ -498,7 +518,7 @@ impl LifecycleManager {
     /// constructor signature untouched — call this after [`LifecycleManager::new`].
     #[cfg(feature = "std")]
     pub fn enable_motivation(&mut self, gate: MotivatedGate) {
-        self.motivated_gate = Some(Arc::new(Mutex::new(gate)));
+        self.subsystems.motivated_gate = Some(Arc::new(Mutex::new(gate)));
     }
 
     /// Enables the E14 cognitive watchdog on the somatic loop: after each
@@ -506,7 +526,7 @@ impl LifecycleManager {
     /// hallucination-spiral trip is recorded to the audit log (VITA-3).
     #[cfg(feature = "std")]
     pub fn enable_watchdog(&mut self, watchdog: watchdog::CognitiveWatchdog) {
-        self.watchdog = Some(watchdog);
+        self.subsystems.watchdog = Some(watchdog);
     }
 
     /// Enables the E14 confidence tracker: each completion is scored for
@@ -514,14 +534,14 @@ impl LifecycleManager {
     /// the audit log (VITA-3).
     #[cfg(feature = "std")]
     pub fn enable_confidence(&mut self, tracker: metacognition::ConfidenceTracker) {
-        self.confidence = Some(tracker);
+        self.subsystems.confidence = Some(tracker);
     }
 
     /// Enables E14 prospective memory: due intentions in `store` are injected
     /// into the agenda as tasks each somatic iteration (VITA-3).
     #[cfg(feature = "std")]
     pub fn enable_intentions(&mut self, store: prospective::IntentionStore) {
-        self.intentions = Some(store);
+        self.subsystems.intentions = Some(store);
     }
 
     /// Builder variant of [`LifecycleManager::enable_motivation`] returning
@@ -535,7 +555,7 @@ impl LifecycleManager {
     /// `true` when the motivated Striatal Gate is installed and active.
     #[cfg(feature = "std")]
     pub fn motivation_enabled(&self) -> bool {
-        self.motivated_gate.is_some()
+        self.subsystems.motivated_gate.is_some()
     }
 
     // ── E11 S11.5 — Dreaming-phase self-improvement reflection ────────────────
@@ -548,7 +568,7 @@ impl LifecycleManager {
     /// [`LifecycleManager::new`].
     #[cfg(feature = "std")]
     pub fn enable_skill_reflection(&mut self, registry: SkillRegistry) {
-        self.skill_registry = Some(Arc::new(Mutex::new(registry)));
+        self.subsystems.skill_registry = Some(Arc::new(Mutex::new(registry)));
     }
 
     /// Builder variant of [`LifecycleManager::enable_skill_reflection`]
@@ -563,7 +583,7 @@ impl LifecycleManager {
     /// run self-improvement reflection.
     #[cfg(feature = "std")]
     pub fn skill_reflection_enabled(&self) -> bool {
-        self.skill_registry.is_some()
+        self.subsystems.skill_registry.is_some()
     }
 
     /// Returns a clone of the shared skill-registry handle, if installed.
@@ -574,7 +594,7 @@ impl LifecycleManager {
     /// absent and the dependency graph acyclic.
     #[cfg(feature = "std")]
     pub fn skill_registry_handle(&self) -> Option<Arc<Mutex<SkillRegistry>>> {
-        self.skill_registry.clone()
+        self.subsystems.skill_registry.clone()
     }
 
     /// Buffers one episode summary for the next Dreaming-phase reflection pass
@@ -600,7 +620,7 @@ impl LifecycleManager {
     /// untouched.
     #[cfg(feature = "std")]
     fn run_dreaming_reflection(&mut self) -> ReflectionRegistration {
-        let Some(registry) = self.skill_registry.clone() else {
+        let Some(registry) = self.subsystems.skill_registry.clone() else {
             return ReflectionRegistration::default();
         };
         if self.recent_episode_summaries.is_empty() {
@@ -615,8 +635,8 @@ impl LifecycleManager {
         sleep::run_self_improvement_reflection(
             &agent_id,
             &self.recent_episode_summaries,
-            &self.reflection_config,
-            &self.promotion_gate_config,
+            &self.sleep.reflection_config,
+            &self.sleep.promotion_gate_config,
             &mut guard,
             &mut self.audit,
             proposed_at_ns,
@@ -638,7 +658,7 @@ impl LifecycleManager {
     /// for safety requirements before enabling in production.
     #[cfg(feature = "std")]
     pub fn enable_consolidation(&mut self, config: consolidation::ConsolidationConfig) {
-        self.consolidation_config = Some(config);
+        self.sleep.consolidation_config = Some(config);
     }
 
     /// Builder variant of [`LifecycleManager::enable_consolidation`] returning
@@ -653,14 +673,14 @@ impl LifecycleManager {
     /// phase will run the fine-tune hook.
     #[cfg(feature = "std")]
     pub fn consolidation_enabled(&self) -> bool {
-        self.consolidation_config.is_some()
+        self.sleep.consolidation_config.is_some()
     }
 
     /// Run the E8 S8.4.3 consolidation hook on the compiled pairs from the most
     /// recent PolicyCompilation sleep phase.  No-op when no config is installed.
     #[cfg(feature = "std")]
     fn run_consolidation_hook(&mut self, pairs: &[memory::compilation::TrainingPair]) {
-        let Some(ref config) = self.consolidation_config else {
+        let Some(ref config) = self.sleep.consolidation_config else {
             return;
         };
         let config = config.clone();
@@ -780,21 +800,21 @@ impl LifecycleManager {
     /// reflection, and fire the consolidation hook. Returns the report.
     fn run_maintenance_and_postprocess(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
-        let elapsed = self.pruning_elapsed;
+        let elapsed = self.sleep.pruning_elapsed;
 
         // Build replay context (E3.6) and dream context (E3.7): immutable borrows
         // of l3_archive — compatible with mutable borrow of l1_memory below since
         // they target different fields.
         #[cfg(feature = "std")]
-        let replay_ctx = self.l3_archive.as_ref().map(|l3| ReplayContext {
+        let replay_ctx = self.subsystems.l3_archive.as_ref().map(|l3| ReplayContext {
             l3,
-            config: self.replay_config.clone(),
+            config: self.sleep.replay_config.clone(),
         });
 
         #[cfg(feature = "std")]
-        let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
+        let dream_ctx = self.subsystems.l3_archive.as_ref().map(|l3| DreamContext {
             l3,
-            config: self.dream_config.clone(),
+            config: self.sleep.dream_config.clone(),
         });
 
         // Compilation context (E3.8).
@@ -806,13 +826,14 @@ impl LifecycleManager {
             .map(audit_entry_to_trace)
             .collect();
         #[cfg(feature = "std")]
-        let compilation_ctx = self
-            .compilation_config
-            .as_ref()
-            .map(|cfg| CompilationContext {
-                entries: &trace_entries,
-                config: cfg.clone(),
-            });
+        let compilation_ctx =
+            self.sleep
+                .compilation_config
+                .as_ref()
+                .map(|cfg| CompilationContext {
+                    entries: &trace_entries,
+                    config: cfg.clone(),
+                });
 
         let ctx = PruningContext {
             l1: &mut self.l1_memory,
@@ -835,7 +856,7 @@ impl LifecycleManager {
 
         // E2.6: Demote evicted L1 nodes to L3 archive if present.
         #[cfg(feature = "std")]
-        if let Some(l3) = self.l3_archive.as_mut() {
+        if let Some(l3) = self.subsystems.l3_archive.as_mut() {
             if let Some(outcome) = report.outcomes.first() {
                 for (key, node) in &outcome.evicted_l1_nodes {
                     let id = self.next_archive_id;
@@ -870,7 +891,7 @@ impl LifecycleManager {
         // E8 S8.4.3: Sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
         // Runs after compilation so compiled_pairs are available on the report.
         #[cfg(feature = "std")]
-        if self.consolidation_config.is_some() {
+        if self.sleep.consolidation_config.is_some() {
             let pairs = report
                 .outcomes
                 .get(3)
@@ -901,7 +922,7 @@ impl LifecycleManager {
     /// E5.3 router-decision audit variant — no new audit variants added).
     #[cfg(feature = "std")]
     fn resolve_dispatch_backend(&mut self, task_id: u64, mlfq_tier: u8) -> Arc<dyn LlmBackend> {
-        match &self.tier_backends {
+        match &self.subsystems.tier_backends {
             None => Arc::clone(&self.backend),
             Some(tiers) => {
                 let cost_class = cost_class_for_mlfq_tier(mlfq_tier);
@@ -1101,7 +1122,7 @@ pub async fn somatic_execution_loop(
                 // override semantics are preserved exactly (invoke at Frontier).
                 // When absent, this is byte-for-byte the original code path.
                 #[cfg(feature = "std")]
-                let motivated = lifecycle.motivated_gate.clone();
+                let motivated = lifecycle.subsystems.motivated_gate.clone();
                 #[cfg(not(feature = "std"))]
                 let motivated: Option<()> = None;
 
@@ -1163,13 +1184,13 @@ pub async fn somatic_execution_loop(
         // E14 (VITA-3): inject any due prospective intentions into the agenda as
         // tasks, so scheduled reminders/goals surface alongside sensory input.
         #[cfg(feature = "std")]
-        if lifecycle.intentions.is_some() {
+        if lifecycle.subsystems.intentions.is_some() {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
             const OVERDUE_GRACE_NS: u64 = 3_600_000_000_000; // 1 hour
-            if let Some(store) = lifecycle.intentions.as_mut() {
+            if let Some(store) = lifecycle.subsystems.intentions.as_mut() {
                 let _ = prospective::inject_due_intentions(
                     store,
                     &mut lifecycle.agenda,
@@ -1193,7 +1214,7 @@ pub async fn somatic_execution_loop(
         // the idle loop runs at ~1 kHz, and an unthrottled push floods the
         // bounded audit ring and any disk sink (VITA-1).
         #[cfg(feature = "std")]
-        if let Some(ref bundle) = lifecycle.sensor_bundle {
+        if let Some(ref bundle) = lifecycle.subsystems.sensor_bundle {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
@@ -1223,7 +1244,7 @@ pub async fn somatic_execution_loop(
                 // E12: refresh the motivated gate's drive registry from this
                 // tick's real interoceptive reading so drive urgencies (and thus
                 // the augmented value score) track the live homeostatic state.
-                if let Some(ref mg) = lifecycle.motivated_gate {
+                if let Some(ref mg) = lifecycle.subsystems.motivated_gate {
                     let h = HomeostaticSignals::from_interoceptive(&signals);
                     lock_recover(mg).update_signals(&h);
                 }
@@ -1297,7 +1318,7 @@ pub async fn somatic_execution_loop(
                     // audit log so the operator can see it and intervene.
                     #[cfg(feature = "std")]
                     {
-                        let trip = lifecycle.watchdog.as_mut().and_then(|wd| {
+                        let trip = lifecycle.subsystems.watchdog.as_mut().and_then(|wd| {
                             wd.record_invocation(&outcome.response, 0);
                             let trip_count = wd.trip_count();
                             wd.check_trip()
@@ -1312,7 +1333,7 @@ pub async fn somatic_execution_loop(
                         if let Some(entry) = trip {
                             lifecycle.audit.push(entry);
                         }
-                        if let Some(ct) = lifecycle.confidence.as_mut() {
+                        if let Some(ct) = lifecycle.subsystems.confidence.as_mut() {
                             // Score the completion, then record it against the
                             // dispatch outcome (success) as a calibration point.
                             let score = ct.estimate_confidence(&outcome.response, 0);
@@ -2139,7 +2160,7 @@ mod tests {
         use memory::decay::SEMANTIC_FLOOR;
 
         let mut m = manager("invariant-agent", None);
-        let elapsed = m.pruning_elapsed;
+        let elapsed = m.sleep.pruning_elapsed;
 
         // Insert 15 nodes with varying decay rates.
         for i in 0..15u32 {
@@ -2197,7 +2218,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut m = manager("l3-demote-agent", None);
-        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+        m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
 
         // Add a fast-decaying node that will be pruned at elapsed=1.0.
         m.l1_memory
@@ -2209,7 +2230,7 @@ mod tests {
         m.run_sleep_cycle();
 
         // The fast-decay node should have been demoted to L3.
-        let l3 = m.l3_archive.as_ref().unwrap();
+        let l3 = m.subsystems.l3_archive.as_ref().unwrap();
         assert_eq!(l3.len(), 1, "one pruned node should be in L3");
 
         // Stable node remains in L1.
@@ -2227,17 +2248,17 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut m = manager("l3-idem-agent", None);
-        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+        m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
 
         m.l1_memory
             .insert("fast", memory::MemoryNode::new(0.9, 20.0));
         m.run_sleep_cycle();
-        assert_eq!(m.l3_archive.as_ref().unwrap().len(), 1);
+        assert_eq!(m.subsystems.l3_archive.as_ref().unwrap().len(), 1);
 
         // A second cycle with an empty L1 should not change L3 length.
         m.run_sleep_cycle();
         assert_eq!(
-            m.l3_archive.as_ref().unwrap().len(),
+            m.subsystems.l3_archive.as_ref().unwrap().len(),
             1,
             "second cycle must not duplicate the already-archived entry"
         );
@@ -2254,12 +2275,12 @@ mod tests {
         // First "process": sleep cycle with fast-decaying node.
         {
             let mut m = manager("restart-agent", None);
-            m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+            m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
             m.l1_memory
                 .insert("fast", memory::MemoryNode::new(0.9, 20.0));
             m.run_sleep_cycle();
             assert_eq!(
-                m.l3_archive.as_ref().unwrap().len(),
+                m.subsystems.l3_archive.as_ref().unwrap().len(),
                 1,
                 "one node should be in L3 before restart"
             );
@@ -2292,7 +2313,7 @@ mod tests {
         // Fast-decaying node — will be pruned and archived in the first cycle.
         m.l1_memory
             .insert("fast", memory::MemoryNode::new(0.9, 20.0));
-        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+        m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
 
         // Cycle 1: L3 is empty before maintenance, so queries_run = 0.
         let report1 = m.run_sleep_cycle();
@@ -2343,10 +2364,10 @@ mod tests {
                 let prov = memory::Provenance::now(memory::SourceTier::L1, &format!("rb-key-{i}"));
                 l3.demote(item, prov).unwrap();
             }
-            m.l3_archive = Some(l3);
+            m.subsystems.l3_archive = Some(l3);
         }
 
-        m.replay_config = memory::ReplayConfig {
+        m.sleep.replay_config = memory::ReplayConfig {
             accuracy_threshold: 0.5,
             max_sample_size: 16,
             rollback_enabled: true,
@@ -2403,7 +2424,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut m = manager("100-cycles-replay-agent", None);
-        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 1000).unwrap());
+        m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 1000).unwrap());
 
         // Seed with fast-decaying nodes with different embeddings (via arousal).
         for i in 0..3u32 {
@@ -2458,7 +2479,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut m = manager("dream-log-agent", None);
-        m.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
+        m.subsystems.l3_archive = Some(memory::L3Archive::open(&path, 4, 100).unwrap());
 
         // Cycle 1: L3 is empty → no walks, but report is still emitted.
         let report1 = m.run_sleep_cycle();
@@ -2505,11 +2526,11 @@ mod tests {
                 let prov = memory::Provenance::now(memory::SourceTier::L1, &format!("d{i}"));
                 l3.demote(item, prov).unwrap();
             }
-            m.l3_archive = Some(l3);
+            m.subsystems.l3_archive = Some(l3);
         }
 
         // Fix the seed and use a low threshold to maximise candidate yield.
-        m.dream_config = memory::DreamConfig {
+        m.sleep.dream_config = memory::DreamConfig {
             seed: 99,
             similarity_threshold: 0.0,
             ..Default::default()
@@ -2520,7 +2541,7 @@ mod tests {
         let candidates1 = r1.outcomes[2].dream_candidates.clone();
 
         // Restore dream_config (run_sleep_cycle does not modify it).
-        m.dream_config = memory::DreamConfig {
+        m.sleep.dream_config = memory::DreamConfig {
             seed: 99,
             similarity_threshold: 0.0,
             ..Default::default()
@@ -2571,11 +2592,11 @@ mod tests {
                 memory::Provenance::now(memory::SourceTier::L1, "orth-b"),
             )
             .unwrap();
-            m.l3_archive = Some(l3);
+            m.subsystems.l3_archive = Some(l3);
         }
 
         // High threshold → orthogonal nodes (similarity 0) are filtered.
-        m.dream_config = memory::DreamConfig {
+        m.sleep.dream_config = memory::DreamConfig {
             similarity_threshold: 0.9,
             num_walks: 4,
             walk_length: 4,
@@ -2603,7 +2624,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut m = manager("compile-log-agent", None);
-        m.compilation_config = Some(memory::CompilationConfig {
+        m.sleep.compilation_config = Some(memory::CompilationConfig {
             output_dir: dir.clone(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,
@@ -2654,7 +2675,7 @@ mod tests {
             response: "2".into(),
         });
 
-        m.compilation_config = Some(memory::CompilationConfig {
+        m.sleep.compilation_config = Some(memory::CompilationConfig {
             output_dir: dir.clone(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,
@@ -2869,7 +2890,7 @@ mod tests {
     fn consolidation_disabled_by_default() {
         let m = manager("agent-no-consolidation", Some(1));
         assert!(!m.consolidation_enabled());
-        assert!(m.consolidation_config.is_none());
+        assert!(m.sleep.consolidation_config.is_none());
     }
 
     #[cfg(feature = "std")]
@@ -2925,7 +2946,7 @@ mod tests {
             response: "4".into(),
         });
 
-        m.compilation_config = Some(memory::CompilationConfig {
+        m.sleep.compilation_config = Some(memory::CompilationConfig {
             output_dir: dir.clone(),
             formats: vec![memory::TrainingFormat::Alpaca],
             append: false,

@@ -5098,7 +5098,7 @@ pub(crate) fn cmd_serve() {
     .with_tier_backends(tier_backends);
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
-    manager.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
+    manager.subsystems.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
 
     // E3.8 → E8: persist the sleep-phase training corpus so the containerised
     // trainer (`trainer/sleep_phase.py`, sharing the ~/.anima volume) can
@@ -5110,7 +5110,7 @@ pub(crate) fn cmd_serve() {
         format!("{home}/.anima/training_corpus")
     });
     if corpus_dir != "off" {
-        manager.compilation_config = Some(memory::CompilationConfig {
+        manager.sleep.compilation_config = Some(memory::CompilationConfig {
             output_dir: std::path::PathBuf::from(&corpus_dir),
             formats: vec![
                 memory::TrainingFormat::Alpaca,
