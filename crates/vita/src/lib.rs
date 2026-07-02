@@ -738,107 +738,8 @@ impl LifecycleManager {
             self.audit.push(AuditEntry::SleepEntered {
                 agent_id: self.agent_id.clone(),
             });
-            let agent_id = self.agent_id.clone();
-            let elapsed = self.pruning_elapsed;
-
-            // Replay context (E3.6): immutable borrow of l3_archive.
-            #[cfg(feature = "std")]
-            let replay_ctx = self.l3_archive.as_ref().map(|l3| sleep::ReplayContext {
-                l3,
-                config: self.replay_config.clone(),
-            });
-
-            // Dream context (E3.7): immutable borrow of l3_archive.
-            #[cfg(feature = "std")]
-            let dream_ctx = self.l3_archive.as_ref().map(|l3| DreamContext {
-                l3,
-                config: self.dream_config.clone(),
-            });
-
-            // Compilation context (E3.8): convert audit entries to trace entries.
-            // We collect them into an owned Vec so that the CompilationContext borrow
-            // lives long enough for the duration of run_maintenance_audited.
-            #[cfg(feature = "std")]
-            let trace_entries: Vec<AuditTraceEntry> = self
-                .audit
-                .entries()
-                .iter()
-                .map(audit_entry_to_trace)
-                .collect();
-            #[cfg(feature = "std")]
-            let compilation_ctx = self
-                .compilation_config
-                .as_ref()
-                .map(|cfg| CompilationContext {
-                    entries: &trace_entries,
-                    config: cfg.clone(),
-                });
-
-            // Pruning context (E3.5): mutable borrow of l1_memory — compatible
-            // because all other borrows above target different fields (l3_archive).
-            let ctx = PruningContext {
-                l1: &mut self.l1_memory,
-                elapsed,
-                floor: None,
-            };
-            #[cfg(feature = "std")]
-            let report = sleep::run_maintenance_audited(
-                &agent_id,
-                &mut self.audit,
-                Some(ctx),
-                replay_ctx,
-                dream_ctx,
-                compilation_ctx,
-            );
-            // no_std: only the pruning phase carries a context — the replay /
-            // dream / compilation phases run as audited no-ops in the kernel.
-            #[cfg(not(feature = "std"))]
-            let report = sleep::run_maintenance_audited(&agent_id, &mut self.audit, Some(ctx));
-
-            // E2.6: Demote evicted L1 nodes to L3 archive if present.
-            #[cfg(feature = "std")]
-            if let Some(l3) = self.l3_archive.as_mut() {
-                if let Some(outcome) = report.outcomes.first() {
-                    for (key, node) in &outcome.evicted_l1_nodes {
-                        let id = self.next_archive_id;
-                        self.next_archive_id += 1;
-                        let item = memory::archive_memory_node(id, key, node);
-                        let prov = memory::Provenance::now(memory::SourceTier::L1, key.as_str());
-                        if let Err(e) = l3.demote(item, prov) {
-                            // Don't silently drop the memory: a full archive (or
-                            // any demote error) is operationally significant, so
-                            // surface it instead of swallowing the Result.
-                            eprintln!(
-                                "anima-vita: L3 demote failed for L1 node '{key}': {e} \
-                                 (memory not archived)"
-                            );
-                        }
-                    }
-                }
-            }
-
-            // E3.6: Re-insert rollback nodes from GenerativeReplay into L1.
-            if let Some(replay_outcome) = report.outcomes.get(1) {
-                for (key, node) in &replay_outcome.replay_rollback_nodes {
-                    self.l1_memory.insert(key.clone(), node.clone());
-                }
-            }
-
-            // E11 S11.5: Dreaming-phase self-improvement reflection.  No-op
-            // unless a skill registry is installed and episodes are buffered.
-            #[cfg(feature = "std")]
-            let _ = self.run_dreaming_reflection();
-
-            // E8 S8.4.3: Sleep-cycle consolidation hook (PolicyCompilation → fine-tune).
-            #[cfg(feature = "std")]
-            if self.consolidation_config.is_some() {
-                let pairs = report
-                    .outcomes
-                    .get(3)
-                    .map(|o| o.compiled_pairs.clone())
-                    .unwrap_or_default();
-                self.run_consolidation_hook(&pairs);
-            }
+            // Same maintenance + post-processing as run_sleep_cycle (VITA-7).
+            let _ = self.run_maintenance_and_postprocess();
         }
         Ok(())
     }
@@ -868,6 +769,16 @@ impl LifecycleManager {
     /// The `PolicyCompilation` phase compiles audit traces into training pairs
     /// when a `compilation_config` is set (E3.8).
     pub fn run_sleep_cycle(&mut self) -> SleepMaintenanceReport {
+        self.run_maintenance_and_postprocess()
+    }
+
+    /// Runs the sleep maintenance phases and post-processing shared by
+    /// [`run_sleep_cycle`](Self::run_sleep_cycle) and
+    /// [`transition_to_sleep_state`](Self::transition_to_sleep_state) (VITA-7):
+    /// build the replay/dream/compilation contexts, run the audited maintenance,
+    /// demote evicted L1 nodes to L3, re-insert replay rollbacks, run dreaming
+    /// reflection, and fire the consolidation hook. Returns the report.
+    fn run_maintenance_and_postprocess(&mut self) -> SleepMaintenanceReport {
         let agent_id = self.agent_id.clone();
         let elapsed = self.pruning_elapsed;
 
