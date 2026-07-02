@@ -90,7 +90,7 @@ use alerts::{
     AlertCondition, AlertRule, AlertRuleRegistry, AlertSeverity, ComparisonOp, MetricField,
 };
 use knowledge_graph::{Entity, EntityKind, KnowledgeGraph, Relation, RelationKind};
-use metrics::{aggregate, render_prometheus, render_text_report};
+use metrics::{aggregate, registry_from_audit, render_text_report};
 use vita::gate::Gate;
 use vita::{
     record_gate_decision, somatic_execution_loop, AuditEntry, AuditLog, EventFeatures,
@@ -3682,6 +3682,11 @@ fn cmd_metrics(args: &[String]) {
     };
 
     let m = aggregate(window);
+    // Render the Prometheus dump now, while `window` is still borrowed, through
+    // the same MetricRegistry the console `/metrics` endpoint uses — so the CLI
+    // dump and the scraped endpoint share one schema (OPS-9). Computed before
+    // the `log.push` below (which needs `&mut log`) ends the `window` borrow.
+    let prometheus_dump = registry_from_audit(window).render();
 
     // Record a MetricsSnapshot into the audit trail.
     log.push(vita::audit::AuditEntry::MetricsSnapshot {
@@ -3707,7 +3712,7 @@ fn cmd_metrics(args: &[String]) {
             println!("{json}");
         }
         "prometheus" | "prom" => {
-            print!("{}", render_prometheus(&m));
+            print!("{prometheus_dump}");
         }
         _ => {
             print!("{}", render_text_report(&m));

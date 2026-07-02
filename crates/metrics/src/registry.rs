@@ -1,7 +1,9 @@
-#![forbid(unsafe_code)]
-//! # AnimaOS Metrics — Epic E21
+//! # Prometheus metric registry (E21)
 //!
-//! Prometheus-compatible metrics export for the AnimaOS runtime.
+//! Stateful, incremental Prometheus-compatible metrics export for the AnimaOS
+//! runtime. Merged in from the former `metrics-endpoint` crate so there is a
+//! single metrics implementation (OPS-9); the console's `/metrics` endpoint and
+//! the hosted `metrics --prometheus` dump both render through this registry.
 //!
 //! The [`MetricRegistry`] accumulates counters, gauges, and histogram
 //! observations derived from [`vita::AuditEntry`] events.  Callers feed it

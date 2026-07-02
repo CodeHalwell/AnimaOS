@@ -20,8 +20,10 @@
 
 pub mod aggregator;
 pub mod prometheus;
+pub mod registry;
 pub mod reporter;
 
 pub use aggregator::{aggregate, AgentMetrics};
 pub use prometheus::render_prometheus;
+pub use registry::{registry_from_audit, HistogramData, MetricRegistry, Sample};
 pub use reporter::render_text_report;

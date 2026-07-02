@@ -29,7 +29,6 @@ members = [
   "crates/tool-cache",
   "crates/knowledge-graph",
   "crates/metrics",
-  "crates/metrics-endpoint",
   "crates/alerts",
   "crates/webhooks",
   "crates/diagnostics",

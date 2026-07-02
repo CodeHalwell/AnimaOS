@@ -15,5 +15,5 @@ senses = { path = "../senses" }
 interoception = { path = "../interoception" }
 vita = { path = "../vita" }
 lifecycle = { path = "../lifecycle" }
-metrics-endpoint = { path = "../metrics-endpoint" }
+metrics = { path = "../metrics" }
 serde_json = { workspace = true }

@@ -43,7 +43,7 @@ anima-os/
 │   ├── users/                 # E17 — per-user identity, trust tiers
 │   │
 │   │ # ── Operational wave (E18–E30) ───────────────────────────────────
-│   ├── quota/ metrics/ config/ metrics-endpoint/ sessions/ consent/
+│   ├── quota/ metrics/ config/ sessions/ consent/
 │   ├── feedback/ analytics/ tool-cache/ knowledge-graph/ alerts/
 │   ├── webhooks/ diagnostics/
 │   │

@@ -30,7 +30,7 @@ context.
 
 ```
 AnimaOS/
-├── Cargo.toml              # Root workspace (35 crates + kernels/hosted + llm-backends)
+├── Cargo.toml              # Root workspace (34 crates + kernels/hosted + llm-backends)
 ├── crates/                 # Library crates, grouped in layers (see below)
 ├── kernels/
 │   ├── hosted/             # `anima-hosted` Linux-process binary — DEV/CI ONLY (stable Rust)
@@ -59,7 +59,8 @@ AnimaOS/
   `console` (operator console).
 - **Autonomy layer (E7–E17):** `actuators`, `finetune`, `comms`, `skills`,
   `motivation`, `constitution`, `lifecycle`, `users`.
-- **Operational wave (E18–E30):** `quota`, `metrics`, `metrics-endpoint`,
+- **Operational wave (E18–E30):** `quota`, `metrics` (Prometheus aggregator +
+  registry; the former `metrics-endpoint` crate was merged in),
   `config`, `sessions`, `consent`, `feedback`, `analytics`, `tool-cache`,
   `knowledge-graph`, `alerts`, `webhooks`, `diagnostics`.
 - **Multi-tenancy & scheduling (E31–E32):** `workspace`, `jobs`.

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use console_proto::OperatorEvent;
 use interoception::{InteroceptiveSignals, SignalPublisher};
-use metrics_endpoint::MetricRegistry;
+use metrics::MetricRegistry;
 
 /// How many recent events a freshly-connected client is replayed.
 const REPLAY_CAPACITY: usize = 256;

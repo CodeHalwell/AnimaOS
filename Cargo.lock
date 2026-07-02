@@ -343,7 +343,7 @@ dependencies = [
  "console-proto",
  "interoception",
  "lifecycle",
- "metrics-endpoint",
+ "metrics",
  "senses",
  "serde_json",
  "vita",
@@ -1533,13 +1533,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "vita",
-]
-
-[[package]]
-name = "metrics-endpoint"
-version = "0.1.0"
-dependencies = [
  "vita",
 ]
 
