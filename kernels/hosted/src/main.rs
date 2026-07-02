@@ -5819,119 +5819,122 @@ fn main() {
     }));
 
     // ── Subcommand dispatch ───────────────────────────────────────────────────
+    // A single `match` over the leading argument routes every subcommand. Arms
+    // that handle a command run it and `cli_exit()` (which diverges, so they
+    // unify with the fall-through arms); `demo`/no-argument fall through to the
+    // two-agent demo below, and an unrecognised command exits 2. `rest` is the
+    // argument tail passed to each handler — `get(1..)` keeps it panic-free when
+    // no subcommand was supplied.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("why") {
-        cmd_why();
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("identity") {
-        cmd_identity(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("skills") {
-        cmd_skills(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("tools") {
-        cmd_tools(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("ask")
-        || args.first().map(String::as_str) == Some("cortex")
-    {
-        cmd_ask(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("serve") {
-        cmd_serve();
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("digest") {
-        cmd_digest(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("snapshot") {
-        cmd_snapshot(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("replay") {
-        cmd_replay(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("users") {
-        cmd_users(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("workspace") {
-        cmd_workspace(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("jobs") {
-        cmd_jobs(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("doctor") {
-        let report = doctor::run_doctor();
-        doctor::print_report(&report);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("init") {
-        let non_interactive = args.iter().any(|a| a == "--non-interactive");
-        let reset = args.iter().any(|a| a == "--reset");
-        init::run_init("anima", non_interactive, reset);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("quota") {
-        cmd_quota(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("config") {
-        cmd_config(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("sessions") {
-        cmd_sessions(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("data") {
-        cmd_data(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("feedback") {
-        cmd_feedback(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("stats") {
-        cmd_stats(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("cache") {
-        cmd_cache(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("graph") {
-        cmd_graph(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("metrics") {
-        cmd_metrics(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("alert") {
-        cmd_alert(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("webhook") {
-        cmd_webhook(&args[1..]);
-        cli_exit();
-    }
-    if args.first().map(String::as_str) == Some("diagnose") {
-        cmd_diagnose(&args[1..]);
-        cli_exit();
-    }
-
-    // ── help / demo / unknown-command handling ───────────────────────────────
+    let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
+        Some("why") => {
+            cmd_why();
+            cli_exit();
+        }
+        Some("identity") => {
+            cmd_identity(rest);
+            cli_exit();
+        }
+        Some("skills") => {
+            cmd_skills(rest);
+            cli_exit();
+        }
+        Some("tools") => {
+            cmd_tools(rest);
+            cli_exit();
+        }
+        Some("ask") | Some("cortex") => {
+            cmd_ask(rest);
+            cli_exit();
+        }
+        Some("serve") => {
+            cmd_serve();
+            cli_exit();
+        }
+        Some("digest") => {
+            cmd_digest(rest);
+            cli_exit();
+        }
+        Some("snapshot") => {
+            cmd_snapshot(rest);
+            cli_exit();
+        }
+        Some("replay") => {
+            cmd_replay(rest);
+            cli_exit();
+        }
+        Some("users") => {
+            cmd_users(rest);
+            cli_exit();
+        }
+        Some("workspace") => {
+            cmd_workspace(rest);
+            cli_exit();
+        }
+        Some("jobs") => {
+            cmd_jobs(rest);
+            cli_exit();
+        }
+        Some("doctor") => {
+            let report = doctor::run_doctor();
+            doctor::print_report(&report);
+            cli_exit();
+        }
+        Some("init") => {
+            let non_interactive = args.iter().any(|a| a == "--non-interactive");
+            let reset = args.iter().any(|a| a == "--reset");
+            init::run_init("anima", non_interactive, reset);
+            cli_exit();
+        }
+        Some("quota") => {
+            cmd_quota(rest);
+            cli_exit();
+        }
+        Some("config") => {
+            cmd_config(rest);
+            cli_exit();
+        }
+        Some("sessions") => {
+            cmd_sessions(rest);
+            cli_exit();
+        }
+        Some("data") => {
+            cmd_data(rest);
+            cli_exit();
+        }
+        Some("feedback") => {
+            cmd_feedback(rest);
+            cli_exit();
+        }
+        Some("stats") => {
+            cmd_stats(rest);
+            cli_exit();
+        }
+        Some("cache") => {
+            cmd_cache(rest);
+            cli_exit();
+        }
+        Some("graph") => {
+            cmd_graph(rest);
+            cli_exit();
+        }
+        Some("metrics") => {
+            cmd_metrics(rest);
+            cli_exit();
+        }
+        Some("alert") => {
+            cmd_alert(rest);
+            cli_exit();
+        }
+        Some("webhook") => {
+            cmd_webhook(rest);
+            cli_exit();
+        }
+        Some("diagnose") => {
+            cmd_diagnose(rest);
+            cli_exit();
+        }
         Some("help") | Some("--help") | Some("-h") => {
             print_cli_help();
             cli_exit();
