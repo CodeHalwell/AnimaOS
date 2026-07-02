@@ -135,31 +135,31 @@ impl FinancialBudgetSensor {
     /// epoch.  Use `std::time::SystemTime::UNIX_EPOCH.elapsed()` or a
     /// monotonic approximation in production; use a fixed constant in tests.
     pub fn record_spend(&mut self, provider: &str, tokens: u64, model: &str, timestamp_ns: u64) {
-        // Prune stale records (any day other than the current UTC day) before
-        // appending.  `spend_usd_on_day` only sums records from today, so
-        // historical records accumulate unused and would cause O(N) growth.
+        // Bound the ledger by record count rather than pruning to a single
+        // "current day" (CORE-5). A day anchor is fundamentally fragile with
+        // only per-record timestamps: an out-of-order (older) record from NTP
+        // skew must not wipe today's spend, yet a *future*-dated record (clock
+        // skew or replayed provider usage) must not become a permanent max-day
+        // anchor either — otherwise every later real-day record prunes away the
+        // prior same-day spend, and `financial_budget_scalar` silently
+        // undercounts and resets the daily budget toward 1.0.
         //
-        // Prune against the most recent day observed — either the incoming
-        // record's day or the newest already in the ledger — never the raw
-        // incoming day. An out-of-order (older) timestamp from NTP skew or a
-        // batched replay must not wipe the current day's spend and silently
-        // reset the daily budget (CORE-5).
-        const DAY_NS: u64 = 86_400_000_000_000;
-        let incoming_day = timestamp_ns / DAY_NS;
-        let current_day = self
-            .ledger
-            .iter()
-            .map(|r| r.timestamp_ns / DAY_NS)
-            .max()
-            .map_or(incoming_day, |newest| newest.max(incoming_day));
-        self.ledger
-            .retain(|r| r.timestamp_ns / DAY_NS == current_day);
+        // Since `spend_usd_on_day` already filters by exact UTC day, the ledger
+        // only needs a size bound. A lone skewed record then occupies a single
+        // slot instead of corrupting the accounting; `MAX_LEDGER` sits far above
+        // any realistic day's spend events, so today's records are never evicted
+        // by an outlier.
+        const MAX_LEDGER: usize = 10_000;
         self.ledger.push(SpendRecord {
             provider: provider.to_owned(),
             tokens,
             model: model.to_owned(),
             timestamp_ns,
         });
+        if self.ledger.len() > MAX_LEDGER {
+            let overflow = self.ledger.len() - MAX_LEDGER;
+            self.ledger.drain(0..overflow);
+        }
     }
 
     /// Returns the total API spend in USD for the UTC day that contains
@@ -287,6 +287,28 @@ mod tests {
         assert!(
             (scalar - 0.5).abs() < 1e-5,
             "day-5 spend must survive an out-of-order day-4 record, got {scalar}"
+        );
+    }
+
+    #[test]
+    fn future_dated_record_does_not_drop_todays_spend() {
+        let mut sensor = sensor_at_ten_dollars_per_million();
+        // Real day 5: two $2.50 charges.
+        sensor.record_spend("anthropic", 250_000, "model", ts(5, 8));
+        sensor.record_spend("anthropic", 250_000, "model", ts(5, 9));
+        // A future-dated record (clock skew / replayed provider usage) arrives.
+        sensor.record_spend("anthropic", 250_000, "model", ts(100, 0));
+        // A subsequent legitimate day-5 record must still accumulate: the future
+        // record must not have become a pruning anchor that dropped the earlier
+        // day-5 spend (CORE-5).
+        sensor.record_spend("anthropic", 250_000, "model", ts(5, 10));
+        // Day-5 spend = $7.50 of the $10 limit → 0.25 remaining. If the future
+        // record had pinned the anchor, earlier day-5 records would be pruned and
+        // the scalar would wrongly climb back toward 1.0.
+        let scalar = sensor.financial_budget_scalar(ts(5, 12));
+        assert!(
+            (scalar - 0.25).abs() < 1e-5,
+            "day-5 spend must survive a future-dated record, got {scalar}"
         );
     }
 
