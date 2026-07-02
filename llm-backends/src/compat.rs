@@ -306,16 +306,20 @@ impl OpenAiCompatibleBackend {
             body["tool_choice"] = serde_json::Value::String("auto".to_string());
         }
 
-        let mut request = self
-            .agent
-            .post(self.chat_endpoint())
-            .header("Content-Type", "application/json");
-
-        if let Some(key) = &self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {key}").as_str());
-        }
-
-        let response = request.send(body.to_string()).map_err(|e| {
+        // Rebuild + send inside the retry closure so a transient connect/429/5xx
+        // failure is retried with backoff instead of aborting the task (IO-2).
+        let body_str = body.to_string();
+        let response = crate::retry::with_retry(&crate::retry::RetryPolicy::default(), || {
+            let mut request = self
+                .agent
+                .post(self.chat_endpoint())
+                .header("Content-Type", "application/json");
+            if let Some(key) = &self.config.api_key {
+                request = request.header("Authorization", format!("Bearer {key}").as_str());
+            }
+            request.send(body_str.clone())
+        })
+        .map_err(|e| {
             LlmBackendError::Provider(format!("{}: request failed: {e}", self.config.id))
         })?;
 
@@ -476,8 +480,14 @@ impl LlmBackend for OpenAiCompatibleBackend {
                     let msg = ChatMessage::user(prompt);
                     let resp = self.live_chat_complete(&[msg], &[], cancel)?;
                     let mut events = Vec::new();
-                    if !resp.content.is_empty() {
-                        events.push(StreamingCompletion::Token(resp.content));
+                    // Emit word-level chunks rather than the whole answer as a
+                    // single token, so the scheduler's per-token accounting and
+                    // budget approximate the real length instead of counting the
+                    // entire response as one token (IO-4). `split_inclusive`
+                    // keeps the trailing spaces so the chunks concatenate back to
+                    // the exact content.
+                    for chunk in resp.content.split_inclusive(' ') {
+                        events.push(StreamingCompletion::Token(chunk.to_string()));
                     }
                     events.push(StreamingCompletion::Done);
                     Ok(events)

@@ -132,11 +132,16 @@ impl LlmBackend for OllamaBackend {
             // ureq 3.x: `.header(..)` replaces `.set(..)`, and `.send(..)`
             // takes any `AsSendBody` (here the serialized JSON string) in
             // place of `.send_string(..)`.
-            let mut response = self
-                .agent
-                .post(self.endpoint())
-                .header("Content-Type", "application/json")
-                .send(body.to_string())
+            // Retry the connection/send on transient failures (IO-2); the
+            // streamed body below is read once and is not retried mid-stream.
+            let body_str = body.to_string();
+            let mut response =
+                crate::retry::with_retry(&crate::retry::RetryPolicy::default(), || {
+                    self.agent
+                        .post(self.endpoint())
+                        .header("Content-Type", "application/json")
+                        .send(body_str.clone())
+                })
                 .map_err(|e| LlmBackendError::Provider(format!("ollama request failed: {e}")))?;
 
             // `body_mut().as_reader()` is the streaming, unbounded equivalent
