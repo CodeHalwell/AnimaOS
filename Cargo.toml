@@ -27,6 +27,7 @@ members = [
   "crates/feedback",
   "crates/analytics",
   "crates/tool-cache",
+  "crates/jsonstore",
   "crates/knowledge-graph",
   "crates/metrics",
   "crates/alerts",

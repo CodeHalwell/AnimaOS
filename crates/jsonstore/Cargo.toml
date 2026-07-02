@@ -1,0 +1,11 @@
+[package]
+name = "jsonstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared JSON-persistence helpers (safe state dir + atomic write) for AnimaOS stores."
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

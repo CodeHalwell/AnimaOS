@@ -296,22 +296,14 @@ impl KnowledgeGraph {
         };
         let json =
             serde_json::to_string_pretty(&snap).map_err(|e| GraphError::Io(e.to_string()))?;
-        let tmp = path.with_extension("tmp");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| GraphError::Io(e.to_string()))?;
-        }
-        std::fs::write(&tmp, json.as_bytes()).map_err(|e| GraphError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| GraphError::Io(e.to_string()))?;
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| GraphError::Io(e.to_string()))?;
         Ok(())
     }
 
     /// Default backing-file path: `~/.anima/<agent_id>/knowledge_graph.json`.
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("knowledge_graph.json")
+        jsonstore::agent_state_path(agent_id, "knowledge_graph.json")
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────

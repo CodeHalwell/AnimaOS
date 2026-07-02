@@ -6,6 +6,7 @@ license.workspace = true
 description = "Response quality tracking and user feedback collection for AnimaOS — Epic E24."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

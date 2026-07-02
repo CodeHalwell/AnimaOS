@@ -320,6 +320,7 @@ dependencies = [
 name = "config"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -787,6 +788,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 name = "feedback"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1371,6 +1373,7 @@ dependencies = [
 name = "jobs"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -1399,9 +1402,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonstore"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "knowledge-graph"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -2239,6 +2250,7 @@ dependencies = [
 name = "sessions"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",
@@ -3257,6 +3269,7 @@ dependencies = [
 name = "webhooks"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3460,6 +3473,7 @@ dependencies = [
 name = "workspace"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",

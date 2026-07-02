@@ -149,13 +149,7 @@ impl WebhookRegistry {
     /// Default path for an agent's webhook registry:
     /// `~/.anima/<agent_id>/webhook_endpoints.json`.
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("webhook_endpoints.json")
+        jsonstore::agent_state_path(agent_id, "webhook_endpoints.json")
     }
 
     /// Register a new endpoint.  Returns `AlreadyExists` if an endpoint with
@@ -229,14 +223,10 @@ impl WebhookRegistry {
         let Some(path) = &self.path else {
             return Ok(()); // in-memory — nothing to write
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| RegistryError::Io(e.to_string()))?;
-        }
         let json = serde_json::to_string_pretty(&self.store)
             .map_err(|e| RegistryError::Io(e.to_string()))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &json).map_err(|e| RegistryError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| RegistryError::Io(e.to_string()))?;
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
         Ok(())
     }
 }

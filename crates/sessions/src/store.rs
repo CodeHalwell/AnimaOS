@@ -167,11 +167,8 @@ impl SessionStore {
     ///
     /// `~/.anima/<agent_id>/sessions.json`
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("sessions.json")
+        // Shared safe state dir (never /tmp) so all stores agree (OPS-13).
+        jsonstore::agent_state_path(agent_id, "sessions.json")
     }
 
     // ── persistence ───────────────────────────────────────────────────────────
@@ -190,12 +187,8 @@ impl SessionStore {
         };
         let json =
             serde_json::to_string_pretty(&file).map_err(|e| SessionError::Io(e.to_string()))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| SessionError::Io(e.to_string()))?;
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &json).map_err(|e| SessionError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| SessionError::Io(e.to_string()))?;
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| SessionError::Io(e.to_string()))?;
         Ok(())
     }
 

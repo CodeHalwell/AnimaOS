@@ -51,11 +51,7 @@ pub struct FeedbackStore {
 impl FeedbackStore {
     /// Default path: `~/.anima/<agent_id>/feedback.json`
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("feedback.json")
+        jsonstore::agent_state_path(agent_id, "feedback.json")
     }
 
     /// Opens an existing store file or creates an empty one.
@@ -135,20 +131,14 @@ impl FeedbackStore {
             None => return Ok(()),
         };
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| StoreError::Io(e.to_string()))?;
-        }
-
         let file = StoreFile {
             schema_version: 1,
             records: self.records.clone(),
         };
         let json = serde_json::to_string_pretty(&file)
             .map_err(|e| StoreError::Io(format!("serialise: {e}")))?;
-
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).map_err(|e| StoreError::Io(format!("write tmp: {e}")))?;
-        std::fs::rename(&tmp, path).map_err(|e| StoreError::Io(format!("rename: {e}")))?;
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| StoreError::Io(format!("persist: {e}")))?;
         Ok(())
     }
 }

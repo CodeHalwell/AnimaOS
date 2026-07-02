@@ -6,6 +6,7 @@ license.workspace = true
 description = "Structured entity and relationship graph for AnimaOS — Epic E27."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
