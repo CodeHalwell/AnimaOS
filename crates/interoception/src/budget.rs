@@ -14,29 +14,18 @@
 //!
 //! ## Design
 //!
-//! The sensor maintains an in-process ledger of spend records. The caller
-//! supplies token counts and model names; the sensor applies its cost table
-//! to derive USD amounts. This keeps the crate free of network I/O while
+//! The sensor aggregates spend into per-UTC-day USD totals. The caller supplies
+//! token counts and model names; the sensor applies its cost table to derive USD
+//! amounts at record time. Aggregating — rather than retaining individual spend
+//! events — bounds memory by the number of distinct days, never drops same-day
+//! spend (no per-event cap to overflow), and keeps a stray out-of-order or
+//! future-dated timestamp confined to its own day bucket instead of corrupting
+//! the active day (CORE-5). This keeps the crate free of network I/O while
 //! remaining useful for real workloads.
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
-
-// ── Spend record ──────────────────────────────────────────────────────────────
-
-/// A single API spend event recorded by the caller.
-#[derive(Debug, Clone)]
-pub struct SpendRecord {
-    /// Provider name (e.g. `"anthropic"`, `"openai"`).
-    pub provider: String,
-    /// Total tokens consumed (input + output combined).
-    pub tokens: u64,
-    /// Model name (e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`).
-    pub model: String,
-    /// Wall-clock timestamp in nanoseconds since the Unix epoch.
-    pub timestamp_ns: u64,
-}
+use std::collections::{BTreeMap, HashMap};
 
 // ── Cost table ────────────────────────────────────────────────────────────────
 
@@ -100,23 +89,32 @@ impl Default for BudgetConfig {
 
 /// Financial budget sensor (S5.7.2).
 ///
-/// Maintains an in-process spend ledger and derives the normalised
+/// Aggregates spend into per-UTC-day USD totals and derives the normalised
 /// `financial_budget` scalar for the Striatal Gate (E5.2) and the
 /// Thalamic Router (E5.3) modulation path (E5.7).
 #[derive(Debug, Clone)]
 pub struct FinancialBudgetSensor {
     config: BudgetConfig,
     costs: CostTable,
-    ledger: Vec<SpendRecord>,
+    /// Spend in USD keyed by UTC day (`timestamp_ns / DAY_NS`), aggregated at
+    /// record time. Bounded to the most recent [`Self::MAX_DAYS`] days.
+    daily_usd: BTreeMap<u64, f64>,
 }
 
 impl FinancialBudgetSensor {
+    /// Nanoseconds per UTC day (the day-bucket width).
+    const DAY_NS: u64 = 86_400_000_000_000;
+
+    /// Rolling retention window: a daily/monthly budget never needs older
+    /// history, so only the most recent `MAX_DAYS` day-buckets are kept.
+    const MAX_DAYS: usize = 90;
+
     /// Creates a sensor with the given budget config and cost table.
     pub fn new(config: BudgetConfig, costs: CostTable) -> Self {
         Self {
             config,
             costs,
-            ledger: Vec::new(),
+            daily_usd: BTreeMap::new(),
         }
     }
 
@@ -134,31 +132,28 @@ impl FinancialBudgetSensor {
     /// The caller must supply `timestamp_ns` as nanoseconds since the Unix
     /// epoch.  Use `std::time::SystemTime::UNIX_EPOCH.elapsed()` or a
     /// monotonic approximation in production; use a fixed constant in tests.
-    pub fn record_spend(&mut self, provider: &str, tokens: u64, model: &str, timestamp_ns: u64) {
-        // Bound the ledger by record count rather than pruning to a single
-        // "current day" (CORE-5). A day anchor is fundamentally fragile with
-        // only per-record timestamps: an out-of-order (older) record from NTP
-        // skew must not wipe today's spend, yet a *future*-dated record (clock
-        // skew or replayed provider usage) must not become a permanent max-day
-        // anchor either — otherwise every later real-day record prunes away the
-        // prior same-day spend, and `financial_budget_scalar` silently
-        // undercounts and resets the daily budget toward 1.0.
-        //
-        // Since `spend_usd_on_day` already filters by exact UTC day, the ledger
-        // only needs a size bound. A lone skewed record then occupies a single
-        // slot instead of corrupting the accounting; `MAX_LEDGER` sits far above
-        // any realistic day's spend events, so today's records are never evicted
-        // by an outlier.
-        const MAX_LEDGER: usize = 10_000;
-        self.ledger.push(SpendRecord {
-            provider: provider.to_owned(),
-            tokens,
-            model: model.to_owned(),
-            timestamp_ns,
-        });
-        if self.ledger.len() > MAX_LEDGER {
-            let overflow = self.ledger.len() - MAX_LEDGER;
-            self.ledger.drain(0..overflow);
+    ///
+    /// The event's USD cost is derived from the cost table at record time and
+    /// added to its UTC-day bucket. `provider` is accepted for call-site
+    /// symmetry but does not affect cost (the cost table is keyed by model).
+    pub fn record_spend(&mut self, _provider: &str, tokens: u64, model: &str, timestamp_ns: u64) {
+        // Aggregate into the day bucket rather than retaining individual events.
+        // This bounds memory by distinct days (not event volume, so a high-volume
+        // day can't overflow a per-event cap and undercount), and a stray
+        // out-of-order or future-dated timestamp simply lands in its own bucket
+        // instead of wiping the active day or pinning a fragile max-day pruning
+        // anchor (CORE-5).
+        let day = timestamp_ns / Self::DAY_NS;
+        let cost = self.costs.cost_usd(tokens, model);
+        *self.daily_usd.entry(day).or_insert(0.0) += cost;
+
+        // Retain only the most recent MAX_DAYS buckets. Pruning by day (never by
+        // event count) means no same-day spend is ever dropped.
+        while self.daily_usd.len() > Self::MAX_DAYS {
+            let Some(&oldest) = self.daily_usd.keys().next() else {
+                break;
+            };
+            self.daily_usd.remove(&oldest);
         }
     }
 
@@ -168,13 +163,8 @@ impl FinancialBudgetSensor {
     /// Day boundaries are midnight UTC, computed as integer division by
     /// 86 400 × 10⁹ (nanoseconds per day).
     pub fn spend_usd_on_day(&self, reference_ns: u64) -> f64 {
-        const DAY_NS: u64 = 86_400_000_000_000;
-        let day_bucket = reference_ns / DAY_NS;
-        self.ledger
-            .iter()
-            .filter(|r| r.timestamp_ns / DAY_NS == day_bucket)
-            .map(|r| self.costs.cost_usd(r.tokens, &r.model))
-            .sum()
+        let day = reference_ns / Self::DAY_NS;
+        self.daily_usd.get(&day).copied().unwrap_or(0.0)
     }
 
     /// Normalised financial budget scalar for the UTC day that contains
@@ -193,9 +183,9 @@ impl FinancialBudgetSensor {
         (1.0 - fraction_used) as f32
     }
 
-    /// Returns the number of spend records in the ledger.
+    /// Returns the number of distinct UTC days currently holding recorded spend.
     pub fn ledger_len(&self) -> usize {
-        self.ledger.len()
+        self.daily_usd.len()
     }
 
     /// Returns the budget configuration.
@@ -203,10 +193,9 @@ impl FinancialBudgetSensor {
         &self.config
     }
 
-    /// Clears all spend records for the current day (useful for testing or
-    /// for resetting the ledger at midnight).
+    /// Clears all recorded spend (useful for testing or for a manual reset).
     pub fn clear_ledger(&mut self) {
-        self.ledger.clear();
+        self.daily_usd.clear();
     }
 }
 
@@ -325,11 +314,45 @@ mod tests {
     }
 
     #[test]
-    fn record_spend_accumulates_in_ledger() {
-        let mut sensor = FinancialBudgetSensor::with_defaults();
-        sensor.record_spend("openai", 100, "gpt-4o", ts(0, 0));
-        sensor.record_spend("anthropic", 200, "claude-sonnet-4-6", ts(0, 1));
+    fn record_spend_aggregates_same_day_into_one_bucket() {
+        let mut sensor = sensor_at_ten_dollars_per_million();
+        sensor.record_spend("openai", 250_000, "model", ts(0, 0)); // $2.50
+        sensor.record_spend("anthropic", 250_000, "model", ts(0, 1)); // $2.50
+                                                                      // Two same-day events aggregate into a single day bucket…
+        assert_eq!(sensor.ledger_len(), 1);
+        // …and their spend accumulates exactly.
+        assert!((sensor.spend_usd_on_day(ts(0, 12)) - 5.0).abs() < 1e-9);
+        // A record on a different day opens a second bucket.
+        sensor.record_spend("openai", 250_000, "model", ts(1, 0));
         assert_eq!(sensor.ledger_len(), 2);
+    }
+
+    #[test]
+    fn high_volume_same_day_spend_is_not_capped() {
+        let mut sensor = sensor_at_ten_dollars_per_million();
+        // 20 000 tiny same-day charges — far past any plausible per-event cap.
+        // With per-day aggregation none are dropped, so the total is exact.
+        for _ in 0..20_000 {
+            sensor.record_spend("anthropic", 100, "model", ts(3, 6)); // $0.001 each
+        }
+        // 20 000 × $0.001 = $20 → over the $10 daily limit → clamped to 0.0.
+        assert_eq!(sensor.financial_budget_scalar(ts(3, 12)), 0.0);
+        assert_eq!(sensor.ledger_len(), 1, "all same-day spend in one bucket");
+    }
+
+    #[test]
+    fn old_days_are_pruned_beyond_the_retention_window() {
+        let mut sensor = sensor_at_ten_dollars_per_million();
+        // Record one event per day across more than the retention window.
+        for day in 0..(FinancialBudgetSensor::MAX_DAYS as u64 + 10) {
+            sensor.record_spend("anthropic", 100, "model", ts(day, 0));
+        }
+        // Memory stays bounded to the window…
+        assert_eq!(sensor.ledger_len(), FinancialBudgetSensor::MAX_DAYS);
+        // …keeping the most recent day and dropping the oldest.
+        let last = FinancialBudgetSensor::MAX_DAYS as u64 + 9;
+        assert!(sensor.spend_usd_on_day(ts(last, 12)) > 0.0);
+        assert_eq!(sensor.spend_usd_on_day(ts(0, 12)), 0.0);
     }
 
     #[test]

@@ -325,6 +325,11 @@ fn is_private_or_metadata_host(host: &str) -> bool {
 /// (`::ffff:a.b.c.d`). Returns `None` for genuine hostnames. The IPv6 brackets
 /// are already stripped by [`extract_host`].
 fn parse_host_ip(host: &str) -> Option<IpAddr> {
+    // Drop any RFC 6874 IPv6 zone identifier (`fe80::1%eth0`, URL-encoded
+    // `%25eth0`) before classification: the zone doesn't change the address's
+    // range, and `IpAddr::from_str` rejects zoned literals — which would
+    // otherwise let a link-local target slip through as an unparseable host.
+    let host = host.split('%').next().unwrap_or(host);
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Some(match ip {
             IpAddr::V6(v6) => v6
@@ -684,6 +689,7 @@ mod tests {
             "http://[::ffff:127.0.0.1]/", // IPv4-mapped IPv6 loopback
             "http://[::ffff:10.0.0.5]/",  // IPv4-mapped IPv6 private
             "http://0.0.0.0/",            // unspecified → localhost
+            "http://[fe80::1%25eth0]/",   // zoned link-local (RFC 6874)
         ] {
             assert!(
                 g.screen_network(url, "GET").is_vetoed(),
