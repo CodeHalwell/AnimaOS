@@ -60,15 +60,17 @@ A follow-up pass implemented the rest of the substantive backlog:
 | **OPS-6 / OPS-13** | New `jsonstore` crate (`state_dir()` safe fallback + `atomic_write()`) adopted across 7 stores; `jobs::record_run_result` now persists immediately. |
 | **VITA-7** | The two ~90-line sleep-maintenance methods share one `run_maintenance_and_postprocess()`. |
 
-**Still deferred** — two large maintainability-only refactors, each best done as a
-focused, separately-reviewed PR because they are high-churn/high-regression-risk with no
-functional change:
+### Third wave — the two large structural refactors (now done)
 
-- **KERN-9** — split the 7,519-line `kernels/hosted/src/main.rs` into a `commands/` module
-  per subcommand + a shared audit-view module (the 7 `print_*_audit` fns; `print_audit` was
-  verified free of private-helper coupling, so the extraction is clean, just voluminous).
-- **VITA-6** — regroup `LifecycleManager`'s ~30 fields into `Subsystems`/`SleepConfig`
-  structs (touches ~50 field-access sites). Its companion dedup (VITA-7) is done.
+The two high-churn, maintainability-only refactors that were previously carried as
+separate follow-ups are also landed. Both are behaviour-preserving (verified against
+the full 2100+-test workspace suite, clippy `-D warnings`, and both the hosted and
+microVM targets):
+
+| Finding | Fix |
+|---|---|
+| **KERN-9** | `kernels/hosted/src/main.rs` split 7,519 → 476 lines: the 7 `print_*_audit` fns moved to an `audit_view` module, the 24 `cmd_*` handlers to a `commands` module (reached via `use super::*`, so a pure relocation), and the 25-branch `if`-ladder dispatch collapsed into one `match`. `main.rs` is now a thin entry point. |
+| **VITA-6** | `LifecycleManager`'s field list regrouped into `SleepConfig` (7 sleep-phase knobs) and `Subsystems` (8 optional `Option<_>` capabilities), dropping the top-level struct from ~30 to 20 fields. External coupling was two write sites — the god-object was already well encapsulated behind its `enable_*`/`with_*` builders. |
 
 ---
 
