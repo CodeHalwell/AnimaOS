@@ -115,6 +115,28 @@ impl OpenAiCompatibleBackend {
 
     // ── Provider presets ──────────────────────────────────────────────────────
 
+    /// OpenAI — the hosted frontier API (`api.openai.com`). OpenAI speaks the
+    /// OpenAI-compatible chat/completions protocol this backend already
+    /// implements, so the live frontier OpenAI path reuses it directly (IO-1).
+    ///
+    /// Model and base URL are env-overridable (`ANIMA_OPENAI_MODEL`,
+    /// `ANIMA_OPENAI_URL`) so the default model tag does not rot in code.
+    pub fn openai(api_key: impl Into<String>) -> Self {
+        let model = std::env::var("ANIMA_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        let base_url = std::env::var("ANIMA_OPENAI_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let config = ProviderConfig {
+            id: "openai".to_string(),
+            base_url,
+            model,
+            api_key: Some(api_key.into()),
+            max_context_tokens: 128_000,
+            request_timeout: Duration::from_secs(120),
+            capabilities: BackendCapabilities::openai_compat(),
+        };
+        Self::live(config)
+    }
+
     /// vLLM — high-throughput OpenAI-compatible inference server.
     ///
     /// Reads: `ANIMA_VLLM_URL`, `ANIMA_VLLM_MODEL`, `ANIMA_VLLM_API_KEY`,

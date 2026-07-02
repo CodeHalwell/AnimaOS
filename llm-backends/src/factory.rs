@@ -131,6 +131,44 @@ impl BackendFactory {
         }
     }
 
+    /// Builds a backend for `kind`, selecting a **live** client for the frontier
+    /// providers when their API key is present, and a fixture otherwise (IO-1).
+    ///
+    /// This is the difference the review flagged: `fixture()` always returns a
+    /// canned-reply stub, so routing a configured `ANTHROPIC_API_KEY` through it
+    /// produced silent sentinel output. `resolve` uses the real client when the
+    /// key is set, and warns loudly when a frontier provider is selected without
+    /// a key rather than silently degrading to fixtures.
+    pub fn resolve(kind: BackendKind) -> Arc<dyn LlmBackend> {
+        match kind {
+            BackendKind::Anthropic => match std::env::var("ANTHROPIC_API_KEY") {
+                Ok(key) if !key.is_empty() => {
+                    let model = std::env::var("ANIMA_ANTHROPIC_MODEL")
+                        .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
+                    Arc::new(AnthropicBackend::live(model, key))
+                }
+                _ => {
+                    eprintln!(
+                        "llm-backends: Anthropic selected but ANTHROPIC_API_KEY is unset — \
+                         using fixture mode (no real completions)"
+                    );
+                    Arc::new(AnthropicBackend::new())
+                }
+            },
+            BackendKind::OpenAi => match std::env::var("OPENAI_API_KEY") {
+                Ok(key) if !key.is_empty() => Arc::new(OpenAiCompatibleBackend::openai(key)),
+                _ => {
+                    eprintln!(
+                        "llm-backends: OpenAI selected but OPENAI_API_KEY is unset — \
+                         using fixture mode (no real completions)"
+                    );
+                    Arc::new(OpenAiBackend::new())
+                }
+            },
+            other => BackendFactory::fixture(other),
+        }
+    }
+
     /// Constructs a backend from an operator-supplied [`ProviderConfig`] (E8 S8.0).
     ///
     /// Chooses fixture vs live mode based on `ANIMA_COMPAT_LIVE`.
@@ -256,6 +294,24 @@ impl TierBackendChoices {
             BackendFactory::fixture(self.cheap_local),
             BackendFactory::fixture(self.mid_tier),
             BackendFactory::fixture(self.frontier),
+        )
+    }
+
+    /// Materialise each tier choice, using a **live** client for a frontier
+    /// provider whose API key is present (IO-1) and fixtures otherwise.
+    ///
+    /// Returns `(cheap_local, mid_tier, frontier)`.
+    pub fn into_backends(
+        self,
+    ) -> (
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+    ) {
+        (
+            BackendFactory::resolve(self.cheap_local),
+            BackendFactory::resolve(self.mid_tier),
+            BackendFactory::resolve(self.frontier),
         )
     }
 }

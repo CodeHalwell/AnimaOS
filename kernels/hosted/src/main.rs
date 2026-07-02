@@ -6716,7 +6716,9 @@ fn cmd_serve() {
     // saved choices (overridable by ANIMA_{CHEAP,MID,FRONTIER}_BACKEND), then
     // install them so the somatic loop dispatches each task to the bound tier.
     let tier_choices = init::resolve_tier_choices(&agent_id);
-    let (cheap_b, mid_b, frontier_b) = tier_choices.clone().into_fixture_backends();
+    // Live-aware: a frontier tier bound to Anthropic/OpenAI uses the real client
+    // when its API key is set, and fixtures otherwise (IO-1).
+    let (cheap_b, mid_b, frontier_b) = tier_choices.clone().into_backends();
     let tier_backends = vita::TierBackends::new(
         Arc::clone(&cheap_b),
         Arc::clone(&mid_b),
