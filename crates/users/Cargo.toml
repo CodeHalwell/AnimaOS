@@ -6,6 +6,7 @@ license.workspace = true
 description = "Per-user identity, trust tiers, and consent model for AnimaOS — Epic E17."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

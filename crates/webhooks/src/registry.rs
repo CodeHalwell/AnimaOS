@@ -207,13 +207,29 @@ impl WebhookRegistry {
     /// If the file does not exist an empty registry is created.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RegistryError> {
         let path = path.as_ref().to_path_buf();
-        let store = if path.exists() {
+        let mut store: Store = if path.exists() {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| RegistryError::Io(e.to_string()))?;
             serde_json::from_str(&raw).map_err(|e| RegistryError::Io(e.to_string()))?
         } else {
             Store::default()
         };
+        // Re-validate persisted endpoints: a store written before URL validation
+        // existed — or edited on disk — must not smuggle an SSRF-unsafe target
+        // past the guard at dispatch time. Drop any endpoint whose URL fails
+        // validation so `endpoints_for_event()` can only ever surface safe URLs.
+        let before = store.endpoints.len();
+        store
+            .endpoints
+            .retain(|_, ep| validate_webhook_url(&ep.url).is_ok());
+        let dropped = before - store.endpoints.len();
+        if dropped > 0 {
+            eprintln!(
+                "webhooks: dropped {dropped} persisted endpoint(s) with SSRF-unsafe or \
+                 invalid URLs while loading {}",
+                path.display()
+            );
+        }
         Ok(WebhookRegistry {
             store,
             path: Some(path),
@@ -334,6 +350,32 @@ mod tests {
         r.register(ep("wh-1")).unwrap();
         assert_eq!(r.len(), 1);
         assert!(r.get("wh-1").is_some());
+    }
+
+    #[test]
+    fn open_drops_persisted_ssrf_unsafe_endpoints() {
+        // A store written before URL validation existed (or edited on disk) can
+        // hold an SSRF-unsafe endpoint — `register()` would reject it, but the
+        // load path must too, or it reaches the dispatcher after a restart.
+        let path = std::env::temp_dir().join(format!("anima-wh-open-{}.json", std::process::id()));
+        let mut store = Store::default();
+        store.endpoints.insert(
+            "bad".to_string(),
+            WebhookEndpoint::new("bad", "http://169.254.169.254/x", None, EventFilter::All),
+        );
+        store.endpoints.insert(
+            "ok".to_string(),
+            WebhookEndpoint::new("ok", "https://hooks.example.com/a", None, EventFilter::All),
+        );
+        std::fs::write(&path, serde_json::to_string(&store).unwrap()).unwrap();
+
+        let r = WebhookRegistry::open(&path).unwrap();
+        assert!(r.get("ok").is_some(), "safe endpoint must survive load");
+        assert!(
+            r.get("bad").is_none(),
+            "SSRF-unsafe persisted endpoint must be dropped on load"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

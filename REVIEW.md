@@ -108,6 +108,14 @@ call left to the maintainer):
 - **SSRF-helper dedup** — the host-canonicalization helpers are duplicated in
   `defence` and `webhooks`; a shared home (review theme E) would remove the
   drift risk.
+- **Remaining state-root stragglers** — the operational stores read by CLI
+  exports now route through `jsonstore::state_dir` (`sessions`, `users`,
+  `alerts`, `config`, `jobs`, `workspace`, `knowledge-graph`, `webhooks`,
+  `feedback`), so `ANIMA_STATE_DIR` relocates them together. `vita::identity`
+  and `lifecycle::snapshot` still resolve `$HOME/.anima` independently; they
+  weren't migrated here because `vita` is `no_std`-aware (a std-only `jsonstore`
+  dep must be feature-gated) and `snapshot::default_path` returns `Option`
+  (jsonstore always yields a path). Worth unifying, with that care.
 
 ---
 

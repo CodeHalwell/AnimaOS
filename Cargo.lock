@@ -70,6 +70,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 name = "anima-alerts"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "metrics",
  "serde",
  "serde_json",
@@ -2752,6 +2753,7 @@ dependencies = [
 name = "users"
 version = "0.1.0"
 dependencies = [
+ "jsonstore",
  "serde",
  "serde_json",
  "tempfile",

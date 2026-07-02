@@ -83,13 +83,13 @@ impl AlertRuleRegistry {
         }
     }
 
-    /// Default file path: `~/.anima/<agent_id>/alert_rules.json`.
+    /// Default file path: `<state_dir>/<agent_id>/alert_rules.json`.
+    ///
+    /// Routes through [`jsonstore::agent_state_path`] so the alert store shares
+    /// the one `ANIMA_STATE_DIR`-aware state root with every other per-agent
+    /// store rather than resolving `$HOME/.anima` independently (OPS-13).
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("alert_rules.json")
+        jsonstore::agent_state_path(agent_id, "alert_rules.json")
     }
 
     // ── Mutating API ──────────────────────────────────────────────────────────

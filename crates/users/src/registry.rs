@@ -91,15 +91,16 @@ pub struct UserRegistry {
 }
 
 impl UserRegistry {
-    /// Returns the default path for a given `agent_id`.
+    /// Returns the default path for a given `agent_id`:
+    /// `<state_dir>/<agent_id>/users.json`.
     ///
-    /// Path: `~/.anima/<agent_id>/users.json`
+    /// Routes through [`jsonstore::agent_state_path`] so the users store shares
+    /// the one state root (`ANIMA_STATE_DIR` → `$HOME`/`$USERPROFILE`/.anima →
+    /// `/var/lib/anima`) with every other per-agent store. Resolving it here
+    /// independently would leave a relocated deployment reading users from the
+    /// old root while sessions moved to the new one (OPS-13).
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("users.json")
+        jsonstore::agent_state_path(agent_id, "users.json")
     }
 
     /// Opens (or creates) a registry at `path`.
