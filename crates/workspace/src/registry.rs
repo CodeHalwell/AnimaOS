@@ -192,11 +192,7 @@ impl WorkspaceRegistry {
     ///
     /// Path: `~/.anima/<agent_id>/workspaces.json`
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("workspaces.json")
+        jsonstore::agent_state_path(agent_id, "workspaces.json")
     }
 
     /// Opens (or creates) a registry at `path`.
@@ -443,22 +439,14 @@ impl WorkspaceRegistry {
             None => return Ok(()),
         };
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| WorkspaceError::Io(e.to_string()))?;
-            }
-        }
-
         let file = RegistryFile {
             schema_version: 1,
             workspaces: self.workspaces.clone(),
         };
         let json =
             serde_json::to_string_pretty(&file).map_err(|e| WorkspaceError::Io(e.to_string()))?;
-
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| WorkspaceError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| WorkspaceError::Io(e.to_string()))
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| WorkspaceError::Io(e.to_string()))
     }
 }
 

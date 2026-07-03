@@ -115,6 +115,28 @@ impl OpenAiCompatibleBackend {
 
     // ── Provider presets ──────────────────────────────────────────────────────
 
+    /// OpenAI — the hosted frontier API (`api.openai.com`). OpenAI speaks the
+    /// OpenAI-compatible chat/completions protocol this backend already
+    /// implements, so the live frontier OpenAI path reuses it directly (IO-1).
+    ///
+    /// Model and base URL are env-overridable (`ANIMA_OPENAI_MODEL`,
+    /// `ANIMA_OPENAI_URL`) so the default model tag does not rot in code.
+    pub fn openai(api_key: impl Into<String>) -> Self {
+        let model = std::env::var("ANIMA_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        let base_url = std::env::var("ANIMA_OPENAI_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        let config = ProviderConfig {
+            id: "openai".to_string(),
+            base_url,
+            model,
+            api_key: Some(api_key.into()),
+            max_context_tokens: 128_000,
+            request_timeout: Duration::from_secs(120),
+            capabilities: BackendCapabilities::openai_compat(),
+        };
+        Self::live(config)
+    }
+
     /// vLLM — high-throughput OpenAI-compatible inference server.
     ///
     /// Reads: `ANIMA_VLLM_URL`, `ANIMA_VLLM_MODEL`, `ANIMA_VLLM_API_KEY`,
@@ -306,16 +328,20 @@ impl OpenAiCompatibleBackend {
             body["tool_choice"] = serde_json::Value::String("auto".to_string());
         }
 
-        let mut request = self
-            .agent
-            .post(self.chat_endpoint())
-            .header("Content-Type", "application/json");
-
-        if let Some(key) = &self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {key}").as_str());
-        }
-
-        let response = request.send(body.to_string()).map_err(|e| {
+        // Rebuild + send inside the retry closure so a transient connect/429/5xx
+        // failure is retried with backoff instead of aborting the task (IO-2).
+        let body_str = body.to_string();
+        let response = crate::retry::with_retry(&crate::retry::RetryPolicy::default(), || {
+            let mut request = self
+                .agent
+                .post(self.chat_endpoint())
+                .header("Content-Type", "application/json");
+            if let Some(key) = &self.config.api_key {
+                request = request.header("Authorization", format!("Bearer {key}").as_str());
+            }
+            request.send(body_str.clone())
+        })
+        .map_err(|e| {
             LlmBackendError::Provider(format!("{}: request failed: {e}", self.config.id))
         })?;
 
@@ -476,8 +502,14 @@ impl LlmBackend for OpenAiCompatibleBackend {
                     let msg = ChatMessage::user(prompt);
                     let resp = self.live_chat_complete(&[msg], &[], cancel)?;
                     let mut events = Vec::new();
-                    if !resp.content.is_empty() {
-                        events.push(StreamingCompletion::Token(resp.content));
+                    // Emit word-level chunks rather than the whole answer as a
+                    // single token, so the scheduler's per-token accounting and
+                    // budget approximate the real length instead of counting the
+                    // entire response as one token (IO-4). `split_inclusive`
+                    // keeps the trailing spaces so the chunks concatenate back to
+                    // the exact content.
+                    for chunk in resp.content.split_inclusive(' ') {
+                        events.push(StreamingCompletion::Token(chunk.to_string()));
                     }
                     events.push(StreamingCompletion::Done);
                     Ok(events)

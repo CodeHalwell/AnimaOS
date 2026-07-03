@@ -60,6 +60,8 @@ def _recv_frame(conn: socket.socket) -> dict[str, Any]:
     """Read one length-prefixed JSON frame from *conn*."""
     header = _recv_exact(conn, 4)
     length = struct.unpack(">I", header)[0]
+    if length > 64 * 1024 * 1024:  # sanity cap: 64 MiB (mirrors ipc.py) — INF-7
+        raise ValueError(f"frame too large: {length} bytes")
     body = _recv_exact(conn, length)
     return json.loads(body.decode("utf-8"))
 

@@ -212,7 +212,7 @@ impl GoalRegistry {
                 .iter()
                 .enumerate()
                 .filter(|(_, g)| g.completed)
-                .min_by(|(_, a), (_, b)| a.priority.partial_cmp(&b.priority).unwrap())
+                .min_by(|(_, a), (_, b)| a.priority.total_cmp(&b.priority))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             self.goals.remove(evict_idx);

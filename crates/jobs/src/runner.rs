@@ -152,6 +152,14 @@ pub fn record_run_result(
             job.status = JobStatus::Failed;
         }
     }
+
+    // Persist immediately so a crash between runs cannot lose the advanced
+    // last_run / retry state and re-fire (or forget) the job (OPS-6).
+    // Best-effort: an in-memory registry is a no-op, and a disk error is
+    // surfaced rather than fatal.
+    if let Err(e) = registry.flush() {
+        eprintln!("jobs: failed to persist job '{job_id}' after run: {e}");
+    }
 }
 
 fn is_one_shot(schedule: &JobSchedule) -> bool {

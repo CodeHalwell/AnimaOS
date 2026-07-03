@@ -45,11 +45,7 @@ impl AnimaConfig {
 
     /// Return the canonical default config path: `~/.anima/<agent_id>/anima.toml`.
     pub fn default_path(agent_id: &str) -> std::path::PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("anima.toml")
+        jsonstore::agent_state_path(agent_id, "anima.toml")
     }
 
     /// Validate the configuration, returning the first error found.

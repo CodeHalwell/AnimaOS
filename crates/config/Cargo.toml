@@ -6,6 +6,7 @@ license.workspace = true
 description = "Structured runtime configuration for AnimaOS — Epic E20."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = "1.1"

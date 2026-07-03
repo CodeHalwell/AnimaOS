@@ -6,6 +6,7 @@ license.workspace = true
 description = "Outbound webhook integration for AnimaOS — Epic E29."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { version = "0.11", default-features = false }

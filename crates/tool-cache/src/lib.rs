@@ -317,7 +317,10 @@ impl ToolCache {
     /// Returns `None` for bypassed tools, expired entries (which are removed), and
     /// genuine misses.
     pub fn get(&self, tool_id: &str, payload: &[u8]) -> Option<CacheEntry> {
-        self.inner.lock().unwrap().get(tool_id, payload)
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tool_id, payload)
     }
 
     /// Stores a response for `(tool_id, payload)`.
@@ -326,23 +329,26 @@ impl ToolCache {
     pub fn insert(&self, tool_id: &str, payload: &[u8], response: Vec<u8>) {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(tool_id, payload, response);
     }
 
     /// Removes all expired entries and returns how many were evicted.
     pub fn evict_expired(&self) -> usize {
-        self.inner.lock().unwrap().evict_expired()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .evict_expired()
     }
 
     /// Removes every entry from the cache.
     pub fn clear(&self) {
-        self.inner.lock().unwrap().clear();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Returns a point-in-time snapshot of cache statistics.
     pub fn stats(&self) -> CacheStats {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = inner.stats.clone();
         s.current_entries = inner.entries.len();
         s
@@ -350,7 +356,11 @@ impl ToolCache {
 
     /// Returns the current number of entries.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().entries.len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .len()
     }
 
     /// Returns `true` when the cache contains no entries.
@@ -428,7 +438,7 @@ impl CachedToolRegistry {
 
         // Check bypass first (avoids a lock on the inner cache).
         let bypassed = {
-            let inner = self.cache.inner.lock().unwrap();
+            let inner = self.cache.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.is_bypassed(tool_id)
         };
         if bypassed {

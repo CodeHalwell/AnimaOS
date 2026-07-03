@@ -40,7 +40,7 @@ pub mod signals;
 
 // std-only re-exports
 #[cfg(feature = "std")]
-pub use budget::{BudgetConfig, CostTable, FinancialBudgetSensor, SpendRecord};
+pub use budget::{BudgetConfig, CostTable, FinancialBudgetSensor};
 #[cfg(feature = "std")]
 pub use power::{
     AttentionConfig, AttentionReading, AttentionSensor, PowerConfig, PowerReading, PowerSensor,

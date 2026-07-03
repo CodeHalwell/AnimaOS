@@ -6,6 +6,7 @@ license.workspace = true
 description = "Multi-tenant workspace management for AnimaOS — Epic E31."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

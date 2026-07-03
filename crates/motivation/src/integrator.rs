@@ -166,11 +166,10 @@ impl DriveValueIntegrator {
         if !self.config.enabled {
             return String::from("drive integration disabled");
         }
-        let top_contributor = augmented.decomposition.iter().max_by(|a, b| {
-            a.final_contribution
-                .partial_cmp(&b.final_contribution)
-                .unwrap()
-        });
+        let top_contributor = augmented
+            .decomposition
+            .iter()
+            .max_by(|a, b| a.final_contribution.total_cmp(&b.final_contribution));
         if let Some(tc) = top_contributor {
             format!(
                 "base={:.3} + drive_delta={:.3} → {:.3}; top drive: {} (urgency={:.2}, contribution={:.3}){}",

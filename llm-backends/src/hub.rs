@@ -229,12 +229,18 @@ impl HfHubClient {
         agent: &ureq::Agent,
     ) -> Result<HfModelInfo, HubError> {
         let url = format!("https://huggingface.co/api/models/{model_id}");
-        let mut req = agent.get(&url).header("Accept", "application/json");
-        if let Some(token) = api_token {
-            req = req.header("Authorization", &format!("Bearer {token}"));
-        }
 
-        let response = match req.call() {
+        // Retry transient failures (connect/429/5xx) with backoff (IO-2); a
+        // genuine 404 is not retryable and surfaces immediately below.
+        let result = crate::retry::with_retry(&crate::retry::RetryPolicy::default(), || {
+            let mut req = agent.get(&url).header("Accept", "application/json");
+            if let Some(token) = api_token {
+                req = req.header("Authorization", &format!("Bearer {token}"));
+            }
+            req.call()
+        });
+
+        let response = match result {
             Ok(res) => res,
             Err(ureq::Error::StatusCode(404)) => {
                 return Err(HubError::NotFound(model_id.to_string()));

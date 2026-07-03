@@ -38,6 +38,7 @@ pub mod hub;
 pub mod native;
 pub mod ollama;
 pub mod openai;
+pub mod retry;
 
 pub use anthropic::AnthropicBackend;
 pub use capabilities::{BackendCapabilities, ProviderConfig};

@@ -62,11 +62,8 @@ impl JobRegistry {
     ///
     /// Resolves to `~/.anima/<agent_id>/jobs.json`.
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("jobs.json")
+        // Shared safe state dir so all stores agree on location (OPS-13).
+        jsonstore::agent_state_path(agent_id, "jobs.json")
     }
 
     /// Opens (or creates) a registry at `path`.
@@ -167,20 +164,14 @@ impl JobRegistry {
             None => return Ok(()),
         };
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| JobRegistryError::Io(e.to_string()))?;
-        }
-
         let file = RegistryFile {
             schema_version: 1,
             jobs: self.jobs.clone(),
         };
         let json =
             serde_json::to_string_pretty(&file).map_err(|e| JobRegistryError::Io(e.to_string()))?;
-
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json).map_err(|e| JobRegistryError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| JobRegistryError::Io(e.to_string()))
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| JobRegistryError::Io(e.to_string()))
     }
 }
 

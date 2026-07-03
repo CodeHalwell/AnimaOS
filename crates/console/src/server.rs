@@ -111,7 +111,7 @@ impl AuthRateLimiter {
 
     /// Whether `ip` is currently locked out.
     fn is_locked(&self, ip: IpAddr) -> bool {
-        let mut map = self.failures.lock().expect("poisoned");
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
         Self::prune(&mut map, ip, Instant::now());
         map.get(&ip).is_some_and(|v| v.len() >= MAX_AUTH_FAILURES)
     }
@@ -119,7 +119,7 @@ impl AuthRateLimiter {
     /// Record a failed attempt. Returns `true` only on the transition that
     /// first reaches the lockout threshold, so callers can audit-log it once.
     fn record_failure(&self, ip: IpAddr) -> bool {
-        let mut map = self.failures.lock().expect("poisoned");
+        let mut map = self.failures.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         Self::prune(&mut map, ip, now);
         let v = map.entry(ip).or_default();
@@ -130,7 +130,10 @@ impl AuthRateLimiter {
 
     /// Clear an IP's failure history after a successful auth.
     fn record_success(&self, ip: IpAddr) {
-        self.failures.lock().expect("poisoned").remove(&ip);
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ip);
     }
 }
 
@@ -600,7 +603,7 @@ impl ConsoleServer {
         // the last request, avoiding a full audit-log read on every call.
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         {
-            let cache = self.digest_cache.lock().expect("poisoned");
+            let cache = self.digest_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let (Some(mt), Some((cached_mt, cached_json))) = (mtime, cache.as_ref()) {
                 if mt == *cached_mt {
                     return write_json(out, 200, "OK", cached_json.as_bytes());
@@ -612,7 +615,8 @@ impl ConsoleServer {
         match serde_json::to_string(&digest) {
             Ok(json) => {
                 if let Some(mt) = mtime {
-                    *self.digest_cache.lock().expect("poisoned") = Some((mt, json.clone()));
+                    *self.digest_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some((mt, json.clone()));
                 }
                 write_json(out, 200, "OK", json.as_bytes())
             }

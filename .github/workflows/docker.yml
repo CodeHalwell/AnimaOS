@@ -1,5 +1,10 @@
 name: Docker
 
+# Cancel superseded runs on the same ref (INF-2).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Build and push the anima-hosted container image to GHCR.
 #
 # The trainer image (docker/Dockerfile.trainer) is not built here because it

@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 
 // alloc types needed by IterationAwareMlfq and TaskOutcome in no_std mode.
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 
 use crate::backend::{CancellationToken, LlmBackend, LlmBackendError, StreamingCompletion};
 use crate::Task;
@@ -132,7 +132,11 @@ pub struct IterationAwareMlfq {
     /// Bounded: once it reaches `max_dispatched_tasks` entries each dispatch
     /// evicts the oldest, so a long-lived scheduler does not retain every task
     /// it has ever run and grow the heap without bound.
-    pub dispatched_tasks: Vec<Task>,
+    ///
+    /// Backed by a `VecDeque` so eviction is `pop_front()` (O(1)) rather than a
+    /// front `drain` that memmoves the whole history on every dispatch past the
+    /// cap (CORE-3). Indexing and `len()` behave as before for readers.
+    pub dispatched_tasks: VecDeque<Task>,
     /// Maximum number of entries retained in `dispatched_tasks`; older entries
     /// are evicted once this cap is reached. Defaults to
     /// [`DEFAULT_MAX_DISPATCHED_TASKS`].  `0` disables eviction.
@@ -156,7 +160,7 @@ pub const DEFAULT_MAX_DISPATCHED_TASKS: usize = 10_000;
 impl Default for IterationAwareMlfq {
     fn default() -> Self {
         Self {
-            dispatched_tasks: Vec::new(),
+            dispatched_tasks: VecDeque::new(),
             max_dispatched_tasks: DEFAULT_MAX_DISPATCHED_TASKS,
             tier_counters: [0; NUM_TIERS],
             total_tokens_dispatched: 0,
@@ -232,13 +236,15 @@ impl IterationAwareMlfq {
     ) -> Result<TaskOutcome, LlmBackendError> {
         let tier = (task.mlfq_level as usize).min(NUM_TIERS - 1);
         self.tier_counters[tier] = self.tier_counters[tier].saturating_add(1);
-        self.dispatched_tasks.push(task.clone());
+        self.dispatched_tasks.push_back(task.clone());
         // Bound the dispatch history: evict the oldest entries once the cap is
         // reached so a long-running scheduler does not retain every task forever.
-        if self.max_dispatched_tasks > 0 && self.dispatched_tasks.len() > self.max_dispatched_tasks
-        {
-            let overflow = self.dispatched_tasks.len() - self.max_dispatched_tasks;
-            self.dispatched_tasks.drain(0..overflow);
+        // `pop_front` is O(1), so steady-state dispatch does not pay an O(n)
+        // memmove per call (CORE-3).
+        if self.max_dispatched_tasks > 0 {
+            while self.dispatched_tasks.len() > self.max_dispatched_tasks {
+                self.dispatched_tasks.pop_front();
+            }
         }
         self.dispatch_count = self.dispatch_count.saturating_add(1);
 

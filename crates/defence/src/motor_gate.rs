@@ -11,6 +11,8 @@
 //! hard safety boundary, not a value-sensitive policy, and interpretability
 //! matters more than expressiveness here.
 
+use std::net::{IpAddr, Ipv4Addr};
+
 use anima_self::{Capability, Verified};
 
 use crate::types::{VetoReason, VetoResult};
@@ -126,10 +128,14 @@ impl UnsafeMotorActionGate {
             return VetoResult::Allow;
         }
 
+        // Resolve `.`/`..` lexically and match on component boundaries so
+        // `/var/../etc/passwd` and `./etc/passwd` cannot dodge the critical
+        // prefixes, and `/etcd` does not falsely match `/etc` (MEM-1).
+        let normalized = normalize_path(path);
         let targets_critical = self
             .critical_prefixes
             .iter()
-            .any(|prefix| path.starts_with(prefix.as_str()));
+            .any(|prefix| path_under_prefix(&normalized, prefix.as_str()));
 
         if !targets_critical {
             return VetoResult::Allow;
@@ -158,8 +164,24 @@ impl UnsafeMotorActionGate {
     /// Requests to blocklisted hosts (matched as URL substrings) are always
     /// blocked; all other requests are allowed.
     pub fn screen_network(&self, url: &str, method: &str) -> VetoResult {
+        let host = extract_host(url);
+
+        // Fail-closed SSRF default: a cloud-isolated agent must never reach
+        // loopback, private/link-local ranges, or the cloud metadata endpoint,
+        // regardless of the configured blocklist (MEM-6).
+        if is_private_or_metadata_host(&host) {
+            return VetoResult::Veto(VetoReason::UnsafeMotorAction {
+                action: format!("{method} {url}"),
+                policy: "ssrf-private-address".to_string(),
+            });
+        }
+
         for blocked in &self.blocklisted_hosts {
-            if url.contains(blocked.as_str()) {
+            // Match on the host component (equal or a subdomain) rather than a
+            // raw URL substring, so `evil.example.com` blocks
+            // `cdn.evil.example.com` but not `notevil.example.com`, and a
+            // `10.0.0.1` entry no longer also blocks `10.0.0.10` (MEM-6).
+            if host_matches_block(&host, blocked) {
                 return VetoResult::Veto(VetoReason::UnsafeMotorAction {
                     action: format!("{method} {url}"),
                     policy: format!("blocklisted-host:{blocked}"),
@@ -202,6 +224,186 @@ impl UnsafeMotorActionGate {
             policy: "self.modify".to_string(),
         })
     }
+}
+
+// ── Path / host normalisation helpers ─────────────────────────────────────────
+
+/// Lexically resolves `.` and `..` segments in `path` without touching the
+/// filesystem, so `/var/../etc/passwd` and `./etc/passwd` both normalise under
+/// `/etc`. The result is always treated as absolute (fail-closed): a relative
+/// path is rooted at `/` so it cannot dodge a critical prefix (MEM-1).
+fn normalize_path(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            s => stack.push(s),
+        }
+    }
+    let mut out = String::with_capacity(path.len() + 1);
+    out.push('/');
+    out.push_str(&stack.join("/"));
+    out
+}
+
+/// Returns `true` when `path` lies at or under `prefix` on a path-component
+/// boundary, so `/etc` matches `/etc` and `/etc/passwd` but not `/etcd`.
+fn path_under_prefix(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    match path.strip_prefix(prefix) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
+}
+
+/// Extracts the lowercase host component from a URL, stripping scheme,
+/// userinfo, port, and path. Best-effort: input without a scheme is treated as
+/// a bare authority. IPv6 literals keep their inner address (`[::1]:8080` → `::1`).
+fn extract_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Strip any `user:pass@` userinfo.
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        // IPv6 literal: `[::1]:port`.
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    // Trim any trailing DNS root dot so `localhost.` / `evil.example.com.`
+    // normalise to the same host the range and blocklist checks compare
+    // against, closing the trailing-dot bypass (MEM-6).
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Returns `true` when `host` equals `blocked` or is a subdomain of it, matching
+/// on the host component so `evil.example.com` blocks `cdn.evil.example.com`
+/// but not `notevil.example.com` (MEM-6).
+fn host_matches_block(host: &str, blocked: &str) -> bool {
+    // Normalise URL-shaped or port-suffixed blocklist entries (e.g.
+    // `https://evil.example.com` or `evil.example.com:8443`) down to their host
+    // component, so host-vs-host comparison stays correct after the switch away
+    // from raw URL-substring matching (MEM-6).
+    let blocked = extract_host(blocked.trim());
+    // Operators may use the leading-dot domain-wide form (`.evil.example.com`);
+    // strip it so the entry blocks the apex and its subdomains rather than
+    // comparing against an empty leading label (MEM-6).
+    let blocked = blocked.trim_start_matches('.');
+    if blocked.is_empty() {
+        return false;
+    }
+    host == blocked || host.ends_with(&format!(".{blocked}"))
+}
+
+/// Returns `true` for hosts a cloud-isolated agent must never reach: loopback,
+/// RFC1918 / link-local / ULA private ranges, the unspecified address, and the
+/// cloud metadata endpoint. Numeric hosts are canonicalised first so the check
+/// cannot be dodged with `inet_aton` integer/octal/short forms or IPv4-mapped
+/// IPv6 literals (MEM-6).
+fn is_private_or_metadata_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if host == "metadata.google.internal" {
+        return true;
+    }
+    parse_host_ip(host).is_some_and(ip_is_private_or_metadata)
+}
+
+/// Parses `host` as an IP address, accepting the legacy `inet_aton` numeric
+/// IPv4 forms (decimal integer, `0`-octal, `0x`-hex, and 1–3 part short forms)
+/// that many resolvers still honour, and unwrapping IPv4-mapped IPv6
+/// (`::ffff:a.b.c.d`). Returns `None` for genuine hostnames. The IPv6 brackets
+/// are already stripped by [`extract_host`].
+fn parse_host_ip(host: &str) -> Option<IpAddr> {
+    // Drop any RFC 6874 IPv6 zone identifier (`fe80::1%eth0`, URL-encoded
+    // `%25eth0`) before classification: the zone doesn't change the address's
+    // range, and `IpAddr::from_str` rejects zoned literals — which would
+    // otherwise let a link-local target slip through as an unparseable host.
+    let host = host.split('%').next().unwrap_or(host);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(match ip {
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
+            v4 => v4,
+        });
+    }
+    parse_ipv4_relaxed(host).map(IpAddr::V4)
+}
+
+/// Returns `true` for loopback, RFC1918/link-local/unique-local private ranges,
+/// and the unspecified address (which reaches localhost on many stacks). The
+/// AWS/GCP metadata IP `169.254.169.254` falls under link-local.
+fn ip_is_private_or_metadata(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
+/// Parses `inet_aton`-style IPv4: 1–4 dot-separated parts, each decimal,
+/// `0`-prefixed octal, or `0x`-prefixed hex; the final part fills all remaining
+/// low-order bytes (so `2130706433`, `0177.0.0.1`, and `127.1` all resolve to
+/// `127.0.0.1`).
+fn parse_ipv4_relaxed(host: &str) -> Option<Ipv4Addr> {
+    if host.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let nums: Vec<u32> = parts
+        .iter()
+        .map(|p| parse_inet_number(p))
+        .collect::<Option<Vec<_>>>()?;
+    let addr = match nums.as_slice() {
+        [a] => *a,
+        [a, b] if *a <= 0xff && *b <= 0x00ff_ffff => (*a << 24) | *b,
+        [a, b, c] if *a <= 0xff && *b <= 0xff && *c <= 0xffff => (*a << 24) | (*b << 16) | *c,
+        [a, b, c, d] if *a <= 0xff && *b <= 0xff && *c <= 0xff && *d <= 0xff => {
+            (*a << 24) | (*b << 16) | (*c << 8) | *d
+        }
+        _ => return None,
+    };
+    Some(Ipv4Addr::from(addr))
+}
+
+/// Parses one `inet_aton` numeric component (decimal / `0`-octal / `0x`-hex).
+fn parse_inet_number(s: &str) -> Option<u32> {
+    if s == "0" {
+        return Some(0);
+    }
+    let (radix, digits) = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, hex)
+    } else if let Some(oct) = s.strip_prefix('0') {
+        (8, oct)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    u32::from_str_radix(digits, radix).ok()
 }
 
 impl Default for UnsafeMotorActionGate {
@@ -403,5 +605,138 @@ mod tests {
             g.screen_self_modification("config/routes.toml", "update", Some(&cap)),
             VetoResult::Allow
         );
+    }
+
+    // ── Path-traversal (MEM-1) ────────────────────────────────────────────────
+
+    #[test]
+    fn traversal_paths_into_critical_tree_require_capability() {
+        let g = UnsafeMotorActionGate::new();
+        for path in [
+            "/var/../etc/passwd",
+            "./etc/passwd",
+            "etc/passwd",
+            "/tmp/../../etc/shadow",
+            "/etc/./ssh/sshd_config",
+        ] {
+            assert!(
+                g.screen_filesystem("write", path, None).is_vetoed(),
+                "{path} resolves into a critical tree and must be vetoed"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_lookalike_paths_are_not_critical() {
+        let g = UnsafeMotorActionGate::new();
+        for path in ["/etcd/data.db", "/binary/app", "/libreoffice/config"] {
+            assert_eq!(
+                g.screen_filesystem("write", path, None),
+                VetoResult::Allow,
+                "{path} only looks like a critical prefix"
+            );
+        }
+    }
+
+    // ── SSRF / host matching (MEM-6) ──────────────────────────────────────────
+
+    #[test]
+    fn private_and_metadata_hosts_are_blocked_by_default() {
+        let g = UnsafeMotorActionGate::new(); // empty blocklist
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8088/admin",
+            "http://localhost/",
+            "http://10.0.0.5/internal",
+            "http://192.168.1.1/",
+            "http://[::1]:9000/",
+        ] {
+            let r = g.screen_network(url, "GET");
+            assert!(r.is_vetoed(), "{url} must be blocked as SSRF");
+        }
+    }
+
+    #[test]
+    fn blocklist_substring_misfires_are_fixed() {
+        let g = UnsafeMotorActionGate::new().with_blocklisted_host("10.0.0.1");
+        // A different address that merely shares a prefix must not be blocked.
+        assert_eq!(
+            g.screen_network("https://93.184.216.34/", "GET"),
+            VetoResult::Allow
+        );
+        let g2 = UnsafeMotorActionGate::new().with_blocklisted_host("evil.com");
+        assert_eq!(
+            g2.screen_network("https://notevil.com/api", "GET"),
+            VetoResult::Allow
+        );
+        // Userinfo trick must not smuggle a good host past the block.
+        let g3 = UnsafeMotorActionGate::new().with_blocklisted_host("evil.com");
+        assert!(g3
+            .screen_network("https://good.com@evil.com/x", "GET")
+            .is_vetoed());
+    }
+
+    #[test]
+    fn non_canonical_loopback_encodings_are_blocked() {
+        let g = UnsafeMotorActionGate::new(); // empty blocklist — SSRF default only
+        for url in [
+            "http://localhost./admin",    // trailing DNS root dot
+            "http://127.0.0.1./x",        // trailing dot on an IP
+            "http://2130706433/",         // 127.0.0.1 as a u32
+            "http://0177.0.0.1/",         // octal first octet
+            "http://127.1/",              // inet_aton short form
+            "http://0x7f.0.0.1/",         // hex octet
+            "http://[::ffff:127.0.0.1]/", // IPv4-mapped IPv6 loopback
+            "http://[::ffff:10.0.0.5]/",  // IPv4-mapped IPv6 private
+            "http://0.0.0.0/",            // unspecified → localhost
+            "http://[fe80::1%25eth0]/",   // zoned link-local (RFC 6874)
+        ] {
+            assert!(
+                g.screen_network(url, "GET").is_vetoed(),
+                "{url} must be blocked as SSRF"
+            );
+        }
+    }
+
+    #[test]
+    fn public_hosts_and_ips_are_not_false_positives() {
+        let g = UnsafeMotorActionGate::new();
+        for url in [
+            "https://api.anthropic.com/v1/messages",
+            "https://93.184.216.34/",          // example.com
+            "https://8.8.8.8/",                // public resolver
+            "https://[2606:4700:4700::1111]/", // public IPv6
+        ] {
+            assert_eq!(
+                g.screen_network(url, "GET"),
+                VetoResult::Allow,
+                "{url} is public and must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn url_shaped_blocklist_entries_still_match() {
+        // Entries carrying a scheme, port, or the leading-dot domain-wide form
+        // must normalise to the host so they keep matching after the move to
+        // host-component comparison.
+        for entry in [
+            "https://evil.example.com",
+            "evil.example.com:8443",
+            ".evil.example.com",
+        ] {
+            let g = UnsafeMotorActionGate::new().with_blocklisted_host(entry);
+            assert!(
+                g.screen_network("https://evil.example.com/x", "GET")
+                    .is_vetoed(),
+                "blocklist entry {entry:?} must still veto the apex host"
+            );
+            // The leading-dot / bare forms must also catch subdomains.
+            assert!(
+                g.screen_network("https://cdn.evil.example.com/x", "GET")
+                    .is_vetoed(),
+                "blocklist entry {entry:?} must veto subdomains too"
+            );
+        }
     }
 }

@@ -94,10 +94,14 @@ impl PriorityLattice {
             // Propagate suppression to all higher tiers
             let urgency = snapshot.urgencies[tier_idx];
             if urgency > self.config.suppression_threshold {
+                // Clamp the denominator so a misconfigured threshold ≥ 1.0
+                // cannot divide by zero and push inf/NaN into drive weights
+                // (AUT-8); the guard above keeps the numerator term ≥ 0.
+                let headroom = (1.0 - self.config.suppression_threshold).max(1e-6);
                 let suppress = 1.0
                     - self.config.suppression_factor
                         * (urgency - self.config.suppression_threshold)
-                        / (1.0 - self.config.suppression_threshold);
+                        / headroom;
                 suppression_carry *= suppress.max(self.config.min_weight);
             }
         }

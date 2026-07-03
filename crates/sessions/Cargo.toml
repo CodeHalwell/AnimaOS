@@ -6,6 +6,7 @@ license.workspace = true
 description = "Conversation history and session management for AnimaOS — Epic E22."
 
 [dependencies]
+jsonstore = { path = "../jsonstore" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

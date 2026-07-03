@@ -55,6 +55,21 @@ const COMPLETION_CLAIM_PATTERNS: &[&str] = &[
     "everything is complete",
 ];
 
+/// Substring search that requires a word boundary immediately before the
+/// match, so a period-anchored pattern like `"complete."` is found in `"task is
+/// complete."` (preceded by a space) but not in `"incomplete."` (preceded by
+/// the alphanumeric `n`). This removes the negation false positives without
+/// widening the patterns' original sentence-terminal intent (MEM-5).
+fn contains_word_bounded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    haystack
+        .match_indices(needle)
+        .any(|(idx, _)| idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric())
+}
+
 // ── RewardHackingDetector ─────────────────────────────────────────────────────
 
 /// Reward-hacking detector (S5.6.3).
@@ -76,10 +91,16 @@ impl RewardHackingDetector {
     }
 
     /// Returns `true` when `summary` contains a recognised completion-claim
-    /// pattern.
+    /// pattern at a word boundary.
+    ///
+    /// Boundary matching stops negations from tripping the detector: `"the task
+    /// is incomplete."` must not match the `"complete."` pattern, and `"work is
+    /// unfinished."` must not match `"finished."` (MEM-5).
     pub fn has_completion_claim(&self, summary: &str) -> bool {
         let lower = summary.to_ascii_lowercase();
-        COMPLETION_CLAIM_PATTERNS.iter().any(|&p| lower.contains(p))
+        COMPLETION_CLAIM_PATTERNS
+            .iter()
+            .any(|&p| contains_word_bounded(&lower, p))
     }
 
     /// Screens a completion claim.
@@ -271,5 +292,37 @@ mod tests {
             triggered >= 1,
             "at least one fake completion must trigger the detector"
         );
+    }
+
+    // ── Negation false positives (MEM-5) ──────────────────────────────────────
+    #[test]
+    fn negations_are_not_completion_claims() {
+        let d = RewardHackingDetector::new(1);
+        for s in [
+            "the task is incomplete.",
+            "work is unfinished.",
+            "this remains incomplete and needs review",
+            "the build is uncompleted.",
+        ] {
+            assert!(
+                !d.has_completion_claim(s),
+                "negation must not be a completion claim: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_terminal_claims_still_match() {
+        let d = RewardHackingDetector::new(1);
+        for s in [
+            "the task is complete.",
+            "all done.",
+            "implementation finished.",
+        ] {
+            assert!(
+                d.has_completion_claim(s),
+                "genuine completion claim must still match: {s:?}"
+            );
+        }
     }
 }

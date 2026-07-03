@@ -308,7 +308,8 @@ def _hash_file_chunked(h, path: Path, chunk_size: int = 1024 * 1024) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # `__doc__` is None under `python -OO` (docstrings stripped); guard it.
+    ap = argparse.ArgumentParser(description=next(iter((__doc__ or "").splitlines()), ""))
     ap.add_argument("--corpus", type=Path,
                     default=Path(os.environ.get("TRAINER_CORPUS_DIR",
                                                 "/anima-data/training_corpus")),

@@ -6,8 +6,12 @@
 //!   bundled `fixtures/anthropic.json`.  No API key or network access required.
 //! * **Custom fixture**: supply your own `(prompt, tokens)` pairs via
 //!   [`AnthropicBackend::with_custom_fixtures`].
+//! * **Live** (IO-1): a real blocking `ureq` client for the Anthropic Messages
+//!   API (`POST /v1/messages`), constructed via [`AnthropicBackend::live`]. The
+//!   factory selects this automatically when `ANTHROPIC_API_KEY` is set.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use scheduler::backend::{
     CancellationToken, CompletionFuture, LlmBackend, LlmBackendError, StreamingCompletion,
@@ -15,15 +19,35 @@ use scheduler::backend::{
 
 use crate::fixture::load_fixtures;
 
-/// Anthropic Claude provider (fixture mode).
+/// Default Anthropic API base URL (overridable for tests via [`AnthropicBackend::live_with_base`]).
+const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com";
+/// Anthropic API version header value.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Live connection configuration for the Anthropic Messages API.
+struct LiveConfig {
+    api_key: String,
+    base_url: String,
+    agent: ureq::Agent,
+    max_tokens: u32,
+}
+
+enum Mode {
+    /// Replays pre-recorded token streams for known prompts.
+    Fixture(HashMap<String, Vec<String>>),
+    /// Issues real requests to the Anthropic Messages API.
+    Live(LiveConfig),
+}
+
+/// Anthropic Claude provider.
 ///
-/// Replays pre-recorded token streams for known prompts.  Unknown prompts
-/// receive a sentinel token so tests do not silently produce empty output.
+/// In fixture mode, replays pre-recorded token streams for known prompts;
+/// unknown prompts receive a sentinel token so tests do not silently produce
+/// empty output. In live mode, calls the Anthropic Messages API.
 pub struct AnthropicBackend {
     /// Model identifier (e.g. `"claude-3-haiku-20240307"`).
     model: String,
-    /// Recorded token lists keyed by exact prompt text.
-    fixtures: HashMap<String, Vec<String>>,
+    mode: Mode,
 }
 
 impl AnthropicBackend {
@@ -34,7 +58,7 @@ impl AnthropicBackend {
         let fixtures = entries.into_iter().map(|e| (e.prompt, e.tokens)).collect();
         Self {
             model: "claude-3-haiku-20240307".to_string(),
-            fixtures,
+            mode: Mode::Fixture(fixtures),
         }
     }
 
@@ -45,15 +69,115 @@ impl AnthropicBackend {
     ) -> Self {
         Self {
             model: model.into(),
-            fixtures: fixtures.into_iter().collect(),
+            mode: Mode::Fixture(fixtures.into_iter().collect()),
         }
     }
 
-    fn lookup_fixture(&self, prompt: &str) -> Vec<String> {
-        self.fixtures
+    /// Creates a **live** backend that calls the Anthropic Messages API using
+    /// `api_key` (IO-1). Requests are retried on transient failures.
+    pub fn live(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::live_with_base(model, api_key, ANTHROPIC_API_BASE)
+    }
+
+    /// Live backend variant with an overridable base URL (for tests).
+    pub fn live_with_base(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build()
+            .into();
+        Self {
+            model: model.into(),
+            mode: Mode::Live(LiveConfig {
+                api_key: api_key.into(),
+                base_url: base_url.into(),
+                agent,
+                max_tokens: 4096,
+            }),
+        }
+    }
+
+    fn lookup_fixture(fixtures: &HashMap<String, Vec<String>>, prompt: &str) -> Vec<String> {
+        fixtures
             .get(prompt)
             .cloned()
             .unwrap_or_else(|| vec!["[anthropic-fixture-not-found]".to_string()])
+    }
+
+    /// Calls the Anthropic Messages API and returns the completion as
+    /// word-level token chunks (so per-token accounting is length-proportional)
+    /// followed by `Done`.
+    fn live_complete(
+        &self,
+        live: &LiveConfig,
+        prompt: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<StreamingCompletion>, LlmBackendError> {
+        if cancel.is_cancelled() {
+            return Err(LlmBackendError::Cancelled);
+        }
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": live.max_tokens,
+            "messages": [{ "role": "user", "content": prompt }],
+        })
+        .to_string();
+        let url = format!("{}/v1/messages", live.base_url.trim_end_matches('/'));
+
+        let response = crate::retry::with_retry(&crate::retry::RetryPolicy::default(), || {
+            live.agent
+                .post(&url)
+                .header("x-api-key", &live.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .send(body.clone())
+        })
+        .map_err(|e| LlmBackendError::Provider(format!("anthropic request failed: {e}")))?;
+
+        let text = response
+            .into_body()
+            .read_to_string()
+            .map_err(|e| LlmBackendError::Provider(format!("anthropic read body: {e}")))?;
+
+        Self::parse_messages_response(&text)
+    }
+
+    /// Parses an Anthropic Messages API JSON response into token chunks.
+    fn parse_messages_response(json: &str) -> Result<Vec<StreamingCompletion>, LlmBackendError> {
+        let val: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| LlmBackendError::Provider(format!("anthropic invalid JSON: {e}")))?;
+
+        // Surface API-level errors (`{"type":"error","error":{"message":...}}`).
+        if let Some(err) = val.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown provider error");
+            return Err(LlmBackendError::Provider(format!("anthropic: {msg}")));
+        }
+
+        // Concatenate the text blocks in `content`.
+        let content: String = val
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+
+        let mut events: Vec<StreamingCompletion> = content
+            .split_inclusive(' ')
+            .map(|chunk| StreamingCompletion::Token(chunk.to_string()))
+            .collect();
+        events.push(StreamingCompletion::Done);
+        Ok(events)
     }
 }
 
@@ -83,16 +207,21 @@ impl LlmBackend for AnthropicBackend {
         cancel: &'a CancellationToken,
     ) -> CompletionFuture<'a> {
         Box::pin(async move {
-            let tokens = self.lookup_fixture(prompt);
-            let mut events: Vec<StreamingCompletion> = Vec::with_capacity(tokens.len() + 1);
-            for token in tokens {
-                if cancel.is_cancelled() {
-                    return Err(LlmBackendError::Cancelled);
+            match &self.mode {
+                Mode::Live(live) => self.live_complete(live, prompt, cancel),
+                Mode::Fixture(fixtures) => {
+                    let tokens = Self::lookup_fixture(fixtures, prompt);
+                    let mut events: Vec<StreamingCompletion> = Vec::with_capacity(tokens.len() + 1);
+                    for token in tokens {
+                        if cancel.is_cancelled() {
+                            return Err(LlmBackendError::Cancelled);
+                        }
+                        events.push(StreamingCompletion::Token(token));
+                    }
+                    events.push(StreamingCompletion::Done);
+                    Ok(events)
                 }
-                events.push(StreamingCompletion::Token(token));
             }
-            events.push(StreamingCompletion::Done);
-            Ok(events)
         })
     }
 }
@@ -160,6 +289,42 @@ mod tests {
     fn model_id_is_claude_3_haiku() {
         let backend = AnthropicBackend::new();
         assert_eq!(backend.model_id(), "claude-3-haiku-20240307");
+    }
+
+    #[test]
+    fn parse_messages_response_extracts_and_chunks_text() {
+        let json =
+            r#"{"content":[{"type":"text","text":"hello world"}],"usage":{"output_tokens":2}}"#;
+        let events = AnthropicBackend::parse_messages_response(json).unwrap();
+        assert!(matches!(events.last(), Some(StreamingCompletion::Done)));
+        // More than one token event (word-level chunking) and they concatenate
+        // back to the original content.
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamingCompletion::Token(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "hello world");
+        assert!(events.len() >= 3, "two word chunks + Done");
+    }
+
+    #[test]
+    fn parse_messages_response_surfaces_api_error() {
+        let json =
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid key"}}"#;
+        let err = AnthropicBackend::parse_messages_response(json).unwrap_err();
+        match err {
+            LlmBackendError::Provider(msg) => assert!(msg.contains("invalid key")),
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_constructor_sets_model() {
+        let b = AnthropicBackend::live("claude-test-model", "sk-test");
+        assert_eq!(b.model_id(), "claude-test-model");
     }
 
     #[test]

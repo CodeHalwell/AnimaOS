@@ -1,5 +1,11 @@
 name: Benchmarks
 
+# Cancel superseded PR runs on the same ref (INF-2). Scheduled runs use a
+# distinct ref (refs/heads/main) and are not cancelled by PR pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   # Nightly macro-benchmark job — runs automatically at 02:00 UTC every day.
   schedule:

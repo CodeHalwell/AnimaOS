@@ -176,7 +176,7 @@ impl SensoryBridge {
 
     /// Returns the currently active human policy bounds.
     pub fn read_active_bounds(&self) -> Result<HumanGuidance, SensoryBridgeError> {
-        Ok(self.active_bounds.lock().expect("poisoned").clone())
+        Ok(sync::lock_recover(&self.active_bounds).clone())
     }
 
     /// Replaces the active policy bounds.
@@ -184,7 +184,7 @@ impl SensoryBridge {
     /// Packets already in the queue are not re-validated; the new bounds apply
     /// only to subsequent calls to the checked packetize methods.
     pub fn set_active_bounds(&self, guidance: HumanGuidance) {
-        *self.active_bounds.lock().expect("poisoned") = guidance;
+        *sync::lock_recover(&self.active_bounds) = guidance;
     }
 
     // ── Unchecked packetize (internal / test convenience) ────────────────────
@@ -195,14 +195,11 @@ impl SensoryBridge {
     /// [`packetize_text_checked`](Self::packetize_text_checked) for
     /// externally-sourced input.
     pub fn packetize_text(&self, text: impl Into<String>) {
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Text(text.into()),
-                priority: SensoryPriority::Normal,
-                gate_override_reason: None,
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Text(text.into()),
+            priority: SensoryPriority::Normal,
+            gate_override_reason: None,
+        });
     }
 
     /// Enqueues a PCM audio frame at [`SensoryPriority::Normal`].
@@ -211,14 +208,11 @@ impl SensoryBridge {
     /// [`packetize_pcm_checked`](Self::packetize_pcm_checked) for
     /// externally-sourced input.
     pub fn packetize_pcm(&self, samples: Vec<i16>) {
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Pcm(samples),
-                priority: SensoryPriority::Normal,
-                gate_override_reason: None,
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Pcm(samples),
+            priority: SensoryPriority::Normal,
+            gate_override_reason: None,
+        });
     }
 
     // ── Checked packetize (policy-enforcing) ─────────────────────────────────
@@ -238,7 +232,7 @@ impl SensoryBridge {
         priority: SensoryPriority,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
-        let bounds = self.active_bounds.lock().expect("poisoned").clone();
+        let bounds = sync::lock_recover(&self.active_bounds).clone();
 
         if text.is_empty() {
             return Err(SensoryBridgeError::PolicyViolation {
@@ -260,14 +254,11 @@ impl SensoryBridge {
             }
         }
 
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Text(text),
-                priority,
-                gate_override_reason: None,
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Text(text),
+            priority,
+            gate_override_reason: None,
+        });
         Ok(())
     }
 
@@ -308,7 +299,7 @@ impl SensoryBridge {
                 ),
             });
         }
-        let bounds = self.active_bounds.lock().expect("poisoned").clone();
+        let bounds = sync::lock_recover(&self.active_bounds).clone();
 
         if text.is_empty() {
             return Err(SensoryBridgeError::PolicyViolation {
@@ -330,14 +321,11 @@ impl SensoryBridge {
             }
         }
 
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Text(text),
-                priority: SensoryPriority::Critical,
-                gate_override_reason: Some(reason),
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Text(text),
+            priority: SensoryPriority::Critical,
+            gate_override_reason: Some(reason),
+        });
         Ok(())
     }
 
@@ -360,7 +348,7 @@ impl SensoryBridge {
                 reason: "PCM frame must not be empty".into(),
             });
         }
-        if let Some(max_samples) = self.active_bounds.lock().expect("poisoned").max_pcm_samples {
+        if let Some(max_samples) = sync::lock_recover(&self.active_bounds).max_pcm_samples {
             if samples.len() > max_samples {
                 return Err(SensoryBridgeError::PolicyViolation {
                     reason: format!(
@@ -370,14 +358,11 @@ impl SensoryBridge {
                 });
             }
         }
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Pcm(samples),
-                priority,
-                gate_override_reason: None,
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Pcm(samples),
+            priority,
+            gate_override_reason: None,
+        });
         Ok(())
     }
 
@@ -415,7 +400,7 @@ impl SensoryBridge {
                 reason: "MIME type must start with 'image/'".into(),
             });
         }
-        if let Some(max_bytes) = self.active_bounds.lock().expect("poisoned").max_image_bytes {
+        if let Some(max_bytes) = sync::lock_recover(&self.active_bounds).max_image_bytes {
             if bytes.len() > max_bytes {
                 return Err(SensoryBridgeError::PolicyViolation {
                     reason: format!(
@@ -425,18 +410,15 @@ impl SensoryBridge {
                 });
             }
         }
-        self.queue
-            .lock()
-            .expect("poisoned")
-            .push_back(PrioritizedPacket {
-                packet: SensoryPacket::Image {
-                    bytes,
-                    mime,
-                    caption,
-                },
-                priority,
-                gate_override_reason: None,
-            });
+        sync::lock_recover(&self.queue).push_back(PrioritizedPacket {
+            packet: SensoryPacket::Image {
+                bytes,
+                mime,
+                caption,
+            },
+            priority,
+            gate_override_reason: None,
+        });
         Ok(())
     }
 
@@ -444,12 +426,12 @@ impl SensoryBridge {
 
     /// Returns `true` when at least one packet is waiting to be consumed.
     pub fn has_packets(&self) -> bool {
-        !self.queue.lock().expect("poisoned").is_empty()
+        !sync::lock_recover(&self.queue).is_empty()
     }
 
     /// Returns the number of packets currently queued in the bridge.
     pub fn queue_len(&self) -> usize {
-        self.queue.lock().expect("poisoned").len()
+        sync::lock_recover(&self.queue).len()
     }
 
     /// Pops the next sensory packet (priority stripped), if any.
@@ -458,9 +440,7 @@ impl SensoryBridge {
     /// [`next_prioritized_packet`](Self::next_prioritized_packet) when
     /// priority-sensitive routing is needed.
     pub fn next_packet(&self) -> Option<SensoryPacket> {
-        self.queue
-            .lock()
-            .expect("poisoned")
+        sync::lock_recover(&self.queue)
             .pop_front()
             .map(|p| p.packet)
     }
@@ -470,7 +450,7 @@ impl SensoryBridge {
     /// `vita`'s somatic execution loop calls this each iteration to drain the
     /// incoming sensory queue before selecting the next task.
     pub fn next_prioritized_packet(&self) -> Option<PrioritizedPacket> {
-        self.queue.lock().expect("poisoned").pop_front()
+        sync::lock_recover(&self.queue).pop_front()
     }
 }
 

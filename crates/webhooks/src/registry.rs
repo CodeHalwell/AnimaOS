@@ -3,6 +3,7 @@
 use crate::endpoint::WebhookEndpoint;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 /// Errors returned by registry operations.
@@ -12,6 +13,8 @@ pub enum RegistryError {
     AlreadyExists(String),
     /// No endpoint with this ID was found.
     NotFound(String),
+    /// The endpoint URL failed validation (bad scheme or an SSRF-unsafe host).
+    InvalidUrl(String),
     /// Disk I/O failed.
     Io(String),
 }
@@ -21,9 +24,158 @@ impl std::fmt::Display for RegistryError {
         match self {
             RegistryError::AlreadyExists(id) => write!(f, "endpoint '{id}' already exists"),
             RegistryError::NotFound(id) => write!(f, "endpoint '{id}' not found"),
+            RegistryError::InvalidUrl(msg) => write!(f, "invalid webhook URL: {msg}"),
             RegistryError::Io(msg) => write!(f, "I/O error: {msg}"),
         }
     }
+}
+
+/// Validates a webhook target URL before it is registered.
+///
+/// The registry is the natural security boundary for outbound delivery: it
+/// rejects non-`http(s)` schemes and hosts that resolve to loopback, private
+/// (RFC1918), link-local, or the cloud metadata endpoint, so a webhook cannot
+/// be used as an SSRF primitive once a real sender is wired (OPS-1). The
+/// resolved IP should be re-checked at connect time by the sender to close the
+/// DNS-rebinding TOCTOU gap.
+pub fn validate_webhook_url(url: &str) -> Result<(), RegistryError> {
+    let invalid = |m: &str| RegistryError::InvalidUrl(m.to_string());
+    let scheme_end = url.find("://").ok_or_else(|| invalid("missing scheme"))?;
+    match &url[..scheme_end] {
+        "https" | "http" => {}
+        other => return Err(invalid(&format!("unsupported scheme '{other}'"))),
+    }
+    let host = webhook_host(url);
+    if host.is_empty() {
+        return Err(invalid("URL has no host"));
+    }
+    if host_is_ssrf_unsafe(&host) {
+        return Err(invalid(&format!(
+            "host '{host}' is loopback/private/link-local/metadata"
+        )));
+    }
+    Ok(())
+}
+
+/// Extracts the lowercase host from a URL (scheme, userinfo, port, and path
+/// stripped). IPv6 literals keep their inner address.
+fn webhook_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    // Trim any trailing DNS root dot so `localhost.` normalises to the host the
+    // SSRF check compares against.
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Returns `true` for hosts a webhook must never target: loopback, RFC1918 /
+/// link-local / unique-local ranges, the unspecified address, and the cloud
+/// metadata endpoint. Numeric hosts are canonicalised first so the check cannot
+/// be dodged with `inet_aton` integer/octal/short forms or IPv4-mapped IPv6.
+fn host_is_ssrf_unsafe(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if host == "metadata.google.internal" {
+        return true;
+    }
+    parse_host_ip(host).is_some_and(ip_is_private_or_metadata)
+}
+
+/// Parses `host` as an IP address, accepting the legacy `inet_aton` numeric
+/// IPv4 forms (decimal integer, `0`-octal, `0x`-hex, and 1–3 part short forms)
+/// and unwrapping IPv4-mapped IPv6 (`::ffff:a.b.c.d`). Returns `None` for
+/// genuine hostnames.
+fn parse_host_ip(host: &str) -> Option<IpAddr> {
+    // Drop any RFC 6874 IPv6 zone identifier (`fe80::1%eth0`, URL-encoded
+    // `%25eth0`) before classification: the zone doesn't change the address's
+    // range, and `IpAddr::from_str` rejects zoned literals — which would
+    // otherwise let a link-local endpoint slip through as an unparseable host.
+    let host = host.split('%').next().unwrap_or(host);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(match ip {
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
+            v4 => v4,
+        });
+    }
+    parse_ipv4_relaxed(host).map(IpAddr::V4)
+}
+
+/// Returns `true` for loopback, RFC1918/link-local/unique-local private ranges,
+/// and the unspecified address. The metadata IP `169.254.169.254` is link-local.
+fn ip_is_private_or_metadata(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
+/// Parses `inet_aton`-style IPv4: 1–4 dot-separated parts, each decimal,
+/// `0`-prefixed octal, or `0x`-prefixed hex; the final part fills all remaining
+/// low-order bytes (so `2130706433`, `0177.0.0.1`, and `127.1` resolve to
+/// `127.0.0.1`).
+fn parse_ipv4_relaxed(host: &str) -> Option<Ipv4Addr> {
+    if host.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let nums: Vec<u32> = parts
+        .iter()
+        .map(|p| parse_inet_number(p))
+        .collect::<Option<Vec<_>>>()?;
+    let addr = match nums.as_slice() {
+        [a] => *a,
+        [a, b] if *a <= 0xff && *b <= 0x00ff_ffff => (*a << 24) | *b,
+        [a, b, c] if *a <= 0xff && *b <= 0xff && *c <= 0xffff => (*a << 24) | (*b << 16) | *c,
+        [a, b, c, d] if *a <= 0xff && *b <= 0xff && *c <= 0xff && *d <= 0xff => {
+            (*a << 24) | (*b << 16) | (*c << 8) | *d
+        }
+        _ => return None,
+    };
+    Some(Ipv4Addr::from(addr))
+}
+
+/// Parses one `inet_aton` numeric component (decimal / `0`-octal / `0x`-hex).
+fn parse_inet_number(s: &str) -> Option<u32> {
+    if s == "0" {
+        return Some(0);
+    }
+    let (radix, digits) = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        (16, hex)
+    } else if let Some(oct) = s.strip_prefix('0') {
+        (8, oct)
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    u32::from_str_radix(digits, radix).ok()
 }
 
 /// Persisted store contents.
@@ -55,13 +207,29 @@ impl WebhookRegistry {
     /// If the file does not exist an empty registry is created.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RegistryError> {
         let path = path.as_ref().to_path_buf();
-        let store = if path.exists() {
+        let mut store: Store = if path.exists() {
             let raw =
                 std::fs::read_to_string(&path).map_err(|e| RegistryError::Io(e.to_string()))?;
             serde_json::from_str(&raw).map_err(|e| RegistryError::Io(e.to_string()))?
         } else {
             Store::default()
         };
+        // Re-validate persisted endpoints: a store written before URL validation
+        // existed — or edited on disk — must not smuggle an SSRF-unsafe target
+        // past the guard at dispatch time. Drop any endpoint whose URL fails
+        // validation so `endpoints_for_event()` can only ever surface safe URLs.
+        let before = store.endpoints.len();
+        store
+            .endpoints
+            .retain(|_, ep| validate_webhook_url(&ep.url).is_ok());
+        let dropped = before - store.endpoints.len();
+        if dropped > 0 {
+            eprintln!(
+                "webhooks: dropped {dropped} persisted endpoint(s) with SSRF-unsafe or \
+                 invalid URLs while loading {}",
+                path.display()
+            );
+        }
         Ok(WebhookRegistry {
             store,
             path: Some(path),
@@ -71,18 +239,13 @@ impl WebhookRegistry {
     /// Default path for an agent's webhook registry:
     /// `~/.anima/<agent_id>/webhook_endpoints.json`.
     pub fn default_path(agent_id: &str) -> PathBuf {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".anima")
-            .join(agent_id)
-            .join("webhook_endpoints.json")
+        jsonstore::agent_state_path(agent_id, "webhook_endpoints.json")
     }
 
     /// Register a new endpoint.  Returns `AlreadyExists` if an endpoint with
     /// the same ID is already present.
     pub fn register(&mut self, endpoint: WebhookEndpoint) -> Result<(), RegistryError> {
+        validate_webhook_url(&endpoint.url)?;
         if self.store.endpoints.contains_key(&endpoint.id) {
             return Err(RegistryError::AlreadyExists(endpoint.id.clone()));
         }
@@ -150,14 +313,10 @@ impl WebhookRegistry {
         let Some(path) = &self.path else {
             return Ok(()); // in-memory — nothing to write
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| RegistryError::Io(e.to_string()))?;
-        }
         let json = serde_json::to_string_pretty(&self.store)
             .map_err(|e| RegistryError::Io(e.to_string()))?;
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &json).map_err(|e| RegistryError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| RegistryError::Io(e.to_string()))?;
+        jsonstore::atomic_write(path, json.as_bytes())
+            .map_err(|e| RegistryError::Io(e.to_string()))?;
         Ok(())
     }
 }
@@ -194,11 +353,75 @@ mod tests {
     }
 
     #[test]
+    fn open_drops_persisted_ssrf_unsafe_endpoints() {
+        // A store written before URL validation existed (or edited on disk) can
+        // hold an SSRF-unsafe endpoint — `register()` would reject it, but the
+        // load path must too, or it reaches the dispatcher after a restart.
+        let path = std::env::temp_dir().join(format!("anima-wh-open-{}.json", std::process::id()));
+        let mut store = Store::default();
+        store.endpoints.insert(
+            "bad".to_string(),
+            WebhookEndpoint::new("bad", "http://169.254.169.254/x", None, EventFilter::All),
+        );
+        store.endpoints.insert(
+            "ok".to_string(),
+            WebhookEndpoint::new("ok", "https://hooks.example.com/a", None, EventFilter::All),
+        );
+        std::fs::write(&path, serde_json::to_string(&store).unwrap()).unwrap();
+
+        let r = WebhookRegistry::open(&path).unwrap();
+        assert!(r.get("ok").is_some(), "safe endpoint must survive load");
+        assert!(
+            r.get("bad").is_none(),
+            "SSRF-unsafe persisted endpoint must be dropped on load"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn register_rejects_duplicate_id() {
         let mut r = WebhookRegistry::in_memory();
         r.register(ep("wh-dup")).unwrap();
         let err = r.register(ep("wh-dup")).unwrap_err();
         assert_eq!(err, RegistryError::AlreadyExists("wh-dup".to_string()));
+    }
+
+    #[test]
+    fn register_rejects_ssrf_and_bad_scheme_urls() {
+        let mut r = WebhookRegistry::in_memory();
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1/hook",
+            "https://localhost/hook",
+            "http://10.1.2.3/x",
+            "https://192.168.0.5/x",
+            "https://[::1]/x",
+            "ftp://example.com/x",
+            "not-a-url",
+            // Non-canonical loopback/private encodings must also be rejected.
+            "https://localhost./hook",
+            "https://2130706433/hook",         // 127.0.0.1 as a u32
+            "https://0177.0.0.1/hook",         // octal
+            "https://127.1/hook",              // inet_aton short form
+            "https://[::ffff:127.0.0.1]/hook", // IPv4-mapped IPv6
+            "https://0.0.0.0/hook",            // unspecified
+            "https://[fe80::1%25eth0]/hook",   // zoned link-local (RFC 6874)
+        ] {
+            let ep = WebhookEndpoint::new("x", bad, None, EventFilter::All);
+            assert!(
+                matches!(r.register(ep), Err(RegistryError::InvalidUrl(_))),
+                "must reject {bad}"
+            );
+        }
+        // A public https URL still registers.
+        assert!(r
+            .register(WebhookEndpoint::new(
+                "ok",
+                "https://hooks.example.com/a",
+                None,
+                EventFilter::All
+            ))
+            .is_ok());
     }
 
     #[test]

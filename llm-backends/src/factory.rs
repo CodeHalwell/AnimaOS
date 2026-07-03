@@ -131,6 +131,44 @@ impl BackendFactory {
         }
     }
 
+    /// Builds a backend for `kind`, selecting a **live** client for the frontier
+    /// providers when their API key is present, and a fixture otherwise (IO-1).
+    ///
+    /// This is the difference the review flagged: `fixture()` always returns a
+    /// canned-reply stub, so routing a configured `ANTHROPIC_API_KEY` through it
+    /// produced silent sentinel output. `resolve` uses the real client when the
+    /// key is set, and warns loudly when a frontier provider is selected without
+    /// a key rather than silently degrading to fixtures.
+    pub fn resolve(kind: BackendKind) -> Arc<dyn LlmBackend> {
+        match kind {
+            BackendKind::Anthropic => match std::env::var("ANTHROPIC_API_KEY") {
+                Ok(key) if !key.is_empty() => {
+                    let model = std::env::var("ANIMA_ANTHROPIC_MODEL")
+                        .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
+                    Arc::new(AnthropicBackend::live(model, key))
+                }
+                _ => {
+                    eprintln!(
+                        "llm-backends: Anthropic selected but ANTHROPIC_API_KEY is unset — \
+                         using fixture mode (no real completions)"
+                    );
+                    Arc::new(AnthropicBackend::new())
+                }
+            },
+            BackendKind::OpenAi => match std::env::var("OPENAI_API_KEY") {
+                Ok(key) if !key.is_empty() => Arc::new(OpenAiCompatibleBackend::openai(key)),
+                _ => {
+                    eprintln!(
+                        "llm-backends: OpenAI selected but OPENAI_API_KEY is unset — \
+                         using fixture mode (no real completions)"
+                    );
+                    Arc::new(OpenAiBackend::new())
+                }
+            },
+            other => BackendFactory::fixture(other),
+        }
+    }
+
     /// Constructs a backend from an operator-supplied [`ProviderConfig`] (E8 S8.0).
     ///
     /// Chooses fixture vs live mode based on `ANIMA_COMPAT_LIVE`.
@@ -210,7 +248,7 @@ impl TierBackendChoices {
     /// |-------------|--------------------------|-------------------------------------------|
     /// | cheap-local | `ANIMA_CHEAP_BACKEND`    | `ollama` if `ANIMA_OLLAMA*` hints, else mock |
     /// | mid-tier    | `ANIMA_MID_BACKEND`      | the cheap-local choice (open decision left to operator) |
-    /// | frontier    | `ANIMA_FRONTIER_BACKEND` | `anthropic` if `ANTHROPIC_API_KEY` set, else mock |
+    /// | frontier    | `ANIMA_FRONTIER_BACKEND` | `anthropic` if `ANTHROPIC_API_KEY` set, else `openai` if `OPENAI_API_KEY` set, else mock |
     ///
     /// As a convenience, a global `ANIMA_BACKEND` (the legacy single-backend
     /// selector) seeds every tier when set and no per-tier override is given, so
@@ -258,6 +296,24 @@ impl TierBackendChoices {
             BackendFactory::fixture(self.frontier),
         )
     }
+
+    /// Materialise each tier choice, using a **live** client for a frontier
+    /// provider whose API key is present (IO-1) and fixtures otherwise.
+    ///
+    /// Returns `(cheap_local, mid_tier, frontier)`.
+    pub fn into_backends(
+        self,
+    ) -> (
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+        Arc<dyn LlmBackend>,
+    ) {
+        (
+            BackendFactory::resolve(self.cheap_local),
+            BackendFactory::resolve(self.mid_tier),
+            BackendFactory::resolve(self.frontier),
+        )
+    }
 }
 
 /// Parse a tier override env var, falling back to `default` when unset or when
@@ -282,14 +338,21 @@ fn default_cheap_local_kind() -> BackendKind {
     }
 }
 
-/// Default frontier provider: `anthropic` when an API key is configured,
-/// otherwise the CI-safe `mock`.
+/// Default frontier provider: `anthropic` when `ANTHROPIC_API_KEY` is set, else
+/// `openai` when `OPENAI_API_KEY` is set (both resolve to a live client via
+/// [`BackendFactory::resolve`]), otherwise the CI-safe `mock`.
 fn default_frontier_kind() -> BackendKind {
-    if std::env::var("ANTHROPIC_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false)
-    {
+    let has_key = |var: &str| std::env::var(var).map(|k| !k.is_empty()).unwrap_or(false);
+    frontier_kind_for(has_key("ANTHROPIC_API_KEY"), has_key("OPENAI_API_KEY"))
+}
+
+/// Env-free frontier-provider precedence (Anthropic ≻ OpenAI ≻ mock), split out
+/// so the selection is unit-testable without mutating process environment.
+fn frontier_kind_for(has_anthropic_key: bool, has_openai_key: bool) -> BackendKind {
+    if has_anthropic_key {
         BackendKind::Anthropic
+    } else if has_openai_key {
+        BackendKind::OpenAi
     } else {
         BackendKind::Mock
     }
@@ -299,6 +362,16 @@ fn default_frontier_kind() -> BackendKind {
 mod tests {
     use super::*;
     use crate::capabilities::BackendCapabilities;
+
+    #[test]
+    fn frontier_default_prefers_anthropic_then_openai_then_mock() {
+        assert_eq!(frontier_kind_for(true, true), BackendKind::Anthropic);
+        assert_eq!(frontier_kind_for(true, false), BackendKind::Anthropic);
+        // OpenAI-only deployments now auto-select the live OpenAI frontier
+        // instead of silently staying on the mock backend.
+        assert_eq!(frontier_kind_for(false, true), BackendKind::OpenAi);
+        assert_eq!(frontier_kind_for(false, false), BackendKind::Mock);
+    }
 
     #[test]
     fn factory_returns_anthropic_backend() {
