@@ -1266,9 +1266,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "bd5231412d905519dca6a5deb0327d407be68d6c941feec004533401d3a0a715"
 
 [[package]]
 name = "spki"
