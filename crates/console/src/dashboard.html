@@ -118,6 +118,72 @@
   .duel .t { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); border-radius: 2px; transition: left .5s; }
   #gatecard .why { color: var(--muted); font-size: 12px; margin-top: 8px; max-height: 72px; overflow-y: auto; }
 
+  /* ── Approval queue panel ────────────────────────────────────────── */
+  #aqpanel { display: none; }
+  #aqpanel.ready { display: block; }
+  .aq-empty { color: var(--faint); font-size: 12px; padding: 4px 0; }
+  .aq-item {
+    border: 1px solid var(--line-soft); border-radius: 9px; padding: 9px 11px; margin-bottom: 8px;
+    background: rgba(10, 13, 20, .5);
+  }
+  .aq-item:last-child { margin-bottom: 0; }
+  .aq-kind {
+    font: 600 9.5px var(--mono); text-transform: uppercase; letter-spacing: .08em;
+    color: var(--accent2); margin-bottom: 4px;
+  }
+  .aq-kind.new-tool { color: var(--warn); }
+  .aq-kind.weight-update { color: var(--accent); }
+  .aq-name { font-size: 12.5px; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
+  .aq-desc { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+  .aq-prov { font-size: 10.5px; color: var(--faint); font-family: var(--mono); margin-bottom: 7px; }
+  .aq-status { font: 600 10px var(--mono); padding: 2px 8px; border-radius: 999px; display: inline-block; margin-bottom: 8px; }
+  .aq-status.Pending { color: var(--warn); background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.3); }
+  .aq-status.Approved { color: var(--ok); background: rgba(74,222,128,.1); border: 1px solid rgba(74,222,128,.3); }
+  .aq-status.Rejected { color: var(--crit); background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.3); }
+  .aq-status.RolledBack { color: var(--muted); border: 1px solid var(--line); }
+  .aq-actions { display: flex; gap: 6px; }
+  .aq-btn {
+    font: 600 10px var(--mono); padding: 4px 11px; border-radius: 7px; border: 1px solid; cursor: pointer;
+    transition: filter .15s;
+  }
+  .aq-btn:hover { filter: brightness(1.2); }
+  .aq-btn:disabled { opacity: .4; cursor: default; }
+  .aq-btn.approve { color: var(--ok); border-color: rgba(74,222,128,.4); background: rgba(74,222,128,.08); }
+  .aq-btn.reject  { color: var(--crit); border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.08); }
+  #aqlist { max-height: 260px; overflow-y: auto; }
+
+  /* ── Skills & adapters panel ─────────────────────────────────────── */
+  #skillpanel { display: none; }
+  #skillpanel.ready { display: block; }
+  #skilllist { max-height: 180px; overflow-y: auto; }
+  .sk-item {
+    display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+    border-bottom: 1px solid var(--line-soft); font-size: 12px;
+  }
+  .sk-item:last-child { border-bottom: 0; }
+  .sk-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .sk-dot.Active { background: var(--ok); }
+  .sk-dot.Proposed { background: var(--warn); }
+  .sk-dot.Quarantined { background: var(--crit); }
+  .sk-dot.RolledBack { background: var(--faint); }
+  .sk-name { font-weight: 600; color: var(--ink); }
+  .sk-desc { color: var(--muted); font-size: 11.5px; }
+
+  /* ── Adapter library panel ───────────────────────────────────────── */
+  #adapterpanel { display: none; }
+  #adapterpanel.ready { display: block; }
+  #adlist { max-height: 180px; overflow-y: auto; }
+  .ad-item {
+    display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+    border-bottom: 1px solid var(--line-soft); font-size: 12px;
+  }
+  .ad-item:last-child { border-bottom: 0; }
+  .ad-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .ad-dot.MountableAdapter { background: var(--ok); }
+  .ad-dot.BakedVariant { background: var(--accent2); }
+  .ad-name { font-weight: 600; color: var(--ink); }
+  .ad-desc { color: var(--muted); font-size: 11.5px; }
+
   /* ── Conversation column ─────────────────────────────────────────── */
   #chatpanel { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
   #chatpanel h2 { padding: 16px 18px 0; margin-bottom: 6px; }
@@ -251,6 +317,24 @@
       <div class="duel"><div class="v" id="gateval" style="width:0%"></div><div class="t" id="gatethr" style="left:0%"></div></div>
       <div class="kv" style="padding:0"><span>value vs threshold</span><b id="gatenums">—</b></div>
       <div class="why" id="gatewhy">No gate decisions yet — the agent is idle until a sense wakes it.</div>
+    </div>
+
+    <!-- E15 S15.2 — Approval queue: hidden until the endpoint confirms it is wired -->
+    <div class="panel" id="aqpanel">
+      <h2>Approval queue <span id="aqcount" style="font-weight:400"></span></h2>
+      <div id="aqlist"><div class="aq-empty">No pending proposals.</div></div>
+    </div>
+
+    <!-- E11 S11.1 — Skills registry: hidden until the endpoint confirms it is wired -->
+    <div class="panel" id="skillpanel">
+      <h2>Skills <span id="skillcount" style="font-weight:400"></span></h2>
+      <div id="skilllist"><div class="aq-empty">No skills registered.</div></div>
+    </div>
+
+    <!-- E17 — Adapter library: hidden until the endpoint confirms it is wired -->
+    <div class="panel" id="adapterpanel">
+      <h2>Adapters <span id="adcount" style="font-weight:400"></span></h2>
+      <div id="adlist"><div class="aq-empty">No adapters loaded.</div></div>
     </div>
   </div>
 
@@ -479,8 +563,154 @@
     return (d ? d + "d " : "") + h + "h " + m + "m " + (s % 60) + "s";
   }
 
-  /* ── Transport ──────────────────────────────────────────────────── */
+  /* ── Approval queue ─────────────────────────────────────────────── */
   const token = new URLSearchParams(location.search).get("token");
+  const authHeaders = token ? { "Authorization": "Bearer " + token } : {};
+
+  function kindLabel(k) {
+    if (k.kind === "NewSkill") return { cls: "new-skill", text: "new skill" };
+    if (k.kind === "NewTool") return { cls: "new-tool", text: "new tool" };
+    if (k.kind === "WeightUpdate") return { cls: "weight-update", text: "weight update" };
+    return { cls: "", text: k.kind || "?" };
+  }
+  function kindName(k) {
+    return k.name || k.model_id || "—";
+  }
+  function kindDesc(k) {
+    return k.description || k.training_summary || "";
+  }
+  function statusLabel(s) {
+    if (typeof s === "string") return s;
+    return s.status || Object.keys(s)[0] || "?";
+  }
+
+  async function refreshApprovalQueue() {
+    try {
+      const r = await fetch("/approval-queue", { headers: authHeaders });
+      if (r.status === 404) return; // not wired
+      if (!r.ok) return;
+      const proposals = await r.json();
+      $("aqpanel").classList.add("ready");
+      const pending = proposals.filter(p => statusLabel(p.status) === "Pending");
+      $("aqcount").textContent = pending.length > 0 ? "· " + pending.length + " pending" : "";
+      const list = $("aqlist");
+      list.innerHTML = "";
+      if (!proposals.length) {
+        list.innerHTML = '<div class="aq-empty">No proposals.</div>';
+        return;
+      }
+      for (const p of proposals) {
+        const { cls, text } = kindLabel(p.kind);
+        const st = statusLabel(p.status);
+        const isPending = st === "Pending";
+        const el = document.createElement("div");
+        el.className = "aq-item";
+        el.innerHTML =
+          '<div class="aq-kind ' + esc(cls) + '">' + esc(text) + '</div>' +
+          '<div class="aq-name">' + esc(kindName(p.kind)) + '</div>' +
+          (kindDesc(p.kind) ? '<div class="aq-desc">' + esc(kindDesc(p.kind)) + '</div>' : '') +
+          '<div class="aq-prov">' + esc(p.provenance) + '</div>' +
+          '<div class="aq-status ' + esc(st) + '">' + esc(st) + '</div>' +
+          (isPending ? '<div class="aq-actions">' +
+            '<button class="aq-btn approve" data-act="approve">Approve</button>' +
+            '<button class="aq-btn reject"  data-act="reject">Reject</button>' +
+            '</div>' : '');
+        // Set data-id via dataset (not innerHTML) so proposal IDs containing
+        // quotes or other HTML-special characters cannot inject attributes.
+        if (isPending) {
+          el.querySelectorAll('.aq-btn').forEach(btn => { btn.dataset.id = p.id; });
+        }
+        list.appendChild(el);
+      }
+    } catch (e) { /* silently skip — offline or not wired */ }
+  }
+
+  $("aqlist").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".aq-btn");
+    if (!btn) return;
+    btn.disabled = true;
+    const id = btn.dataset.id;
+    const act = btn.dataset.act; // "approve" or "reject"
+    try {
+      const r = await fetch("/approval-queue/" + encodeURIComponent(id) + "/" + act, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "" }),
+      });
+      if (r.ok) {
+        refreshApprovalQueue();
+      } else {
+        btn.disabled = false;
+      }
+    } catch (e) { btn.disabled = false; }
+  });
+
+  /* ── Skills registry ─────────────────────────────────────────────── */
+  async function refreshSkills() {
+    try {
+      const r = await fetch("/skills", { headers: authHeaders });
+      if (r.status === 404) return; // not wired
+      if (!r.ok) return;
+      const skills = await r.json();
+      $("skillpanel").classList.add("ready");
+      const active = skills.filter(s => statusLabel(s.state) === "Active").length;
+      $("skillcount").textContent = "· " + active + "/" + skills.length;
+      const list = $("skilllist");
+      list.innerHTML = "";
+      if (!skills.length) {
+        list.innerHTML = '<div class="aq-empty">No skills registered.</div>';
+        return;
+      }
+      for (const sk of skills) {
+        const st = statusLabel(sk.state);
+        const el = document.createElement("div");
+        el.className = "sk-item";
+        el.innerHTML =
+          '<span class="sk-dot ' + esc(st) + '" title="' + esc(st) + '"></span>' +
+          '<div><div class="sk-name">' + esc(sk.manifest?.name || sk.id) + '</div>' +
+          '<div class="sk-desc">' + esc(sk.manifest?.description || "") + '</div></div>';
+        list.appendChild(el);
+      }
+    } catch (e) { /* silently skip */ }
+  }
+
+  /* ── Adapter library ─────────────────────────────────────────────── */
+  async function refreshAdapters() {
+    try {
+      const r = await fetch("/adapters", { headers: authHeaders });
+      if (r.status === 404) return; // not wired
+      if (!r.ok) return;
+      const adapters = await r.json();
+      $("adapterpanel").classList.add("ready");
+      $("adcount").textContent = "· " + adapters.length;
+      const list = $("adlist");
+      list.innerHTML = "";
+      if (!adapters.length) {
+        list.innerHTML = '<div class="aq-empty">No adapters loaded.</div>';
+        return;
+      }
+      for (const ad of adapters) {
+        const tier = ad.serving_tier || "";
+        const el = document.createElement("div");
+        el.className = "ad-item";
+        el.innerHTML =
+          '<span class="ad-dot ' + esc(tier) + '" title="' + esc(tier) + '"></span>' +
+          '<div><div class="ad-name">' + esc(ad.adapter_id) + '</div>' +
+          '<div class="ad-desc">' + esc(ad.description || "") + '</div></div>';
+        list.appendChild(el);
+      }
+    } catch (e) { /* silently skip */ }
+  }
+
+  // Poll approval queue, skills, and adapters every 8 seconds.
+  refreshApprovalQueue();
+  refreshSkills();
+  refreshAdapters();
+  setInterval(refreshApprovalQueue, 8000);
+  setInterval(refreshSkills, 8000);
+  setInterval(refreshAdapters, 8000);
+
+  /* ── Transport ──────────────────────────────────────────────────── */
   const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
   function connect() {
     const es = new EventSource(url);

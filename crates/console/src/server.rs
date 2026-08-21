@@ -1,14 +1,19 @@
 //! A dependency-free HTTP/1.1 server exposing the operator console.
 //!
-//! Three routes, all on one loopback-friendly port:
+//! Routes served:
 //!
-//! | Method + path     | Purpose                                                        |
-//! |-------------------|----------------------------------------------------------------|
-//! | `GET /`           | The self-contained browser dashboard (HTML + vanilla JS).      |
-//! | `GET /events`     | Server-Sent Events: the live [`OperatorEvent`] stream.         |
-//! | `POST /guidance`  | Afferent ingress — an [`OperatorInput`] becomes a sensory packet. |
-//! | `GET /healthz`    | Liveness probe.                                                |
-//! | `GET /metrics`    | Prometheus exposition-format metrics (E21).                    |
+//! | Method + path                          | Purpose                                                        |
+//! |----------------------------------------|----------------------------------------------------------------|
+//! | `GET /`                                | The self-contained browser dashboard (HTML + vanilla JS).      |
+//! | `GET /events`                          | Server-Sent Events: the live [`OperatorEvent`] stream.         |
+//! | `POST /guidance`                       | Afferent ingress — an [`OperatorInput`] becomes a sensory packet. |
+//! | `GET /healthz`                         | Liveness probe.                                                |
+//! | `GET /metrics`                         | Prometheus exposition-format metrics (E21).                    |
+//! | `GET /approval-queue`                  | All approval proposals as JSON (E15 S15.2, optional).          |
+//! | `POST /approval-queue/{id}/approve`    | Approve a pending proposal (E15 S15.2, optional).              |
+//! | `POST /approval-queue/{id}/reject`     | Reject a pending proposal (E15 S15.2, optional).               |
+//! | `GET /skills`                          | All skill entries as JSON (E11 S11.1, optional).               |
+//! | `GET /adapters`                        | All adapter artifacts as JSON (E8, optional).                  |
 //!
 //! It is hand-rolled on `std::net` (thread-per-connection) precisely so the
 //! `console` crate pulls in **no** third-party HTTP stack — keeping the
@@ -152,6 +157,15 @@ pub struct ConsoleServer {
     /// Avoids re-reading the full audit JSONL on every `GET /digest` call when
     /// the file has not changed.
     digest_cache: Mutex<Option<(std::time::SystemTime, String)>>,
+    /// Optional approval queue — when set, `GET /approval-queue` and the
+    /// approve/reject action endpoints are active (E15 S15.2 dashboard surface).
+    approval_queue: Option<Arc<Mutex<lifecycle::approval::ApprovalQueue>>>,
+    /// Optional skill registry — when set, `GET /skills` is active (E11 S11.1
+    /// dashboard surface).
+    skill_registry: Option<Arc<Mutex<skills::SkillRegistry>>>,
+    /// Optional adapter library — when set, `GET /adapters` is active (E8
+    /// adapter-library dashboard surface).
+    adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -201,6 +215,9 @@ impl ConsoleServer {
             digest_path: None,
             digest_agent_id: "anima".to_string(),
             digest_cache: Mutex::new(None),
+            approval_queue: None,
+            skill_registry: None,
+            adapter_library: None,
         }
     }
 
@@ -213,6 +230,34 @@ impl ConsoleServer {
     ) -> Self {
         self.digest_path = Some(path.into());
         self.digest_agent_id = agent_id.into();
+        self
+    }
+
+    /// Wire in a shared approval queue. When set, `GET /approval-queue` returns
+    /// all proposals as JSON, and `POST /approval-queue/{id}/approve` /
+    /// `POST /approval-queue/{id}/reject` allow operator decisions (E15 S15.2).
+    pub fn with_approval_queue(
+        mut self,
+        queue: Arc<Mutex<lifecycle::approval::ApprovalQueue>>,
+    ) -> Self {
+        self.approval_queue = Some(queue);
+        self
+    }
+
+    /// Wire in a shared skill registry. When set, `GET /skills` returns all
+    /// skill entries as JSON (E11 S11.1 dashboard surface).
+    pub fn with_skill_registry(mut self, registry: Arc<Mutex<skills::SkillRegistry>>) -> Self {
+        self.skill_registry = Some(registry);
+        self
+    }
+
+    /// Wire in a shared adapter library. When set, `GET /adapters` returns all
+    /// registered adapters as JSON (E8 adapter-library dashboard surface).
+    pub fn with_adapter_library(
+        mut self,
+        library: Arc<Mutex<anima_finetune::AdapterLibrary>>,
+    ) -> Self {
+        self.adapter_library = Some(library);
         self
     }
 
@@ -363,6 +408,34 @@ impl ConsoleServer {
             }
         }
 
+        // Dynamic path routing: approval-queue approve/reject actions.
+        // These must be checked before the static match because the paths
+        // contain a proposal ID segment that is only known at runtime.
+        if method == "POST" {
+            if let Some(rest) = path.strip_prefix("/approval-queue/") {
+                if let Some(raw_id) = rest.strip_suffix("/approve") {
+                    let id = percent_decode(raw_id);
+                    return self.serve_approval_action(
+                        &id,
+                        true,
+                        content_length,
+                        &mut reader,
+                        &mut out,
+                    );
+                }
+                if let Some(raw_id) = rest.strip_suffix("/reject") {
+                    let id = percent_decode(raw_id);
+                    return self.serve_approval_action(
+                        &id,
+                        false,
+                        content_length,
+                        &mut reader,
+                        &mut out,
+                    );
+                }
+            }
+        }
+
         match (method.as_str(), path.as_str()) {
             ("GET", "/healthz") => {
                 write_response(&mut out, 200, "OK", "text/plain; charset=utf-8", b"ok\n")
@@ -388,6 +461,102 @@ impl ConsoleServer {
                     "text/plain; version=0.0.4; charset=utf-8",
                     body.as_bytes(),
                 )
+            }
+            // E15 S15.2 — Approval queue: list all proposals.
+            // Returns 404 when the approval queue has not been wired in.
+            ("GET", "/approval-queue") => {
+                let Some(queue) = &self.approval_queue else {
+                    return write_json(
+                        &mut out,
+                        404,
+                        "Not Found",
+                        br#"{"error":"approval queue not available"}"#,
+                    );
+                };
+                let proposals = match queue.lock() {
+                    Ok(q) => q.all().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"queue lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&proposals) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
+            }
+            // E11 S11.1 — Skills registry: list all skill entries.
+            // Returns 404 when the skill registry has not been wired in.
+            ("GET", "/skills") => {
+                let Some(registry) = &self.skill_registry else {
+                    return write_json(
+                        &mut out,
+                        404,
+                        "Not Found",
+                        br#"{"error":"skill registry not available"}"#,
+                    );
+                };
+                let entries = match registry.lock() {
+                    Ok(r) => r.list_all().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"registry lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&entries) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
+            }
+            // E8 — Adapter library: list all registered adapters.
+            // Returns 404 when the adapter library has not been wired in.
+            ("GET", "/adapters") => {
+                let Some(library) = &self.adapter_library else {
+                    return write_json(
+                        &mut out,
+                        404,
+                        "Not Found",
+                        br#"{"error":"adapter library not available"}"#,
+                    );
+                };
+                let adapters = match library.lock() {
+                    Ok(l) => l.list().into_iter().cloned().collect::<Vec<_>>(),
+                    Err(_) => {
+                        return write_json(
+                            &mut out,
+                            500,
+                            "Internal Server Error",
+                            br#"{"error":"library lock poisoned"}"#,
+                        );
+                    }
+                };
+                match serde_json::to_vec(&adapters) {
+                    Ok(body) => write_json(&mut out, 200, "OK", &body),
+                    Err(_) => write_json(
+                        &mut out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"serialisation failed"}"#,
+                    ),
+                }
             }
             _ => write_response(
                 &mut out,
@@ -628,6 +797,136 @@ impl ConsoleServer {
             ),
         }
     }
+
+    /// Handle `POST /approval-queue/{id}/approve` and
+    /// `POST /approval-queue/{id}/reject`.  `approve` distinguishes the two.
+    ///
+    /// Body (optional JSON): `{"reason": "..."}`.  An empty body or missing
+    /// `reason` key defaults to an empty reason string.
+    fn serve_approval_action(
+        &self,
+        proposal_id: &str,
+        approve: bool,
+        content_length: usize,
+        reader: &mut BufReader<TcpStream>,
+        out: &mut TcpStream,
+    ) -> std::io::Result<()> {
+        let Some(queue) = &self.approval_queue else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"ok":false,"error":"approval queue not available"}"#,
+            );
+        };
+
+        const MAX_BODY: usize = 4 * 1024;
+        if content_length > MAX_BODY {
+            return write_json(
+                out,
+                413,
+                "Payload Too Large",
+                br#"{"ok":false,"error":"request body exceeds 4 KiB limit"}"#,
+            );
+        }
+
+        let reason = if content_length > 0 {
+            let mut buf = vec![0u8; content_length];
+            reader.read_exact(&mut buf)?;
+            let Ok(text) = String::from_utf8(buf) else {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+                );
+            };
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        400,
+                        "Bad Request",
+                        br#"{"ok":false,"error":"request body is not valid JSON"}"#,
+                    );
+                }
+            };
+            value
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        // Capture WeightUpdate (adapter_id, weights_digest) inside the same
+        // lock acquisition as approve/reject to avoid TOCTOU races. The adapter
+        // library is then updated *outside* the queue lock to prevent
+        // simultaneous lock ordering issues.
+        let (result, weight_op) = {
+            let mut q = match queue.lock() {
+                Ok(q) => q,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"ok":false,"error":"queue lock poisoned"}"#,
+                    );
+                }
+            };
+            // For WeightUpdate proposals, record the (adapter_id, digest) pair
+            // so we can forward the operator decision to the adapter library.
+            // ID format is "{adapter_id}@{weights_digest}" (adapter_bridge.rs).
+            let weight_op = q.get(proposal_id).and_then(|p| {
+                if let lifecycle::approval::ProposalKind::WeightUpdate {
+                    ref adapter_hash, ..
+                } = p.kind
+                {
+                    let adapter_id = match p.id.rfind('@') {
+                        Some(i) => p.id[..i].to_string(),
+                        None => p.id.clone(),
+                    };
+                    Some((adapter_id, adapter_hash.clone()))
+                } else {
+                    None
+                }
+            });
+            let result = if approve {
+                q.approve(proposal_id, &reason)
+            } else {
+                q.reject(proposal_id, &reason)
+            };
+            (result, weight_op)
+        };
+
+        match result {
+            Ok(()) => {
+                // Synchronise WeightUpdate decisions with the adapter library so
+                // that mount_gated sees operator sign-off (approve) or its
+                // revocation (reject), completing the human half of the two-stage
+                // adoption gate (S8.4.8 / AdapterLibrary::mount_gated).
+                if let (Some((adapter_id, weights_digest)), Some(library)) =
+                    (weight_op, &self.adapter_library)
+                {
+                    if let Ok(mut lib) = library.lock() {
+                        if approve {
+                            lib.record_operator_approval(&adapter_id, &weights_digest);
+                        } else {
+                            lib.revoke_operator_approval(&adapter_id, &weights_digest);
+                        }
+                    }
+                }
+                write_json(out, 200, "OK", br#"{"ok":true}"#)
+            }
+            Err(e) => {
+                let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e));
+                write_json(out, 422, "Unprocessable Entity", body.as_bytes())
+            }
+        }
+    }
 }
 
 /// Read and parse all complete lines from a vita audit JSONL file.
@@ -662,6 +961,44 @@ fn truncate(s: &str, max: usize) -> String {
         let mut t: String = s.chars().take(max).collect();
         t.push('…');
         t
+    }
+}
+
+/// Decode a percent-encoded URL path segment (`%2F` → `/`, `%40` → `@`, etc.).
+///
+/// Only `%XX` sequences with valid hex digits are decoded; everything else is
+/// passed through unchanged. Decoded bytes are collected first and then
+/// interpreted as UTF-8, so multi-byte sequences such as `%C3%A9` (é) are
+/// reconstructed correctly rather than being pushed as individual Latin-1
+/// scalars. Invalid UTF-8 is replaced with U+FFFD. Used to round-trip
+/// `encodeURIComponent`-encoded proposal IDs from the dashboard.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2)) {
+                if let (Some(h), Some(l)) = (hex_nibble(hi), hex_nibble(lo)) {
+                    decoded.push(h << 4 | l);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(decoded)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -740,7 +1077,7 @@ fn write_json(out: &mut TcpStream, code: u16, reason: &str, body: &[u8]) -> std:
 fn write_cors_preflight(out: &mut TcpStream) -> std::io::Result<()> {
     let header = "HTTP/1.1 204 No Content\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Methods: GET, OPTIONS\r\n\
          Access-Control-Allow-Headers: Authorization, Content-Type\r\n\
          Content-Length: 0\r\n\
          Connection: close\r\n\
@@ -1427,5 +1764,375 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── E15 S15.2: /approval-queue endpoints ──────────────────────────────────
+
+    fn start_with_queue() -> (
+        std::net::SocketAddr,
+        Arc<Mutex<lifecycle::approval::ApprovalQueue>>,
+    ) {
+        use lifecycle::approval::{Proposal, ProposalKind, ProposalStatus};
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let queue = Arc::new(Mutex::new(lifecycle::approval::ApprovalQueue::new()));
+        // Seed one pending proposal for tests.
+        queue.lock().unwrap().enqueue(Proposal {
+            id: "test-p1".to_string(),
+            kind: ProposalKind::NewSkill {
+                name: "test-skill".to_string(),
+                description: "a test skill".to_string(),
+                prompt_hash: "abc123".to_string(),
+            },
+            created_at_ns: 1_000_000_000,
+            provenance: "test".to_string(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+        let server = ConsoleServer::new(
+            hub.clone(),
+            bridge.clone(),
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().expect("spawn");
+        (addr, queue)
+    }
+
+    #[test]
+    fn approval_queue_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /approval-queue HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("404"), "expected 404: {resp}");
+    }
+
+    #[test]
+    fn approval_queue_lists_proposals_as_json() {
+        let (addr, _q) = start_with_queue();
+        let resp = http_request(
+            addr,
+            "GET /approval-queue HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains("application/json"), "content-type: {resp}");
+        assert!(resp.contains("test-p1"), "proposal id missing: {resp}");
+        assert!(resp.contains("NewSkill"), "proposal kind missing: {resp}");
+    }
+
+    #[test]
+    fn approval_queue_approve_transitions_proposal_to_approved() {
+        let (addr, queue) = start_with_queue();
+        let body = r#"{"reason":"looks good"}"#;
+        let req = format!(
+            "POST /approval-queue/test-p1/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &req);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains(r#""ok":true"#), "body: {resp}");
+        assert!(
+            queue.lock().unwrap().get("test-p1").unwrap().is_approved(),
+            "proposal should be approved"
+        );
+    }
+
+    #[test]
+    fn approval_queue_reject_transitions_proposal_to_rejected() {
+        let (addr, queue) = start_with_queue();
+        let body = r#"{"reason":"too risky"}"#;
+        let req = format!(
+            "POST /approval-queue/test-p1/reject HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &req);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        use lifecycle::approval::ProposalStatus;
+        assert!(
+            matches!(
+                queue.lock().unwrap().get("test-p1").unwrap().status,
+                ProposalStatus::Rejected { .. }
+            ),
+            "proposal should be rejected"
+        );
+    }
+
+    #[test]
+    fn approval_queue_approve_unknown_id_returns_422() {
+        let (addr, _q) = start_with_queue();
+        let body = r#"{"reason":"ok"}"#;
+        let req = format!(
+            "POST /approval-queue/no-such-id/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &req);
+        assert!(resp.contains("422"), "expected 422: {resp}");
+    }
+
+    #[test]
+    fn percent_encoded_proposal_id_is_decoded_server_side() {
+        use lifecycle::approval::{Proposal, ProposalKind, ProposalStatus};
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let queue = Arc::new(Mutex::new(lifecycle::approval::ApprovalQueue::new()));
+        // Proposal whose id contains characters that encodeURIComponent encodes.
+        // '@' → %40  (WeightUpdate ids)   '?' → %3F  (hypothetical edge-case)
+        let raw_id = "adapter@abc123";
+        queue.lock().unwrap().enqueue(Proposal {
+            id: raw_id.to_string(),
+            kind: ProposalKind::NewSkill {
+                name: "x".into(),
+                description: "x".into(),
+                prompt_hash: "x".into(),
+            },
+            created_at_ns: 1,
+            provenance: "test".into(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue));
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        // Client sends the id percent-encoded (as encodeURIComponent would).
+        let encoded_id = "adapter%40abc123";
+        let body = r#"{}"#;
+        let req = format!(
+            "POST /approval-queue/{encoded_id}/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{{}}",
+            body.len()
+        );
+        let resp = http_request(addr, &req);
+        assert!(
+            resp.contains("200 OK"),
+            "server should decode %40 to @ and find the proposal: {resp}"
+        );
+        assert!(
+            queue.lock().unwrap().get(raw_id).unwrap().is_approved(),
+            "proposal should be approved"
+        );
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_sequences() {
+        // é = U+00E9 = UTF-8 bytes [0xC3, 0xA9] = %C3%A9 (as encodeURIComponent produces)
+        assert_eq!(percent_decode("%C3%A9"), "é");
+        // ASCII round-trips unchanged.
+        assert_eq!(percent_decode("hello-world"), "hello-world");
+        // @ (ASCII but encoded by encodeURIComponent) decodes correctly.
+        assert_eq!(percent_decode("adapter%40abc123"), "adapter@abc123");
+        // Incomplete sequence is passed through literally (graceful degradation).
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%2"), "%2");
+        // Invalid hex nibble is left as-is.
+        assert_eq!(percent_decode("%GG"), "%GG");
+    }
+
+    // ── E11 S11.1: /skills endpoint ───────────────────────────────────────────
+
+    fn start_with_skills() -> std::net::SocketAddr {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let registry = Arc::new(Mutex::new(skills::SkillRegistry::with_builtins()));
+        let server = ConsoleServer::new(
+            hub.clone(),
+            bridge.clone(),
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_skill_registry(registry);
+        let (addr, _h) = server.spawn().expect("spawn");
+        addr
+    }
+
+    #[test]
+    fn skills_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /skills HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("404"), "expected 404: {resp}");
+    }
+
+    #[test]
+    fn skills_lists_builtin_skills_as_json() {
+        let addr = start_with_skills();
+        let resp = http_request(
+            addr,
+            "GET /skills HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains("application/json"), "content-type: {resp}");
+        // At least one builtin skill must be present.
+        assert!(
+            resp.contains(r#""state":"Active""#),
+            "no active skills: {resp}"
+        );
+    }
+
+    // ── E8: /adapters endpoint ────────────────────────────────────────────────
+
+    #[test]
+    fn adapters_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /adapters HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("404"), "expected 404: {resp}");
+    }
+
+    #[test]
+    fn adapters_lists_empty_library_as_json_array() {
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let library = Arc::new(Mutex::new(anima_finetune::AdapterLibrary::new(10)));
+        let server = ConsoleServer::new(
+            hub.clone(),
+            bridge.clone(),
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_adapter_library(library);
+        let (addr, _h) = server.spawn().expect("spawn");
+        let resp = http_request(
+            addr,
+            "GET /adapters HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains("application/json"), "content-type: {resp}");
+        assert!(resp.contains("[]"), "empty array expected: {resp}");
+    }
+
+    // ── WeightUpdate approval → adapter library wiring ────────────────────────
+
+    #[test]
+    fn approving_weight_update_proposal_calls_record_operator_approval() {
+        use anima_finetune::{
+            AdapterLibrary, AdoptionDecision, FineTuneConfig, FineTuneJob, FineTuner,
+            FixtureFineTuner, TrainingPair, TrainingSet,
+        };
+        use lifecycle::approval::{ApprovalQueue, Proposal, ProposalKind, ProposalStatus};
+
+        // Train a deterministic fixture adapter so we get a real artifact with a
+        // populated weights_digest, which record_adoption validates against.
+        let tuner = FixtureFineTuner::new();
+        let cfg = FineTuneConfig::new("base-q4", "episodic://test", "nightly-adapter");
+        let job = FineTuneJob::new("test-job".to_string(), cfg);
+        let pairs = vec![TrainingPair::new("q?", "a")];
+        let set = TrainingSet::from_pairs(&pairs);
+        let artifact = tuner.run_job(&job, set.pairs()).unwrap();
+        let adapter_id = artifact.adapter_id.clone();
+        let weights_digest = artifact.weights_digest.clone();
+
+        // Register the adapter and record automated adoption so only operator
+        // sign-off is missing before mount_gated would succeed.
+        let mut lib = AdapterLibrary::new(8);
+        lib.register(artifact.clone()).unwrap();
+        lib.record_adoption(&AdoptionDecision {
+            adapter_id: adapter_id.clone(),
+            weights_digest: weights_digest.clone(),
+            approved: true,
+            eval_passed: true,
+            alignment_passed: true,
+            reasons: vec![],
+        });
+        assert!(
+            lib.is_adopted(&adapter_id),
+            "precondition: adoption recorded"
+        );
+        assert!(
+            !lib.is_operator_approved(&adapter_id),
+            "precondition: not yet operator-approved"
+        );
+        let library = Arc::new(Mutex::new(lib));
+
+        // Enqueue a WeightUpdate proposal whose ID carries the same adapter_id@digest.
+        let proposal_id = format!("{adapter_id}@{weights_digest}");
+        let mut queue = ApprovalQueue::new();
+        queue.enqueue(Proposal {
+            id: proposal_id.clone(),
+            kind: ProposalKind::WeightUpdate {
+                model_id: "base-q4".to_string(),
+                adapter_hash: weights_digest.clone(),
+                rank: None,
+                training_summary: "1 pair".to_string(),
+            },
+            created_at_ns: 1,
+            provenance: "adoption gate".to_string(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+        let shared_queue = Arc::new(Mutex::new(queue));
+
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&shared_queue))
+        .with_adapter_library(Arc::clone(&library));
+        let (addr, _h) = server.spawn().expect("spawn");
+
+        let body = r#"{"reason":"operator approved"}"#;
+        let req = format!(
+            "POST /approval-queue/{}/approve HTTP/1.1\r\n\
+             Host: x\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            proposal_id,
+            body.len(),
+            body
+        );
+        let resp = http_request(addr, &req);
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(
+            library.lock().unwrap().is_operator_approved(&adapter_id),
+            "adapter library should reflect operator approval after the endpoint returns"
+        );
     }
 }
