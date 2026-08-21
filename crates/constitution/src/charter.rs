@@ -392,7 +392,7 @@ mod tests {
 
         let toml_with_hmac = format!(
             "{}\n\n[meta]\ncharter_version = 1\nhmac_hex = \"{hex}\"",
-            &EMBEDDED_CHARTER[..EMBEDDED_CHARTER
+            EMBEDDED_CHARTER[..EMBEDDED_CHARTER
                 .rfind("[meta]")
                 .unwrap_or(EMBEDDED_CHARTER.len())]
                 .trim()
@@ -460,7 +460,7 @@ mod tests {
         let hex = c.compute_hmac(key).unwrap();
         let sealed_toml = format!(
             "{}\n\n[meta]\ncharter_version = 1\nhmac_hex = \"{hex}\"",
-            &EMBEDDED_CHARTER[..EMBEDDED_CHARTER
+            EMBEDDED_CHARTER[..EMBEDDED_CHARTER
                 .rfind("[meta]")
                 .unwrap_or(EMBEDDED_CHARTER.len())]
                 .trim()

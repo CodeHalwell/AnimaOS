@@ -72,7 +72,10 @@ impl FrameAllocator {
 
         // SAFETY-equivalent reasoning (no unsafe needed here): we use
         // `fetch_update` to atomically reserve `frames` slots while ensuring
-        // the resulting cursor never exceeds `capacity`.
+        // the resulting cursor never exceeds `capacity`. The nightly toolchain
+        // renames this to `try_update` behind the `atomic_try_update` gate;
+        // suppress the deprecation so both stable and nightly builds pass.
+        #[allow(deprecated)]
         let result = self
             .next
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {

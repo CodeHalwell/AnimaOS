@@ -168,6 +168,10 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // All intermediate arithmetic is checked (returning None on overflow)
         // so that an adversarially large `layout` cannot bypass the bounds
         // check via address wrapping.
+        // The nightly toolchain renames `fetch_update` to `try_update`
+        // (unstable `atomic_try_update`); suppress the deprecation so both
+        // stable and nightly builds pass until the feature stabilises.
+        #[allow(deprecated)]
         let result = self
             .cursor
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cursor| {
