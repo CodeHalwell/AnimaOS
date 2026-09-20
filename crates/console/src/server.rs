@@ -166,6 +166,12 @@ pub struct ConsoleServer {
     /// Optional adapter library — when set, `GET /adapters` is active (E8
     /// adapter-library dashboard surface).
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    /// Shared feedback store, when wired — backs `POST /feedback` (E33 S33.4).
+    ///
+    /// The E24 store has existed since the operational wave with only a CLI in
+    /// front of it, so quality signal could only be recorded by someone who
+    /// had already left the conversation.
+    feedback: Option<(Arc<Mutex<feedback::FeedbackStore>>, String)>,
     /// Shared conversation history, when wired: `(store, session_id)`.
     ///
     /// The same store the agent's conversation memory writes to (E33 S33.1),
@@ -211,6 +217,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// the heartbeat cadence.  Short enough that the beat lands on time, long
 /// enough that an idle console costs one wakeup a second.
 const HEARTBEAT_POLL: Duration = Duration::from_secs(1);
+
+/// Longest free-text correction stored with a feedback rating.
+const MAX_FEEDBACK_COMMENT: usize = 2000;
 
 /// Turns returned by `GET /conversation` when no `limit` is given.
 const DEFAULT_CONVERSATION_LIMIT: usize = 100;
@@ -271,6 +280,7 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            feedback: None,
             conversation: None,
             message_seq: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
@@ -314,6 +324,17 @@ impl ConsoleServer {
 
     /// Wire in a shared adapter library. When set, `GET /adapters` returns all
     /// registered adapters as JSON (E8 adapter-library dashboard surface).
+    /// Wire in the shared feedback store so `POST /feedback` is active
+    /// (E33 S33.4).  `user_id` is the operator the ratings are attributed to.
+    pub fn with_feedback(
+        mut self,
+        store: Arc<Mutex<feedback::FeedbackStore>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.feedback = Some((store, user_id.into()));
+        self
+    }
+
     /// Wire in the shared conversation store so `GET /conversation` is active
     /// (E33 S33.1).  Without it the route answers 404 and a client falls back
     /// to whatever the event stream replays.
@@ -525,6 +546,8 @@ impl ConsoleServer {
             // E33 S33.1 — durable conversation history, so a reloaded page
             // paints the real transcript instead of the replay ring's tail.
             ("GET", "/conversation") => self.serve_conversation(&query, &mut out),
+            // E33 S33.4 — rate a reply from the conversation view.
+            ("POST", "/feedback") => self.serve_feedback(&mut reader, content_length, &mut out),
             // S15.1 — "While you were away" activity digest
             ("GET", "/digest") => self.serve_digest(&mut out),
             // E21 — Prometheus metrics endpoint
@@ -879,6 +902,119 @@ impl ConsoleServer {
                 "Bad Request",
                 br#"{"ok":false,"error":"invalid input"}"#,
             ),
+        }
+    }
+
+    /// Record operator feedback on one reply (E33 S33.4).
+    ///
+    /// Body: `{"task_id": "<id>", "rating": "up"|"down", "comment": "…"}`.
+    /// `task_id` identifies the invocation being rated and is echoed into the
+    /// durable record, so a correction can be traced back to the exact answer.
+    fn serve_feedback(
+        &self,
+        reader: &mut BufReader<TcpStream>,
+        content_length: usize,
+        out: &mut TcpStream,
+    ) -> std::io::Result<()> {
+        let Some((store, user_id)) = &self.feedback else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"ok":false,"error":"feedback not available"}"#,
+            );
+        };
+
+        const MAX_BODY: usize = 8 * 1024;
+        if content_length > MAX_BODY {
+            return write_json(
+                out,
+                413,
+                "Payload Too Large",
+                br#"{"ok":false,"error":"request body exceeds 8 KiB limit"}"#,
+            );
+        }
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body)?;
+        let Ok(body) = String::from_utf8(body) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+            );
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"request body is not valid JSON"}"#,
+            );
+        };
+
+        let Some(task_id) = value.get("task_id").and_then(|v| v.as_str()) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"task_id is required"}"#,
+            );
+        };
+        // Same alphabet rule as the correlation ids: this reaches the durable
+        // store and every surface that renders it.
+        if !valid_message_id(task_id) {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"task_id must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+            );
+        }
+
+        let rating = match value.get("rating").and_then(|v| v.as_str()) {
+            Some("up") => feedback::FeedbackRating::ThumbsUp,
+            Some("down") => feedback::FeedbackRating::ThumbsDown,
+            _ => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"rating must be 'up' or 'down'"}"#,
+                );
+            }
+        };
+
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut record = feedback::FeedbackRecord::new(user_id, task_id, rating, now_ns);
+        if let Some(comment) = value
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.trim().is_empty())
+        {
+            record = record.with_correction(truncate(comment, MAX_FEEDBACK_COMMENT));
+        }
+
+        let mut guard = match store.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return write_json(
+                    out,
+                    500,
+                    "Internal Server Error",
+                    br#"{"ok":false,"error":"feedback store lock poisoned"}"#,
+                );
+            }
+        };
+        match guard.record(record) {
+            Ok(()) => write_json(out, 202, "Accepted", br#"{"ok":true}"#),
+            Err(e) => {
+                let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e.to_string()));
+                write_json(out, 500, "Internal Server Error", body.as_bytes())
+            }
         }
     }
 
@@ -1400,6 +1536,91 @@ mod tests {
                 echoed.len()
             ),
             other => panic!("expected an Accepted echo, got {other:?}"),
+        }
+    }
+
+    // ── E33 S33.4 — feedback ──────────────────────────────────────────────
+
+    fn start_with_feedback() -> (std::net::SocketAddr, Arc<Mutex<feedback::FeedbackStore>>) {
+        let store = Arc::new(Mutex::new(feedback::FeedbackStore::in_memory()));
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let addr = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_feedback(Arc::clone(&store), "user:operator")
+        .spawn()
+        .expect("spawn")
+        .0;
+        (addr, store)
+    }
+
+    fn post_feedback(addr: std::net::SocketAddr, body: &str) -> String {
+        http_request(
+            addr,
+            &format!(
+                "POST /feedback HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    #[test]
+    fn feedback_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = post_feedback(addr, r#"{"task_id":"7","rating":"up"}"#);
+        assert!(resp.contains("404 Not Found"), "resp: {resp}");
+    }
+
+    #[test]
+    fn a_rating_reaches_the_durable_store() {
+        let (addr, store) = start_with_feedback();
+        let resp = post_feedback(addr, r#"{"task_id":"7","rating":"up"}"#);
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        let guard = store.lock().unwrap();
+        let records = guard.list();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].invocation_id, "7");
+        assert_eq!(records[0].rating, feedback::FeedbackRating::ThumbsUp);
+    }
+
+    #[test]
+    fn a_comment_is_stored_as_a_correction() {
+        let (addr, store) = start_with_feedback();
+        let resp = post_feedback(
+            addr,
+            r#"{"task_id":"7","rating":"down","comment":"it missed the second question"}"#,
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        let guard = store.lock().unwrap();
+        assert!(guard.list()[0].has_correction());
+    }
+
+    #[test]
+    fn malformed_feedback_is_rejected_with_a_parseable_error() {
+        let (addr, _store) = start_with_feedback();
+        for body in [
+            r#"{"rating":"up"}"#,                     // no task_id
+            r#"{"task_id":"7"}"#,                     // no rating
+            r#"{"task_id":"7","rating":"sideways"}"#, // unknown rating
+            r#"{"task_id":"bad id","rating":"up"}"#,  // hostile id
+            r#"not json at all"#,
+        ] {
+            let resp = post_feedback(addr, body);
+            assert!(resp.contains("400 Bad Request"), "accepted {body}: {resp}");
+            // Every error body must itself be valid JSON — a client that
+            // parses the response must not choke on the rejection.
+            let payload = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(payload).is_ok(),
+                "error body is not valid JSON: {payload}"
+            );
         }
     }
 

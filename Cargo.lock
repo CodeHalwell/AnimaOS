@@ -344,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "anima-finetune",
  "console-proto",
+ "feedback",
  "interoception",
  "lifecycle",
  "metrics",

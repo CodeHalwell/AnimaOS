@@ -5207,6 +5207,21 @@ pub(crate) fn cmd_serve() {
     if let Some((store, session_id)) = conversation_store {
         console = console.with_conversation(store, session_id);
     }
+    // E33 S33.4 — quality signal collected where the reply is read, rather
+    // than only from `anima feedback` after the fact.
+    let feedback_path = feedback::FeedbackStore::default_path(&agent_id);
+    let feedback_store = feedback::FeedbackStore::open(&feedback_path).unwrap_or_else(|e| {
+        eprintln!(
+            "anima-hosted: cannot open the feedback store at {} ({e}); \
+             ratings will not persist this run",
+            feedback_path.display()
+        );
+        feedback::FeedbackStore::in_memory()
+    });
+    console = console.with_feedback(
+        Arc::new(std::sync::Mutex::new(feedback_store)),
+        operator_user_id(),
+    );
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.

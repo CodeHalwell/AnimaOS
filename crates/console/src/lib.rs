@@ -64,6 +64,7 @@ pub struct Console {
     skill_registry: Option<Arc<Mutex<skills::SkillRegistry>>>,
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
     conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
+    feedback: Option<(Arc<Mutex<feedback::FeedbackStore>>, String)>,
 }
 
 impl Console {
@@ -82,7 +83,19 @@ impl Console {
             skill_registry: None,
             adapter_library: None,
             conversation: None,
+            feedback: None,
         }
+    }
+
+    /// Wire in the shared feedback store so `POST /feedback` accepts ratings on
+    /// the agent's replies (E33 S33.4).
+    pub fn with_feedback(
+        mut self,
+        store: Arc<Mutex<feedback::FeedbackStore>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.feedback = Some((store, user_id.into()));
+        self
     }
 
     /// Wire in the shared conversation store so `GET /conversation` serves the
@@ -154,6 +167,9 @@ impl Console {
         }
         if let Some((store, session_id)) = &self.conversation {
             server = server.with_conversation(Arc::clone(store), session_id.clone());
+        }
+        if let Some((store, user_id)) = &self.feedback {
+            server = server.with_feedback(Arc::clone(store), user_id.clone());
         }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
