@@ -193,6 +193,30 @@
   .bubble.op { align-self: flex-end; background: linear-gradient(135deg, rgba(92, 200, 255, .16), rgba(139, 124, 246, .16)); border: 1px solid rgba(92, 200, 255, .25); border-bottom-right-radius: 4px; }
   .bubble.agent { align-self: flex-start; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
   .bubble.agent .meta { color: var(--msg); }
+  /* E33 S33.3 — the agent asking the operator something. Deliberately not a
+     bubble: it is a prompt for input, and should read as one. */
+  .ask {
+    align-self: flex-start; max-width: 82%; padding: 12px 14px; border-radius: 14px;
+    border: 1px solid rgba(251, 191, 36, .42); background: rgba(251, 191, 36, .07);
+    border-bottom-left-radius: 4px;
+  }
+  .ask .meta {
+    display: block; font: 600 10px var(--mono); letter-spacing: .08em;
+    text-transform: uppercase; color: var(--warn); margin-bottom: 5px;
+  }
+  .ask .q { font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+  .ask .why { margin-top: 6px; font: 400 11px var(--mono); color: var(--faint); }
+  .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .ask .opts button {
+    font: 600 11px var(--sans); padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    color: var(--ink); background: rgba(10, 13, 20, .6); border: 1px solid var(--line);
+    transition: border-color .2s, color .2s;
+  }
+  .ask .opts button:hover { border-color: var(--warn); color: var(--warn); }
+  .ask .opts button:disabled { opacity: .45; cursor: default; }
+  .ask.answered { border-color: var(--line); background: rgba(10, 13, 20, .4); }
+  .ask.answered .meta { color: var(--faint); }
+
   .bubble .status {
     display: block; margin-top: 6px; font: 500 10px var(--mono);
     letter-spacing: .05em; color: var(--faint);
@@ -496,6 +520,66 @@
     el.textContent = (STATUS_TEXT[state] || state) + (detail ? " · " + detail : "");
   }
 
+  /* ── Agent questions (E33 S33.3) ────────────────────────────────────
+     Two sources, one shape: a low-confidence completion, and a proposal
+     waiting for approval. They differ only in where the answer goes —
+     an approval decision has its own audited endpoint, so a quick reply
+     for one posts there rather than sending guidance. */
+  const answered = new Set();
+  function renderQuestion(ev) {
+    if (answered.has(ev.question_id)) return;
+    const stick = nearBottom();
+    const el = document.createElement("div");
+    el.className = "ask";
+    el.innerHTML =
+      '<span class="meta">anima is asking</span>' +
+      '<div class="q">' + esc(ev.text) + "</div>" +
+      (ev.reason ? '<div class="why">' + esc(ev.reason) + "</div>" : "");
+    const opts = document.createElement("div");
+    opts.className = "opts";
+    for (const option of (ev.options || [])) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = option;
+      b.addEventListener("click", () => answerQuestion(ev, option, el));
+      opts.appendChild(b);
+    }
+    if (opts.childNodes.length) el.appendChild(opts);
+    chat.appendChild(el);
+    scrollChat(stick);
+  }
+
+  async function answerQuestion(ev, option, el) {
+    for (const b of el.querySelectorAll("button")) b.disabled = true;
+    const approvalId = (ev.question_id || "").startsWith("approval:")
+      ? ev.question_id.slice("approval:".length)
+      : null;
+    try {
+      if (approvalId) {
+        // An approval has its own audited decision endpoint; routing it
+        // through guidance would record a chat line instead of a decision.
+        const act = option === "approve" ? "approve" : "reject";
+        await fetch("/approval-queue/" + encodeURIComponent(approvalId) + "/" + act, {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "answered from the console" }),
+        });
+        refreshApprovalQueue();
+      } else {
+        await fetch("/guidance", {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ text: option, priority: "Normal", reply_to: ev.question_id }),
+        });
+      }
+      answered.add(ev.question_id);
+      el.classList.add("answered");
+    } catch (err) {
+      for (const b of el.querySelectorAll("button")) b.disabled = false;
+      notice("could not answer · " + String(err), true);
+    }
+  }
+
   function showTyping(taskId) {
     if (typing.has(taskId)) return;
     const stick = nearBottom();
@@ -611,6 +695,10 @@
         if (ev.message_id) setStatus(ev.message_id, "accepted", el);
         break;
       }
+      case "AgentQuestion":
+        renderQuestion(ev);
+        addFeed("audit", "ask?", ev.text + " — " + (ev.reason || ""));
+        break;
       case "Audit":
         if (ev.kind === "OperatorGuidance") {
           // Two detail shapes are emitted by POST /guidance:

@@ -809,6 +809,21 @@ impl ConsoleServer {
             ),
         };
 
+        // Same alphabet rule as the correlation id: it is echoed to every
+        // console and must not need escaping at each point of use.
+        let reply_to = match input.reply_to.as_deref() {
+            Some(id) if valid_message_id(id) => Some(id.to_string()),
+            Some(_) => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"reply_to must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+                );
+            }
+            None => None,
+        };
+
         // E6.6: when `force` is set, route through `packetize_text_forced` so
         // vita's somatic loop can record an audited GateOverride::OperatorForced
         // entry.  Policy bounds still apply — the operator is a potentially-
@@ -848,6 +863,7 @@ impl ConsoleServer {
                     },
                     forced,
                     force_reason: input.force.clone(),
+                    reply_to,
                     text: truncate(&input.text, GUIDANCE_ECHO_LIMIT),
                 });
                 let body = format!(r#"{{"ok":true,"message_id":{}}}"#, json_string(&message_id));

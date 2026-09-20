@@ -36,6 +36,15 @@ pub(crate) fn print_audit(manager: &LifecycleManager) {
             AuditEntry::TaskFailed { task_id, error, .. } => {
                 println!("  ✗ failed    task={task_id} error={error}")
             }
+            // E33 S33.3 — the agent asking its operator for help.
+            AuditEntry::HelpRequested {
+                task_id,
+                task_description,
+                confidence,
+                ..
+            } => println!(
+                "  ? help      task={task_id} confidence={confidence:.2} about={task_description:?}"
+            ),
             // E33 S33.2 — which operator message caused this task.
             AuditEntry::OperatorMessageLinked {
                 task_id,

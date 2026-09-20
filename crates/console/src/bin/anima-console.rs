@@ -385,6 +385,7 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
             priority,
             forced,
             force_reason,
+            reply_to,
             text,
         } => {
             let urgency = if forced {
@@ -393,7 +394,8 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
                 priority.as_str().to_string()
             };
             s.feed.push_front(format!(
-                "you   [{urgency}] [{message_id}]{} {text}",
+                "you   [{urgency}] [{message_id}]{}{} {text}",
+                reply_to.map(|q| format!(" ↩{q}")).unwrap_or_default(),
                 force_reason
                     .map(|r| format!(" (reason: {r})"))
                     .unwrap_or_default()

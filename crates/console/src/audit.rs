@@ -153,6 +153,34 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
             kind: "CortexFault".into(),
             detail: format!("task {}: {}", s("task_id"), s("error")),
         },
+        // E33 S33.3 — the agent asking its operator something.  Suggested
+        // answers are rendered here rather than carried in the audit entry:
+        // the log records the fact, the console decides the affordances.
+        "HelpRequested" => OperatorEvent::AgentQuestion {
+            task_id: u64f("task_id"),
+            question_id: format!("help-{}", u64f("task_id")),
+            text: format!(
+                "I answered {:?} but I'm not confident in it ({:.2}). \
+                 Is that good enough, or should I try again?",
+                s("task_description"),
+                f32f("confidence")
+            ),
+            options: vec!["that's fine".to_string(), "try again".to_string()],
+            reason: s("reason"),
+        },
+        // A pending proposal is a question too — the operator's answer is the
+        // approve/reject decision, addressed by the proposal id.
+        "ApprovalProposalQueued" => OperatorEvent::AgentQuestion {
+            task_id: 0,
+            question_id: format!("approval:{}", s("proposal_id")),
+            text: format!(
+                "I'd like to add a {} ({}). Approve it?",
+                s("kind"),
+                s("proposal_id")
+            ),
+            options: vec!["approve".to_string(), "reject".to_string()],
+            reason: s("provenance"),
+        },
         "IdentityUpdated" => OperatorEvent::Audit {
             kind: "IdentityUpdated".into(),
             detail: format!("{} = {}", s("key"), s("new_value")),
@@ -434,6 +462,58 @@ mod correlation_tests {
         format!(
             r#"{{"OperatorMessageLinked":{{"agent_id":"a","task_id":{task_id},"message_id":"{message_id}"}}}}"#
         )
+    }
+
+    #[test]
+    fn a_help_request_becomes_an_answerable_question() {
+        let mut t = CorrelationTracker::new();
+        let ev = t
+            .translate_line(
+                r#"{"HelpRequested":{"agent_id":"a","task_id":9,"task_description":"deploy the thing","confidence":0.22,"reason":"confidence 0.22 is below the help-request floor"}}"#,
+            )
+            .expect("question event");
+        match ev {
+            OperatorEvent::AgentQuestion {
+                task_id,
+                question_id,
+                text,
+                options,
+                reason,
+            } => {
+                assert_eq!(task_id, 9);
+                assert_eq!(question_id, "help-9");
+                assert!(text.contains("deploy the thing"), "text: {text}");
+                assert!(text.contains("0.22"), "confidence not quoted: {text}");
+                assert_eq!(options, vec!["that's fine", "try again"]);
+                assert!(reason.contains("below the help-request floor"));
+            }
+            other => panic!("expected AgentQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_queued_proposal_becomes_a_question_addressed_by_proposal_id() {
+        // The quick replies must reach the audited approve/reject endpoint,
+        // so the id has to survive into the question.
+        let mut t = CorrelationTracker::new();
+        let ev = t
+            .translate_line(
+                r#"{"ApprovalProposalQueued":{"agent_id":"a","proposal_id":"skill-42","kind":"new-skill","provenance":"dreaming phase cycle 7"}}"#,
+            )
+            .expect("question event");
+        match ev {
+            OperatorEvent::AgentQuestion {
+                question_id,
+                options,
+                reason,
+                ..
+            } => {
+                assert_eq!(question_id, "approval:skill-42");
+                assert_eq!(options, vec!["approve", "reject"]);
+                assert_eq!(reason, "dreaming phase cycle 7");
+            }
+            other => panic!("expected AgentQuestion, got {other:?}"),
+        }
     }
 
     #[test]

@@ -258,6 +258,24 @@ pub enum AuditEntry {
         tokens_emitted: u32,
         response: String,
     },
+    /// The agent is asking its operator for help (E33 S33.3).
+    ///
+    /// Emitted when a completion's confidence falls below the tracker's
+    /// ask-for-help floor.  Surfacing the uncertainty is the point: the
+    /// alternative is an agent that confabulates rather than admitting it does
+    /// not know.  It is a *signal*, not a block — the agent has already
+    /// answered and carries on whether or not anyone replies, consistent with
+    /// degrading gracefully when the human is absent.
+    HelpRequested {
+        agent_id: String,
+        task_id: u64,
+        /// What the agent was asked to do.
+        task_description: String,
+        /// The confidence estimate that triggered the request.
+        confidence: f32,
+        /// Why help is being requested, in the tracker's own words.
+        reason: String,
+    },
     /// Ties a dispatched task back to the operator message that caused it
     /// (E33 S33.2).
     ///

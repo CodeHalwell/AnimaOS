@@ -1345,6 +1345,13 @@ pub async fn somatic_execution_loop(
                 prompt,
             });
 
+            // Kept for the help request below: the operator's own words, not
+            // the composed context, are what a question should quote back.
+            #[cfg(feature = "std")]
+            let prompt_for_help = task.prompt.clone();
+            #[cfg(feature = "std")]
+            let mut help_request: Option<AuditEntry> = None;
+
             // E33 S33.1: wrap the human's text in conversational context on the
             // way to the backend.  Deliberately *after* the TaskStarted entry
             // above, so the audit log — and every console built on it — keeps
@@ -1403,6 +1410,25 @@ pub async fn somatic_execution_loop(
                             // dispatch outcome (success) as a calibration point.
                             let score = ct.estimate_confidence(&outcome.response, 0);
                             ct.record_outcome(score.value, true);
+
+                            // E33 S33.3: a completion the agent is not
+                            // confident in becomes a question to the operator
+                            // rather than a silently shaky answer.  The
+                            // HelpRequest type has existed since E14; nothing
+                            // ever surfaced it to a human.
+                            if score.asks_for_help {
+                                let help = crate::metacognition::HelpRequest::from_low_confidence(
+                                    &prompt_for_help,
+                                    &score,
+                                );
+                                help_request = Some(AuditEntry::HelpRequested {
+                                    agent_id: agent_id.clone(),
+                                    task_id,
+                                    task_description: help.task_description,
+                                    confidence: help.confidence,
+                                    reason: help.reason,
+                                });
+                            }
                         }
                     }
 
@@ -1420,6 +1446,22 @@ pub async fn somatic_execution_loop(
                         tokens_emitted: outcome.tokens_emitted,
                         response: outcome.response,
                     });
+
+                    // E33 S33.3: after the reply, so an operator reading the
+                    // log (or the console) sees the answer and then the doubt
+                    // about it, in that order.
+                    #[cfg(feature = "std")]
+                    if let Some(entry) = help_request {
+                        if let AuditEntry::HelpRequested { ref reason, .. } = entry {
+                            // The question is the agent's own turn: an answer
+                            // then arrives with it already in context, so no
+                            // separate question-tracking state is needed.
+                            if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                                lock_recover(&memory).record_question(task_id, reason);
+                            }
+                        }
+                        lifecycle.audit.push(entry);
+                    }
                 }
                 Err(error) => {
                     lifecycle.audit.push(AuditEntry::TaskFailed {
@@ -1663,6 +1705,73 @@ mod tests {
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
         assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 2);
+    }
+
+    #[test]
+    fn a_low_confidence_completion_asks_the_operator_rather_than_staying_quiet() {
+        // E33 S33.3: the HelpRequest type has existed since E14 but nothing
+        // ever surfaced it.  A hedging, short answer must now reach the
+        // operator as a question — after the reply it is about.
+        let mut m = manager("agent-help", Some(2));
+        m.enable_confidence(metacognition::ConfidenceTracker::default());
+        // The mock backend echoes the prompt, so this is also the response:
+        // short and full of uncertainty markers.
+        m.senses
+            .packetize_text_checked("unsure perhaps possibly", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let help_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::HelpRequested { .. }))
+            .unwrap_or_else(|| panic!("no help request; entries: {entries:?}"));
+        let completed_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::TaskCompleted { .. }))
+            .expect("task completed");
+        assert!(
+            completed_at < help_at,
+            "the question must follow the answer it doubts"
+        );
+
+        match &entries[help_at] {
+            AuditEntry::HelpRequested {
+                confidence, reason, ..
+            } => {
+                assert!(
+                    *confidence < 0.35,
+                    "confidence {confidence} not below floor"
+                );
+                assert!(!reason.is_empty(), "help request carries no reason");
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_confident_completion_asks_nothing() {
+        let mut m = manager("agent-confident", Some(2));
+        m.enable_confidence(metacognition::ConfidenceTracker::default());
+        m.senses
+            .packetize_text_checked(
+                "Completed all steps successfully with verified results across the board.",
+                SensoryPriority::Normal,
+            )
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::HelpRequested { .. })),
+            "a confident answer should not produce a question"
+        );
     }
 
     #[test]

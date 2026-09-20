@@ -221,6 +221,10 @@ pub enum OperatorEvent {
         forced: bool,
         /// The override reason, when `forced`.
         force_reason: Option<String>,
+        /// The [`AgentQuestion::question_id`] this line answers, when it
+        /// answers one — so every console can thread the reply under the
+        /// question, not just the one that happened to send it.
+        reply_to: Option<String>,
         /// The full guidance text.
         text: String,
     },
@@ -354,6 +358,7 @@ impl OperatorEvent {
                 priority,
                 forced,
                 force_reason,
+                reply_to,
                 text,
             } => {
                 let _ = write!(s, "{{\"type\":\"Accepted\",\"message_id\":");
@@ -362,6 +367,13 @@ impl OperatorEvent {
                 write_json_str(&mut s, priority.as_str());
                 let _ = write!(s, ",\"forced\":{forced},\"force_reason\":");
                 match force_reason {
+                    Some(r) => write_json_str(&mut s, r),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
+                let _ = write!(s, ",\"reply_to\":");
+                match reply_to {
                     Some(r) => write_json_str(&mut s, r),
                     None => {
                         let _ = write!(s, "null");
@@ -880,6 +892,7 @@ mod tests {
                 priority: Priority::High,
                 forced: true,
                 force_reason: Some("operator \"emergency\"".to_string()),
+                reply_to: None,
                 text: "check disk space\nnow".to_string(),
             },
             OperatorEvent::Accepted {
@@ -887,6 +900,7 @@ mod tests {
                 priority: Priority::Normal,
                 forced: false,
                 force_reason: None,
+                reply_to: Some("help-42".to_string()),
                 text: "hello".to_string(),
             },
             OperatorEvent::AgentQuestion {
