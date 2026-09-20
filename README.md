@@ -158,6 +158,12 @@ anima-os/
 - `anima-hosted serve` — boots a single agent and the console: a hand-rolled
   HTTP/SSE server (`GET /events`, `POST /guidance`) with an embedded browser
   dashboard at `GET /`; zero third-party HTTP deps
+- Conversation (E33): durable history over the E22 session store, so replies
+  follow from prior turns and survive a restart; per-message correlation and
+  status from acceptance through gate to reply; agent-initiated questions when
+  confidence is low or a proposal needs sign-off; markdown-rendered replies,
+  in-place feedback, and a force toggle that requires an audited reason. Every
+  operator message is arbitrated by the Striatal Gate.
 - `anima-console` client: `tui` (pure-ANSI dashboard), `tap`, `send`, and the
   microVM `serial` bridge
 - Decoupled by construction: tails `vita`'s audit JSONL for egress and shares

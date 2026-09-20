@@ -28,7 +28,12 @@ and are load-bearing for everything below:
 
 1. **The human cannot preempt the kernel.** Guidance enters the prioritisation
    queue and is weighted against the agent's current state by the Striatal
-   Gate. It is never executed directly.
+   Gate. It is never executed directly. *(True of every operator packet as of
+   E33 S33.6. Before that only `force` reached the gate and ordinary guidance
+   was admitted unconditionally, so this invariant described one path in four.
+   The gate now weighs against the last real interoceptive reading, which means
+   a stressed agent can and does defer ordinary guidance while still taking a
+   Critical message.)*
 2. **The agent degrades gracefully when the human is absent.** There is no
    "idle waiting for the user" state — only the homeostatic loop. The console
    is an observer that may or may not be attached.
@@ -64,7 +69,11 @@ exactly two message families:
 
 ```rust
 // afferent — human → agent. Becomes a prioritised SensoryPacket; still gated.
-pub struct OperatorInput { pub text: String, pub priority: Priority, pub force: Option<String> }
+pub struct OperatorInput {
+    pub text: String, pub priority: Priority, pub force: Option<String>,
+    pub message_id: Option<String>,   // E33: correlation, echoed back
+    pub reply_to: Option<String>,     // E33: answers an AgentQuestion
+}
 pub enum Priority { Low, Normal, High, Critical }   // mirrors senses::SensoryPriority
 
 // efferent — agent → human. One legible, internally-tagged JSON stream.
@@ -77,7 +86,12 @@ pub enum OperatorEvent {
     TaskStarted  { task_id, prompt },
     AgentMessage { task_id, tokens, text },   // the agent *speaking* to the operator
     Heartbeat    { uptime_secs },
+    // E33 — conversation
+    Accepted     { message_id, priority, forced, force_reason, reply_to, text },
+    AgentQuestion{ task_id, question_id, text, options, reason },
 }
+// E33 also adds an optional `message_id` to Gate, TaskStarted and AgentMessage,
+// so a console can follow one message from acceptance to reply.
 ```
 
 Framing is **NDJSON** — one JSON object per line — chosen because it works
@@ -135,6 +149,12 @@ supply-chain audit (`deny.toml`) and build times unchanged.
 | `GET /events`     | Server-Sent Events: the live `OperatorEvent` stream + a snapshot replay so a newly-opened dashboard paints immediately. Every event carries an SSE `id:` (the audit-file byte offset of its source line), and `Last-Event-ID` on reconnect skips already-rendered replay — stable across server restarts, so a network blip or agent restart never duplicates the conversation. |
 | `POST /guidance`  | Afferent ingress: an `OperatorInput` → validated → sensory packet. |
 | `GET /healthz`    | Liveness probe (always open).                                   |
+| `GET /conversation` | Durable conversation history from the E22 session store — the same turns the agent composes its prompts from, so a reloaded page paints the real transcript rather than the event hub's replay tail (E33 S33.1). |
+| `GET /whoami`     | The operator identity this console is talking as, from the E17 `UserRegistry`, with its trust tier (E33 S33.5). |
+| `POST /feedback`  | Rate a reply (`up`/`down`, optional correction) into the E24 feedback store (E33 S33.4). |
+| `GET /approval-queue` + `POST /approval-queue/{id}/{approve,reject}` | The E15 approval surface. |
+| `GET /skills`, `GET /adapters` | The E11 skill registry and E8 adapter library. |
+| `GET /digest`, `GET /metrics` | The S15.1 activity digest and the E21 Prometheus endpoint. |
 
 The agent **starts idle** and sleeps until a sense wakes it — so the demo
 *is* the paradigm: send guidance, watch the agent wake (`State: Awake`), gate
@@ -222,7 +242,14 @@ microVM — no host bridge. Only the transport changes; the protocol does not.
 | **E6.3** | Operator UIs: `anima-console` TUI (pure ANSI) + the embedded browser dashboard. | ✅ |
 | **E6.4** | microVM Phase 0: `ANIMA_TLM`/`ANIMA_IN` serial framing + `anima-console serial` host bridge; `E6.4_CONSOLE_DONE` boot marker. | ✅ |
 | **E6.5** | microVM Phase 1: `console-proto` over `smoltcp` + TLS (gated on virtio-net). | ☐ future |
-| **E6.6** | Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced` on the vita side. | ☐ future |
+| **E6.6** | Wire `OperatorInput.force` to a true audited `GateOverride::OperatorForced` on the vita side. | ✅ |
+
+Epic **E33 — Conversation** (`docs/24-conversation-ui.md`) builds on this
+seam without moving it: conversation memory on the serve path, per-message
+correlation and status, agent-initiated questions (`AgentQuestion`), durable
+history, and gating every operator packet. The protocol gained two variants
+and three optional fields, all default-on-the-wire so the microVM's
+serde-free reader and writer keep interoperating byte-for-byte.
 
 ## 7. What this deliberately is **not**
 

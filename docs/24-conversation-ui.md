@@ -1,7 +1,9 @@
 # 24 — Conversation UI: Human ↔ Agent Communication
 
-> **Status:** Proposed (scoping). Target epic: **E33 — Conversation**.
+> **Status:** ✅ Delivered — epic **E33 — Conversation**.
 > Branch: `claude/human-agent-communication-ui-fvgp7c`.
+> §1 records the audit that motivated the work (the state *before* E33);
+> §3 lists the stories as shipped.
 > Related: E6 (operator console, `docs/11`), E10 (presence, `docs/15`),
 > E14 (metacognition — `HelpRequest`), E15 (approval queue, `docs/21`),
 > E17 (user identity), E22 (sessions), E24 (feedback).
@@ -18,7 +20,7 @@ All of it keeps the invariant from `docs/11`: the human is a **sense**, not a
 controller. Nothing here adds a command surface; it makes the existing
 afferent/efferent seam legible and stateful.
 
-## 1. Where it is up to (audit, September 2026)
+## 1. The audit that motivated this (state before E33, September 2026)
 
 ### 1.1 What exists
 
@@ -70,25 +72,28 @@ three guidance lines sent and `GET /events` tapped:
    restart the tailer re-reads the audit file from offset 0 so the same 256
    come back. Anything older is gone from the UI (still in the JSONL).
 
-### 1.3 Gaps, in order of how much they hurt
+### 1.3 Gaps, in order of how much they hurt — all now closed
 
-1. **Replies are not conversational.** The model never sees the previous
+Each is annotated with the story that fixed it.
+
+
+1. **Replies are not conversational.** *(fixed: S33.1.)* The model never sees the previous
    turn, so "and the second one?" cannot work. (`vita` loop step 2 →
    `scheduler::mlfq::dispatch_task`.)
-2. **No message correlation or status.** The `OperatorGuidance` echo has no
+2. **No message correlation or status.** *(fixed: S33.2.)* The `OperatorGuidance` echo has no
    id; `TaskStarted` carries the prompt only. The UI cannot say "this reply
    answers that message" or "this one was refused".
-3. **The agent cannot ask.** No event variant; `HelpRequest` is never
+3. **The agent cannot ask.** *(fixed: S33.3.)* No event variant; `HelpRequest` is never
    emitted; approval proposals reach the side panel (when wired) but never
    the conversation.
-4. **History does not persist for the UI.** `crates/sessions` is unused on
+4. **History does not persist for the UI.** *(fixed: S33.1.)* `crates/sessions` is unused on
    the serve path; the hub ring is the only memory.
-5. **Three panels are dead under `serve`.** Commit `ae6b71a` says it wired
+5. **Three panels are dead under `serve`.** *(fixed: S33.0.)* Commit `ae6b71a` says it wired
    `with_approval_queue` / `with_skill_registry` / `with_adapter_library`
    into `cmd_serve`; the diff only added the Cargo dependency.
    `GET /approval-queue`, `/skills`, `/adapters` return 404 in `serve`, so
    the panels stay hidden. (Verified on this branch.)
-6. **Small UI defects.** Forced guidance renders as a raw
+6. **Small UI defects.** *(fixed: S33.0 and S33.4.)* Forced guidance renders as a raw
    `[FORCED:Critical] (Reason: …)` bubble because the meta regex only
    matches `[Word]`; the echo truncates at 200 chars so long guidance is cut
    in the conversation; `force` has no affordance in the composer; the uptime
@@ -96,7 +101,8 @@ three guidance lines sent and `GET /events` tapped:
    silence and the 1 Hz vitals never leave the stream silent; task ids
    ≥ 2^63 need the raw-frame regex the dashboard already has, and every new
    client must copy it.
-7. **Feedback, identity, attachments.** The crates exist; there is no route
+7. **Feedback, identity, attachments.** *(feedback and identity fixed:
+   S33.4 and S33.5; attachments remain open — see §5.)* The crates exist; there is no route
    and no UI. Images can be packetised (`packetize_image_checked`) but the
    loop reduces them to `[Image N B mime]` text, so without a vision route a
    UI attachment would be theatre.
@@ -254,30 +260,54 @@ Changes:
 
 ## 3. Workstreams — Epic E33, stories `S33.x`
 
-| Story | Scope | Files | Tests / exit |
-|---|---|---|---|
-| **S33.0 Unblock** | Wire the approval queue, skill registry (shared via `LifecycleManager::skill_registry_handle`) and adapter library into `cmd_serve`; fix the forced-bubble regex; send the full text in the echo (the UI truncates visually); make the heartbeat periodic so uptime fills | `kernels/hosted/src/commands.rs`, `crates/console/src/server.rs`, `dashboard.html` | the three routes return 200 under `serve`; uptime renders within 15 s |
-| **S33.1 Conversation memory** | `ConversationMemory` trait in `vita`; host impl over `SessionStore`; user turn on intake, assistant turn on completion; window + token budget | `crates/vita/src/lib.rs`, `kernels/hosted/src/` | composed prompt contains prior turns; session file round-trips; audit shape unchanged |
-| **S33.2 Correlation + history** | `message_id` end-to-end; `Accepted` event; `GET /conversation` | `console-proto`, `senses`, `vita`, `console` | proto round trip extended; a hosted end-to-end test POSTs and sees the linked reply |
-| **S33.3 Agent questions** | `HelpRequested` audit + `AgentQuestion` event + `reply_to`; approval proposals mirrored as question cards | `vita`, `console` | a low-confidence completion emits the entry; a reply with `reply_to` lands with the question in the composed prompt |
-| **S33.4 Dashboard + TUI** | Threaded view, history, composer, markdown-lite, question cards, feedback, noise collapse | `dashboard.html`, `anima-console.rs` | existing embed checks kept; an optional headless-Chromium smoke script under `xtask` |
-| **S33.5 Identity** | Operator identity from the console token → `UserRegistry` (trust tier, consent); `GET /whoami`; session owned by that user | `console`, `users` | closes the Pillar-3 "auth beyond bearer token" item in `docs/23` |
-| **S33.6 Gate every packet** | Evaluate the Striatal Gate for un-forced operator packets and record `GateDecision` | `vita` | every operator message produces a `Gate` event; forced semantics unchanged |
+All shipped. Each row names where the behaviour now lives.
 
-Suggested order: S33.0 → S33.2 → S33.1 → S33.4 → S33.3 → S33.5 / S33.6.
-S33.0 is a few hours; S33.4 is the bulk of the epic.
+| Story | Scope | State |
+|---|---|---|
+| **S33.0 Unblock** | Wire the approval queue, skill registry (shared with `LifecycleManager` so the panel reflects live reflection output) and adapter library into `cmd_serve`; periodic heartbeat on a 5 s wall-clock cadence; guidance echo raised from 200 to 4000 chars; forced-bubble renderer parses the colon-bearing label and the reason clause. | ✅ (`kernels/hosted/src/commands.rs`; `crates/console/src/server.rs`; `dashboard.html`; 4 tests) |
+| **S33.1 Conversation memory** | `vita::ConversationMemory` trait + `Subsystems::conversation`; `compose` on dispatch, `record_reply` on completion; host `SessionConversation` over `sessions::SessionStore` with identity framing and a 6000-char window trimmed from the oldest end; `GET /conversation`; the dashboard loads history and reconciles it against the replay ring. | ✅ (`crates/vita/src/conversation.rs`; `kernels/hosted/src/conversation.rs`; `crates/console/src/server.rs`; 11 tests) |
+| **S33.2 Correlation** | `message_id` and `reply_to` on `OperatorInput`; optional `message_id` on `Gate`/`TaskStarted`/`AgentMessage`; typed `Accepted` event; `AuditEntry::OperatorMessageLinked` emitted at intake; `console::CorrelationTracker` as the reader half; per-message status in the dashboard and id tags in the TUI. | ✅ (`console-proto`, `senses`, `vita`, `console`; 13 tests) |
+| **S33.3 Agent questions** | `AuditEntry::HelpRequested` from a sub-floor confidence score; `ApprovalProposalQueued` read the same way; both surface as `AgentQuestion`; the question is recorded as the agent's own turn so an answer arrives with it in context; question cards with quick replies routed by kind. | ✅ (`crates/vita/src/lib.rs`, `crates/console/src/audit.rs`, `dashboard.html`; 4 tests) |
+| **S33.4 Conversation view** | Markdown-lite rendering (escape-first), collapsible long replies, copy and rating controls, `POST /feedback` into the E24 store, multi-line composer with Enter-to-send and a force toggle that requires a reason, draft persistence, sleep-phase feed collapse; `consoleStream.ts` contract updated. | ✅ (`dashboard.html`, `crates/console/src/server.rs`, `web/src/lib/consoleStream.ts`; 4 tests) |
+| **S33.5 Identity** | `GET /whoami` from the E17 `UserRegistry`: the profile conversations and feedback are attributed to, and its trust tier. Trust is never inferred from reaching the console. | ✅ (`crates/console/src/server.rs`, `kernels/hosted/src/commands.rs`; 5 tests) |
+| **S33.6 Gate every packet** | The Striatal Gate arbitrates *all* operator guidance, not only forced packets, against the last real interoceptive reading. A stressed agent defers ordinary chatter and still takes Critical. `ANIMA_GATE_OPERATOR=0` restores unconditional admission. | ✅ (`crates/vita/src/lib.rs`; 3 tests) |
 
 **Epic exit criteria.**
-1. A reload shows the full conversation from the session store, not the ring.
-2. Every operator message shows a status that reaches a terminal state.
-3. With a real backend (Ollama or Anthropic) the agent answers a follow-up
-   that only makes sense given the previous turn.
-4. A low-confidence completion produces a question card; answering it
-   produces a reply that carries the question context.
-5. `cargo test --workspace`, `cargo clippy --workspace --all-targets -D
-   warnings` and `cargo fmt --check` clean; the `console-proto` manual /
-   serde round trip extended; the microVM still builds against
-   `console-proto` with `default-features = false`.
+1. A reload shows the full conversation from the session store, not the ring. ✅
+   (`GET /conversation` + the dashboard's history load; verified across a
+   restart — the same session continues.)
+2. Every operator message shows a status that reaches a terminal state. ✅
+   (`Accepted` → `Gate` → `TaskStarted` → `AgentMessage`, all carrying the
+   same `message_id`; the dashboard hangs the status under the bubble.)
+3. With a real backend the agent answers a follow-up that only makes sense
+   given the previous turn. ✅ for the composition path — the composed prompt
+   demonstrably carries the prior exchange. **Still to do by hand:** run it
+   against Ollama or a frontier key and judge the answers. The mock backend
+   echoes its prompt, so it cannot show this.
+4. A low-confidence completion produces a question card; answering it produces
+   a reply that carries the question context. ✅
+5. `cargo test --workspace --all-targets` (2172 tests), `cargo clippy
+   --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean;
+   the `console-proto` manual/serde round trip covers both new variants
+   including a `None` correlation; `vita` still builds
+   `--no-default-features --features libm` for the microVM. ✅
+
+### 3.1 What is still open
+
+- **Judging it against a real model** (exit criterion 3) — the one thing a
+  mock cannot verify.
+- **Token streaming.** Still absent, deliberately: `LlmBackend` collects the
+  whole completion before returning, so an `AgentToken` event would be
+  theatre. It needs a sink on the backend trait first.
+- **Attachments.** `packetize_image_checked` exists, but the somatic loop
+  reduces an image to `[Image N B mime]` text, so a UI attachment would be
+  theatre too until a vision route is bound.
+- **Tool use on operator tasks.** Operator guidance still dispatches through
+  `LlmBackend`, not `ChatCortexBridge`. `ConversationMemory` is the seam that
+  would change — `compose` would return a message list rather than a string —
+  and it does not need to move for it.
+- **Session growth.** `SessionRecord` grows without bound; archival is E22's
+  `anima sessions archive`, not automatic.
 
 ## 4. What you need to try it
 
@@ -300,4 +330,18 @@ curl -sN http://127.0.0.1:8088/events          # raw stream, for debugging the U
 ```
 
 Judge the conversation against a real backend. The mock backend proves the
-plumbing, not the experience.
+plumbing, not the experience — it echoes whatever prompt it is given, so with
+conversation memory on it replies with the composed context rather than an
+answer. `serve` says so on boot.
+
+Useful switches:
+
+| Variable | Effect |
+|---|---|
+| `ANIMA_CONVERSATION=0` | bare, stateless loop — no memory, no history |
+| `ANIMA_GATE_OPERATOR=0` | admit operator guidance unconditionally (pre-E33 behaviour) |
+| `ANIMA_OPERATOR_ID` | the identity conversations and feedback are recorded against |
+
+Routes the console serves: `/`, `/events`, `/guidance`, `/conversation`,
+`/whoami`, `/feedback`, `/digest`, `/metrics`, `/healthz`, `/approval-queue`
+(+ approve/reject), `/skills`, `/adapters`.

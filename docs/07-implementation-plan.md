@@ -4083,6 +4083,77 @@ Workspace root `Cargo.toml` and `kernels/hosted/Cargo.toml` updated.
 10. `cargo clippy --workspace -- -D warnings` clean. ✅
 11. `cargo fmt --check` clean. ✅
 
+## Stage 10 — Conversation (E33)
+
+### Epic E33 — Conversation ✅
+
+**Scope.** Turn the operator console from a chat-shaped view over a
+stateless loop into an actual conversation: memory on the serve path,
+per-message correlation and status, agent-initiated questions, durable
+history, and the gate arbitrating *all* operator input as the operator
+interface has always documented.  Full design and the pre-E33 audit that
+motivated it: `docs/24-conversation-ui.md`.
+
+**Dependencies.** E6 (operator seam), E14 (`HelpRequest`, confidence
+tracker), E15 (approval queue), E17 (`UserRegistry`), E22 (`SessionStore`),
+E24 (`FeedbackStore`).  Three of those crates shipped with no caller on the
+`serve` path; E33 is largely the work of connecting them.
+
+**Stories.**
+- S33.0 Unblock the console under `serve`: wire the approval queue, skill
+  registry and adapter library (their routes answered 404, so the panels
+  were permanently hidden); heartbeat on a wall-clock cadence rather than
+  the receive timeout, which 1 Hz vitals meant never fired; guidance echo
+  raised from 200 to 4000 chars; forced-guidance renderer fixed. ✅
+- S33.1 Conversation memory: `vita::ConversationMemory` +
+  `Subsystems::conversation`; `compose` on dispatch and `record_reply` on
+  completion; hosted `SessionConversation` over `sessions::SessionStore`
+  with identity framing and a 6000-char window; `GET /conversation`; the
+  dashboard loads history and reconciles it against the replay ring. ✅
+- S33.2 Correlation: `message_id`/`reply_to` on `OperatorInput`; optional
+  `message_id` on `Gate`/`TaskStarted`/`AgentMessage`; typed `Accepted`
+  event; `AuditEntry::OperatorMessageLinked` at intake;
+  `console::CorrelationTracker` as the reader half. ✅
+- S33.3 Agent questions: `AuditEntry::HelpRequested` from a sub-floor
+  confidence score, `ApprovalProposalQueued` read the same way, both
+  surfacing as `AgentQuestion` with quick replies routed by kind. ✅
+- S33.4 Conversation view: markdown-lite (escape-first), collapsible long
+  replies, copy and rating controls, `POST /feedback`, multi-line composer
+  with a force toggle that requires a reason, draft persistence,
+  sleep-phase feed collapse. ✅
+- S33.5 Identity: `GET /whoami` from the E17 registry — the profile
+  conversations and feedback are attributed to, and its trust tier, never
+  inferred from reaching the console.  Closes the Pillar-3 "auth beyond the
+  bearer token" item in `docs/23`. ✅
+- S33.6 Gate every operator packet, against the last real interoceptive
+  reading rather than assumed-idle signals.  A stressed agent defers
+  ordinary chatter and still takes Critical.  `ANIMA_GATE_OPERATOR=0`
+  restores the old unconditional admission. ✅
+
+**New `vita::AuditEntry` variants.** `OperatorMessageLinked`,
+`HelpRequested`.  Both additive; every existing reader, digest and metric
+parses unchanged, and logs written before E33 stay valid.
+
+**New `console_proto::OperatorEvent` variants.** `Accepted`,
+`AgentQuestion`; plus optional `message_id` on three existing variants and
+`message_id`/`reply_to` on `OperatorInput`.  All optional on the wire, so
+the microVM's `to_ndjson` writer and `parse_input_line` reader keep
+interoperating byte-for-byte.
+
+**Exit criteria.**
+1. A reload shows the conversation from the session store, not the hub's
+   replay ring; a restart continues the same session. ✅
+2. Every operator message carries a correlation id from acceptance through
+   gate, task and reply, and shows a status that reaches a terminal state. ✅
+3. The composed prompt demonstrably carries the prior exchange. ✅
+   (Judging the *answers* needs a real backend; the mock echoes its prompt.)
+4. A low-confidence completion produces an answerable question. ✅
+5. `cargo test --workspace --all-targets` green (2172), clippy `-D warnings`
+   clean, fmt clean, `vita` still builds `--no-default-features --features
+   libm`. ✅
+
+---
+
 ### Integration Notes (E18–E30 wave)
 
 The E18–E30 epics were developed as 14 independent feature branches off the
