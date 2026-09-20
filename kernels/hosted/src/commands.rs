@@ -5187,7 +5187,16 @@ pub(crate) fn cmd_serve() {
     // matching routes answer 404 and the panels stay permanently hidden, so the
     // operator cannot see — let alone approve — anything the agent proposes.
     // The skill handle is the one already installed on the manager, so the
-    // panel reflects live reflection output rather than an empty copy.
+    // panel reflects live reflection output rather than an empty copy, and the
+    // drainer below carries proposals into the queue the console serves.
+    //
+    // The adapter library is the exception, and deliberately so: `serve` never
+    // calls `enable_consolidation`, so nothing in this process fine-tunes and
+    // there is no producer to share a handle with.  `AdapterLibrary` is
+    // in-memory only, so there is nothing on disk to load either — adapters are
+    // produced today by `cargo xtask finetune`, in its own process.  This handle
+    // is therefore the seam consolidation will register into, and until it does
+    // `GET /adapters` honestly answers "none": an empty panel, not a stale one.
     let approval_queue = Arc::new(std::sync::Mutex::new(
         lifecycle::approval::ApprovalQueue::new(),
     ));

@@ -1288,6 +1288,24 @@ pub async fn somatic_execution_loop(
                     &signals,
                 );
                 if !decision.invoke {
+                    // E33 S33.6: the message was still said.  Arbitration
+                    // happens here, at intake, so a declined packet never
+                    // reaches the dispatch that writes the operator's turn —
+                    // and the durable history then omitted it for good, which
+                    // is the one thing a conversation record must never do.
+                    // The gate's own reasoning goes in beside it, so the next
+                    // prompt explains the silence rather than presenting the
+                    // model with a question nobody answered.
+                    #[cfg(feature = "std")]
+                    if from_operator {
+                        if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                            lock_recover(&memory).record_declined(
+                                task_id,
+                                &prompt,
+                                &decision.reasoning,
+                            );
+                        }
+                    }
                     continue;
                 }
             }
@@ -2524,6 +2542,112 @@ mod tests {
             urgent.scheduler.dispatched_tasks.len(),
             1,
             "a critical message must still reach a stressed agent"
+        );
+    }
+
+    #[test]
+    fn a_declined_message_still_reaches_the_conversation() {
+        // E33 S33.6: the gate can refuse to act on a message, but it cannot
+        // unsay it.  Before this the refusal was silent in the history — the
+        // only write happens at dispatch, and a declined packet never gets
+        // one — so `/conversation` omitted the message permanently.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<String>,
+            declined: Vec<(String, String)>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                self.composed.push(guidance.to_string());
+                guidance.to_string()
+            }
+            fn record_reply(&mut self, _task_id: u64, _response: &str) {}
+            fn record_declined(&mut self, _task_id: u64, guidance: &str, reason: &str) {
+                self.declined
+                    .push((guidance.to_string(), reason.to_string()));
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        let mut m = manager("agent-declined", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        // Hot, full and out of budget: the threshold climbs to its ceiling and
+        // ordinary chatter is deferred.
+        m.last_signals = HomeostaticSignals {
+            thermal_load: 1.0,
+            compute_pressure: 1.0,
+            memory_pressure: 1.0,
+            power_budget: 0.0,
+            financial_budget: 0.0,
+            attention_demand: 0.0,
+        };
+        m.senses
+            .packetize_text_checked("did the overnight run finish?", SensoryPriority::Low)
+            .expect("valid text");
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(
+            m.scheduler.dispatched_tasks.len(),
+            0,
+            "the packet should have been declined"
+        );
+        let guard = recorder.lock().unwrap();
+        assert!(
+            guard.composed.is_empty(),
+            "a declined message must not be composed as a prompt: {:?}",
+            guard.composed
+        );
+        assert_eq!(
+            guard.declined.len(),
+            1,
+            "the declined message never reached the conversation: {:?}",
+            guard.declined
+        );
+        assert_eq!(guard.declined[0].0, "did the overnight run finish?");
+        assert!(
+            !guard.declined[0].1.is_empty(),
+            "the gate's reasoning was not passed on"
+        );
+    }
+
+    #[test]
+    fn machine_input_the_gate_never_sees_is_not_recorded_as_declined() {
+        // The complement of the test above: gating is operator-only, so an
+        // internal packet is admitted without arbitration and has nothing to
+        // decline — it must not appear in the operator's history either way.
+        #[derive(Default)]
+        struct Recording {
+            declined: Vec<String>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                guidance.to_string()
+            }
+            fn record_reply(&mut self, _task_id: u64, _response: &str) {}
+            fn record_declined(&mut self, _task_id: u64, guidance: &str, _reason: &str) {
+                self.declined.push(guidance.to_string());
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        let mut m = manager("agent-declined-internal", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        m.last_signals = HomeostaticSignals {
+            thermal_load: 1.0,
+            compute_pressure: 1.0,
+            memory_pressure: 1.0,
+            power_budget: 0.0,
+            financial_budget: 0.0,
+            attention_demand: 0.0,
+        };
+        m.senses.packetize_text("sensor: cpu 41C");
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            recorder.lock().unwrap().declined.is_empty(),
+            "machine input was recorded as declined operator speech"
         );
     }
 

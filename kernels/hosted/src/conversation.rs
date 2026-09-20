@@ -38,6 +38,14 @@
 //! Storage failures are absorbed, as the trait requires: the agent's lifecycle
 //! does not depend on its history being writable, and an unwritable disk must
 //! not stop it answering.
+//!
+//! # Messages the gate declined
+//!
+//! Under stress the Striatal Gate can decline an operator message at intake
+//! (E33 S33.6), so it never reaches a dispatch.  It is still recorded here —
+//! the operator's turn, then a system turn carrying the gate's reasoning — so
+//! the durable history matches what actually happened and the next prompt
+//! explains the silence instead of trailing an unanswered question.
 
 use std::sync::{Arc, Mutex};
 
@@ -55,6 +63,12 @@ pub const MAX_CONTEXT_CHARS: usize = 6_000;
 /// How the operator and the agent are labelled in the composed transcript.
 const OPERATOR_LABEL: &str = "operator";
 const AGENT_LABEL: &str = "anima";
+
+/// Prefix on the system turn that stands in for a reply the gate prevented.
+///
+/// Read by the model on the next turn and shown to the operator as a notice,
+/// so both sides of the conversation see the same explanation for the silence.
+const DECLINED_NOTE: &str = "not acted on — the striatal gate held it back: ";
 
 /// Conversation memory backed by a shared [`SessionStore`].
 pub struct SessionConversation {
@@ -228,6 +242,19 @@ impl ConversationMemory for SessionConversation {
     fn record_reply(&mut self, _task_id: u64, response: &str) {
         self.append(ConversationRole::Assistant, response);
     }
+
+    fn record_declined(&mut self, _task_id: u64, guidance: &str, reason: &str) {
+        // The operator's turn goes in exactly as it would have on dispatch —
+        // it was said, and a history that drops what the gate declined is not a
+        // record of the conversation.  The refusal follows it as a *system*
+        // turn rather than the agent's: nothing was generated, and labelling a
+        // policy outcome as speech would put words in the agent's mouth.
+        self.append(ConversationRole::User, guidance);
+        self.append(
+            ConversationRole::System,
+            &format!("{DECLINED_NOTE}{reason}"),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +343,53 @@ mod tests {
         assert!(
             prompt.contains("remember this") && prompt.contains("remembered"),
             "history lost across reopen: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_message_the_gate_declined_is_kept_with_the_reason_it_was_declined() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = memory(dir.path());
+
+        m.record_declined(7, "restart the trainer", "value 0.31 below threshold 0.78");
+
+        let store = m.store();
+        let guard = store.lock().unwrap();
+        let session = guard.get(m.session_id()).expect("session exists");
+        let turns: Vec<(ConversationRole, &str)> = session
+            .turns
+            .iter()
+            .map(|t| (t.role.clone(), t.content.as_str()))
+            .collect();
+        assert_eq!(
+            turns.len(),
+            2,
+            "expected the message and the note: {turns:?}"
+        );
+        assert_eq!(turns[0], (ConversationRole::User, "restart the trainer"));
+        assert_eq!(turns[1].0, ConversationRole::System);
+        assert!(
+            turns[1].1.contains("value 0.31 below threshold 0.78"),
+            "the gate's reasoning was not kept: {}",
+            turns[1].1
+        );
+    }
+
+    #[test]
+    fn the_next_prompt_explains_why_the_last_message_went_unanswered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = memory(dir.path());
+
+        m.record_declined(7, "restart the trainer", "thermal load at ceiling");
+        let prompt = m.compose(8, "why not?");
+
+        assert!(
+            prompt.contains("restart the trainer"),
+            "the declined message is missing from the context: {prompt}"
+        );
+        assert!(
+            prompt.contains("thermal load at ceiling"),
+            "the model cannot explain a silence it was not told about: {prompt}"
         );
     }
 

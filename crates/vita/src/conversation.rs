@@ -10,12 +10,13 @@
 //! thing behind it answers every line as though it were the first.
 //!
 //! [`ConversationMemory`] is the seam that fixes it without disturbing
-//! anything else.  The loop calls it at the two points it already touches:
+//! anything else.  The loop calls it at the points it already touches:
 //!
 //! | Point | Call | Effect |
 //! |---|---|---|
 //! | dispatch | [`ConversationMemory::compose`] | wrap the human's text in the context the model needs |
 //! | completion | [`ConversationMemory::record_reply`] | persist the answer as the agent's turn |
+//! | gate block | [`ConversationMemory::record_declined`] | persist a message that never reached a dispatch |
 //!
 //! # What it deliberately does not do
 //!
@@ -47,8 +48,8 @@
 /// Supplies the conversational context around an operator-originated task.
 ///
 /// Implementations are shared behind `Arc<Mutex<…>>` (see
-/// [`crate::Subsystems::conversation`]), so `compose` and `record_reply` are
-/// called under a lock held only for the duration of the call.
+/// [`crate::Subsystems::conversation`]), so every method here is called under a
+/// lock held only for the duration of the call.
 pub trait ConversationMemory: Send {
     /// Wrap freshly-dispatched guidance in whatever context the model needs —
     /// identity framing, recent turns, anything else the implementation keeps.
@@ -77,5 +78,24 @@ pub trait ConversationMemory: Send {
     /// context, and no separate question-tracking state is needed.
     fn record_question(&mut self, task_id: u64, question: &str) {
         self.record_reply(task_id, question);
+    }
+
+    /// Record operator speech the Striatal Gate declined to act on (E33 S33.6).
+    ///
+    /// Arbitration happens at intake, before a packet becomes a task, so a
+    /// declined message reaches neither [`ConversationMemory::compose`] nor
+    /// [`ConversationMemory::record_reply`] — and yet it was still said.
+    /// Without this the durable history omits it permanently: the operator
+    /// scrolls back after a restart to find a message that appears never to
+    /// have existed, and the model's context has a hole where it sat.
+    ///
+    /// `reason` is the gate's own reasoning, so an implementation can keep the
+    /// refusal beside the message and the next prompt explains the silence
+    /// rather than showing an unanswered question.
+    ///
+    /// The default does nothing: an implementation that keeps no durable
+    /// history loses nothing by dropping it.
+    fn record_declined(&mut self, task_id: u64, guidance: &str, reason: &str) {
+        let _ = (task_id, guidance, reason);
     }
 }

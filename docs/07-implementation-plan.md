@@ -4106,10 +4106,12 @@ E24 (`FeedbackStore`).  Three of those crates shipped with no caller on the
   the receive timeout, which 1 Hz vitals meant never fired; guidance echo
   raised from 200 to 4000 chars; forced-guidance renderer fixed. ✅
 - S33.1 Conversation memory: `vita::ConversationMemory` +
-  `Subsystems::conversation`; `compose` on dispatch and `record_reply` on
-  completion; hosted `SessionConversation` over `sessions::SessionStore`
-  with identity framing and a 6000-char window; `GET /conversation`; the
-  dashboard loads history and reconciles it against the replay ring. ✅
+  `Subsystems::conversation`; `compose` on dispatch, `record_reply` on
+  completion and `record_declined` when the gate refuses a message at
+  intake; hosted `SessionConversation` over `sessions::SessionStore`
+  with identity framing and a 6000-char window; `GET /conversation` with a
+  `before` cursor; the dashboard loads history, adopts its replayed
+  counterparts, and pages back through the rest of the session. ✅
 - S33.2 Correlation: `message_id`/`reply_to` on `OperatorInput`; optional
   `message_id` on `Gate`/`TaskStarted`/`AgentMessage`; typed `Accepted`
   event; `AuditEntry::OperatorMessageLinked` at intake;

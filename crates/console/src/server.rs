@@ -191,6 +191,33 @@ pub struct ConsoleServer {
     /// the audit log outlives the process, and a re-read must not conflate a
     /// message from this run with one from the last.
     message_seq: std::sync::atomic::AtomicU64,
+    /// Identifies this process in the durable feedback store (E33 S33.4).
+    ///
+    /// A rating is filed against the scheduler's task id, but those restart at
+    /// `1 << 63` with every `LifecycleManager`, so the *n*-th reply of one run
+    /// and the *n*-th of the next would share an invocation id and the E24
+    /// report would fold two unrelated answers into one hint.  Qualifying the
+    /// id with the run keeps them apart.
+    run_id: String,
+}
+
+/// Wall-clock nanoseconds at process start, the entropy behind both per-run
+/// identifiers above.  Clock failure degrades to `0`, which costs uniqueness
+/// but never the request.
+fn start_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// A label for this server instance: the clock separates processes, the counter
+/// separates servers within one (and covers a clock too coarse to tell two
+/// constructions apart).
+fn mint_run_id() -> String {
+    static INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("run{:016x}{n:x}", start_nanos())
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -293,12 +320,8 @@ impl ConsoleServer {
             // Nanoseconds, not seconds: two servers started in the same
             // second would otherwise mint the identical `op-…` sequence and
             // the audit log could not tell their messages apart.
-            message_seq: std::sync::atomic::AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0),
-            ),
+            message_seq: std::sync::atomic::AtomicU64::new(start_nanos()),
+            run_id: mint_run_id(),
         }
     }
 
@@ -1057,7 +1080,12 @@ impl ConsoleServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        let mut record = feedback::FeedbackRecord::new(user_id, task_id, rating, now_ns);
+        // Qualified by the run: the scheduler's task ids restart at `1 << 63`
+        // with every process, so the bare id would make the third reply of one
+        // run and the third of the next look like the same answer rated twice
+        // (`feedback::report` groups by exactly this field).
+        let invocation_id = format!("{}-{task_id}", self.run_id);
+        let mut record = feedback::FeedbackRecord::new(user_id, invocation_id, rating, now_ns);
         if let Some(comment) = value
             .get("comment")
             .and_then(|v| v.as_str())
@@ -1097,6 +1125,13 @@ impl ConsoleServer {
     /// [`DEFAULT_CONVERSATION_LIMIT`], capped at [`MAX_CONVERSATION_LIMIT`] so
     /// one request cannot serialise an entire long-lived session).  Turns come
     /// back oldest-first, the order a transcript is read in.
+    ///
+    /// `?before=I` pages backwards: the newest `limit` turns whose `index` is
+    /// below `I`, exclusive.  A client walks the whole session by passing the
+    /// `index` of the oldest turn it holds, and knows it has reached the start
+    /// when that index is 0 or fewer than `limit` turns come back.  Without it
+    /// the durable history the agent keeps is only readable up to one page
+    /// deep, which is not much of a record.
     fn serve_conversation(&self, query: &str, out: &mut TcpStream) -> std::io::Result<()> {
         let Some((store, session_id)) = &self.conversation else {
             return write_json(
@@ -1112,6 +1147,10 @@ impl ConsoleServer {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_CONVERSATION_LIMIT)
             .clamp(1, MAX_CONVERSATION_LIMIT);
+        let before = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("before="))
+            .and_then(|v| v.parse::<usize>().ok());
 
         let turns = {
             let guard = match store.lock() {
@@ -1126,10 +1165,22 @@ impl ConsoleServer {
                 }
             };
             match guard.get(session_id) {
-                // Newest `limit` turns, still in chronological order.
+                // Newest `limit` turns below the cursor, still in chronological
+                // order.  Turns are stored in index order, so the cursor is the
+                // first position whose index reaches it — a scan rather than a
+                // subscript, because a session's turns need not start at 0 once
+                // an older run has been trimmed.
                 Some(session) => {
-                    let skip = session.turns.len().saturating_sub(limit);
-                    session.turns[skip..].to_vec()
+                    let end = match before {
+                        Some(cursor) => session
+                            .turns
+                            .iter()
+                            .position(|t| t.index >= cursor)
+                            .unwrap_or(session.turns.len()),
+                        None => session.turns.len(),
+                    };
+                    let skip = end.saturating_sub(limit);
+                    session.turns[skip..end].to_vec()
                 }
                 None => Vec::new(),
             }
@@ -1259,7 +1310,7 @@ impl ConsoleServer {
         // lock acquisition as approve/reject to avoid TOCTOU races. The adapter
         // library is then updated *outside* the queue lock to prevent
         // simultaneous lock ordering issues.
-        let (result, weight_op) = {
+        let (result, weight_op, skill_id) = {
             let mut q = match queue.lock() {
                 Ok(q) => q,
                 Err(_) => {
@@ -1288,12 +1339,19 @@ impl ConsoleServer {
                     None
                 }
             });
+            // E33 S33.0: a skill proposal's queue id *is* its registry skill id
+            // (`lifecycle::skill_bridge` sets it that way), so an approval can be
+            // routed to the registry without a second mapping to keep in step.
+            let skill_id = q.get(proposal_id).and_then(|p| {
+                matches!(p.kind, lifecycle::approval::ProposalKind::NewSkill { .. })
+                    .then(|| p.id.clone())
+            });
             let result = if approve {
                 q.approve(proposal_id, &reason)
             } else {
                 q.reject(proposal_id, &reason)
             };
-            (result, weight_op)
+            (result, weight_op, skill_id)
         };
 
         match result {
@@ -1311,6 +1369,31 @@ impl ConsoleServer {
                         } else {
                             lib.revoke_operator_approval(&adapter_id, &weights_digest);
                         }
+                    }
+                }
+                // The same for a skill: approving it in the queue alone left the
+                // registry entry `Proposed`, so the skill the operator had just
+                // said yes to still could not be selected.  Promotion is what
+                // makes the decision mean something.  A rejection deliberately
+                // leaves the registry alone — the skill stays `Proposed` rather
+                // than being rolled back, matching `SkillApprovalBridge::reject`.
+                if let (true, Some(skill_id), Some(registry)) =
+                    (approve, skill_id, &self.skill_registry)
+                {
+                    let outcome = match registry.lock() {
+                        Ok(mut r) => r.promote(&skill_id).map_err(|e| e.to_string()),
+                        Err(_) => Err("skill registry lock poisoned".to_string()),
+                    };
+                    if let Err(e) = outcome {
+                        // The queue already records the approval, so saying "ok"
+                        // here would claim an activation that did not happen.
+                        let body = format!(
+                            r#"{{"ok":false,"approved":true,"error":{}}}"#,
+                            json_string(&format!(
+                                "proposal approved, but the skill could not be activated: {e}"
+                            ))
+                        );
+                        return write_json(out, 500, "Internal Server Error", body.as_bytes());
                     }
                 }
                 write_json(out, 200, "OK", br#"{"ok":true}"#)
@@ -1741,8 +1824,30 @@ mod tests {
         let guard = store.lock().unwrap();
         let records = guard.list();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].invocation_id, "7");
+        assert!(
+            records[0].invocation_id.ends_with("-7"),
+            "the task id is not in the invocation id: {}",
+            records[0].invocation_id
+        );
         assert_eq!(records[0].rating, feedback::FeedbackRating::ThumbsUp);
+    }
+
+    #[test]
+    fn two_runs_rating_the_same_task_id_do_not_share_an_invocation() {
+        // Scheduler task ids restart at `1 << 63` every process, so the bare id
+        // would fold the n-th reply of one run into the n-th of the next when
+        // `feedback::report` groups by invocation.
+        let (first_addr, first_store) = start_with_feedback();
+        let (second_addr, second_store) = start_with_feedback();
+        assert!(post_feedback(first_addr, r#"{"task_id":"7","rating":"up"}"#).contains("202"));
+        assert!(post_feedback(second_addr, r#"{"task_id":"7","rating":"down"}"#).contains("202"));
+
+        let first = first_store.lock().unwrap().list()[0].invocation_id.clone();
+        let second = second_store.lock().unwrap().list()[0].invocation_id.clone();
+        assert_ne!(
+            first, second,
+            "two runs rating task 7 were filed against the same invocation"
+        );
     }
 
     #[test]
@@ -1853,6 +1958,63 @@ mod tests {
             !body.contains("turn 6"),
             "limit not applied from the newest end: {body}"
         );
+    }
+
+    #[test]
+    fn conversation_before_pages_backwards_through_the_whole_session() {
+        // Without a cursor the durable history is only readable one page deep,
+        // so anything older than the newest page is unreachable from the UI
+        // even though it is on disk.
+        let addr = start_with_conversation(10);
+        let page = |q: &str| -> String {
+            let resp = http_request(
+                addr,
+                &format!("GET /conversation{q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(resp.contains("200 OK"), "resp: {resp}");
+            resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+        };
+
+        let newest = page("?limit=3");
+        assert!(newest.contains("turn 9") && newest.contains("turn 7"));
+
+        // `before` is the index of the oldest turn already held, exclusive.
+        let older = page("?limit=3&before=7");
+        assert!(older.contains("turn 6"), "page did not step back: {older}");
+        assert!(older.contains("turn 4"), "page is short: {older}");
+        assert!(
+            !older.contains("turn 7"),
+            "the cursor turn was served twice: {older}"
+        );
+
+        // Walking off the front yields the remainder, then nothing.
+        let oldest = page("?limit=3&before=1");
+        assert!(
+            oldest.contains("turn 0"),
+            "first turn unreachable: {oldest}"
+        );
+        let past_the_start = page("?limit=3&before=0");
+        assert_eq!(
+            past_the_start.trim(),
+            "[]",
+            "paging past the start should be empty: {past_the_start}"
+        );
+    }
+
+    #[test]
+    fn a_garbage_before_cursor_serves_the_newest_page() {
+        // Same contract as `limit`: an unparseable cursor falls back rather
+        // than erroring, so a stale client cannot lose its history.
+        let addr = start_with_conversation(5);
+        for q in ["?before=abc", "?before=-1", "?before="] {
+            let resp = http_request(
+                addr,
+                &format!("GET /conversation{q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(resp.contains("200 OK"), "{q} -> {resp}");
+            let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+            assert!(body.contains("turn 4"), "{q} lost the newest turn: {body}");
+        }
     }
 
     #[test]
@@ -2752,6 +2914,153 @@ mod tests {
             queue.lock().unwrap().get("test-p1").unwrap().is_approved(),
             "proposal should be approved"
         );
+    }
+
+    /// A queue and a registry holding the *same* proposed skill, exactly as
+    /// `cmd_serve` wires them: one registry handle shared by the agent and the
+    /// console, and a proposal whose queue id is the registry skill id.
+    fn start_with_queue_and_registry() -> (
+        std::net::SocketAddr,
+        Arc<Mutex<lifecycle::approval::ApprovalQueue>>,
+        Arc<Mutex<skills::SkillRegistry>>,
+    ) {
+        use lifecycle::approval::{Proposal, ProposalKind, ProposalStatus};
+        use skills::{SkillProvenance, SkillState};
+
+        let mut reg = skills::SkillRegistry::default();
+        let skill_id = reg
+            .register_from_text(
+                "---\nname: log-triage\ndescription: triage overnight logs\n---\nRead the log.",
+                SkillProvenance::agent(1_000_000_000, "ep-1"),
+                SkillState::Proposed,
+            )
+            .expect("register");
+        let registry = Arc::new(Mutex::new(reg));
+
+        let queue = Arc::new(Mutex::new(lifecycle::approval::ApprovalQueue::new()));
+        queue.lock().unwrap().enqueue(Proposal {
+            id: skill_id,
+            kind: ProposalKind::NewSkill {
+                name: "log-triage".to_string(),
+                description: "triage overnight logs".to_string(),
+                prompt_hash: "abc123".to_string(),
+            },
+            created_at_ns: 1_000_000_000,
+            provenance: "agent (dreaming-phase reflection)".to_string(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+
+        let server = ConsoleServer::new(
+            Arc::new(ConsoleHub::new()),
+            SensoryBridge::new(HumanGuidance::new("test")),
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_approval_queue(Arc::clone(&queue))
+        .with_skill_registry(Arc::clone(&registry));
+        let (addr, _h) = server.spawn().expect("spawn");
+        (addr, queue, registry)
+    }
+
+    fn skill_state(registry: &Arc<Mutex<skills::SkillRegistry>>) -> skills::SkillState {
+        let guard = registry.lock().unwrap();
+        guard.list_all().first().expect("one skill").state.clone()
+    }
+
+    fn approval_action(addr: std::net::SocketAddr, id: &str, action: &str) -> String {
+        let body = r#"{"reason":"looks good"}"#;
+        http_request(
+            addr,
+            &format!(
+                "POST /approval-queue/{id}/{action} HTTP/1.1\r\n\
+                 Host: x\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    #[test]
+    fn approving_a_skill_promotes_it_in_the_registry() {
+        // Approving in the queue alone left the skill `Proposed`, so the thing
+        // the operator had just said yes to still could not be selected.
+        let (addr, queue, registry) = start_with_queue_and_registry();
+        assert_eq!(skill_state(&registry), skills::SkillState::Proposed);
+
+        let resp = approval_action(addr, "log-triage", "approve");
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        assert!(resp.contains(r#""ok":true"#), "body: {resp}");
+        assert!(
+            queue
+                .lock()
+                .unwrap()
+                .get("log-triage")
+                .unwrap()
+                .is_approved(),
+            "queue entry should be approved"
+        );
+        assert_eq!(
+            skill_state(&registry),
+            skills::SkillState::Active,
+            "the approved skill is still not selectable"
+        );
+    }
+
+    #[test]
+    fn rejecting_a_skill_leaves_the_registry_alone() {
+        // `SkillApprovalBridge::reject` deliberately does not roll the skill
+        // back, and the console must not diverge from it.
+        let (addr, queue, registry) = start_with_queue_and_registry();
+        let resp = approval_action(addr, "log-triage", "reject");
+        assert!(resp.contains("200 OK"), "status: {resp}");
+        use lifecycle::approval::ProposalStatus;
+        assert!(
+            matches!(
+                queue.lock().unwrap().get("log-triage").unwrap().status,
+                ProposalStatus::Rejected { .. }
+            ),
+            "queue entry should be rejected"
+        );
+        assert_eq!(skill_state(&registry), skills::SkillState::Proposed);
+    }
+
+    #[test]
+    fn a_skill_approval_that_cannot_be_activated_is_reported_as_a_failure() {
+        // The queue records the approval before the registry is touched, so a
+        // proposal naming a skill the registry does not hold must not come back
+        // as "ok" — that would claim an activation that did not happen.
+        use lifecycle::approval::{Proposal, ProposalKind, ProposalStatus};
+        let (addr, queue, registry) = start_with_queue_and_registry();
+        queue.lock().unwrap().enqueue(Proposal {
+            id: "ghost-skill".to_string(),
+            kind: ProposalKind::NewSkill {
+                name: "ghost-skill".to_string(),
+                description: "never registered".to_string(),
+                prompt_hash: "def456".to_string(),
+            },
+            created_at_ns: 1_000_000_000,
+            provenance: "test".to_string(),
+            sandbox_result: None,
+            defence_verdict: None,
+            status: ProposalStatus::Pending,
+        });
+
+        let resp = approval_action(addr, "ghost-skill", "approve");
+        assert!(resp.contains("500"), "status: {resp}");
+        assert!(resp.contains(r#""ok":false"#), "body: {resp}");
+        assert!(
+            resp.contains("could not be activated"),
+            "the operator is not told what happened: {resp}"
+        );
+        // The real skill is untouched by the failed one.
+        assert_eq!(skill_state(&registry), skills::SkillState::Proposed);
     }
 
     #[test]

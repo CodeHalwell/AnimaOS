@@ -149,7 +149,7 @@ supply-chain audit (`deny.toml`) and build times unchanged.
 | `GET /events`     | Server-Sent Events: the live `OperatorEvent` stream + a snapshot replay so a newly-opened dashboard paints immediately. Every event carries an SSE `id:` (the audit-file byte offset of its source line), and `Last-Event-ID` on reconnect skips already-rendered replay — stable across server restarts, so a network blip or agent restart never duplicates the conversation. |
 | `POST /guidance`  | Afferent ingress: an `OperatorInput` → validated → sensory packet. |
 | `GET /healthz`    | Liveness probe (always open).                                   |
-| `GET /conversation` | Durable conversation history from the E22 session store — the same turns the agent composes its prompts from, so a reloaded page paints the real transcript rather than the event hub's replay tail (E33 S33.1). |
+| `GET /conversation` | Durable conversation history from the E22 session store — the same turns the agent composes its prompts from, so a reloaded page paints the real transcript rather than the event hub's replay tail (E33 S33.1). `?limit=N` bounds a page; `?before=I` pages back through the rest of the session. |
 | `GET /whoami`     | The operator identity this console is talking as, from the E17 `UserRegistry`, with its trust tier (E33 S33.5). |
 | `POST /feedback`  | Rate a reply (`up`/`down`, optional correction) into the E24 feedback store (E33 S33.4). |
 | `GET /approval-queue` + `POST /approval-queue/{id}/{approve,reject}` | The E15 approval surface. |

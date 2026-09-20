@@ -218,7 +218,7 @@ invariant holds.
 
 | Route | Purpose |
 |---|---|
-| `GET /conversation?limit=N` | the newest `N` turns from the session store (default 100, hard cap 1000), oldest-first; replaces reliance on the 256-event ring. No cursor: a page loads the tail and the live stream appends, which is all the dashboard needs today. Older history is reachable with `anima sessions show`. |
+| `GET /conversation?limit=N&before=I` | the newest `N` turns from the session store below turn index `I` (default 100, hard cap 1000; `before` exclusive, omit it for the tail), oldest-first; replaces reliance on the 256-event ring. A client walks the whole session by passing the index of the oldest turn it holds, and has reached the start when that index is 0 or fewer than `limit` turns come back. |
 | `POST /guidance` | accepts `message_id` and `reply_to`; the 202 body returns the `message_id` (server-minted when absent) |
 | `POST /feedback` | `{ task_id, rating, comment? }` → `FeedbackStore` + `FeedbackReceived` audit |
 | `GET /whoami` | operator identity (S33.5) |
@@ -235,9 +235,13 @@ Changes:
   notices move from free-floating to under the message they belong to.
 - **History.** Load `GET /conversation` on open; the SSE stream only appends.
   The replay ring still delivers the same recent events, so the page reconciles
-  the two: turns drawn from history consume their replayed counterparts, and
-  reconciliation ends at the first heartbeat, which the server sends only once
-  the snapshot is fully written.
+  the two: a replayed event *adopts* the bubble its turn was drawn into rather
+  than painting a second, which is also how the event's `message_id` reaches a
+  restored bubble — a stored turn carries only a role and its text, so without
+  adoption every status vanished on reload. Reconciliation ends at the first
+  heartbeat, which the server sends only once the snapshot is fully written.
+  Above the first restored turn sits a **load earlier** control that pages back
+  through the rest of the session, 50 turns a click.
 - **Composer.** Multi-line (`Shift+Enter`), `Ctrl+Enter` to send, priority as
   a segmented control, a `force` toggle that reveals a reason field
   (audited), the draft kept in `localStorage`.
@@ -279,13 +283,13 @@ All shipped. Each row names where the behaviour now lives.
 
 | Story | Scope | State |
 |---|---|---|
-| **S33.0 Unblock** | Wire the approval queue, skill registry (shared with `LifecycleManager` so the panel reflects live reflection output) and adapter library into `cmd_serve`; periodic heartbeat on a 5 s wall-clock cadence; guidance echo raised from 200 to 4000 chars; forced-bubble renderer parses the colon-bearing label and the reason clause. | ✅ (`kernels/hosted/src/commands.rs`; `crates/console/src/server.rs`; `dashboard.html`; 4 tests) |
-| **S33.1 Conversation memory** | `vita::ConversationMemory` trait + `Subsystems::conversation`; `compose` on dispatch, `record_reply` on completion; host `SessionConversation` over `sessions::SessionStore` with identity framing and a 6000-char window trimmed from the oldest end; `GET /conversation`; the dashboard loads history and reconciles it against the replay ring. | ✅ (`crates/vita/src/conversation.rs`; `kernels/hosted/src/conversation.rs`; `crates/console/src/server.rs`; 11 tests) |
+| **S33.0 Unblock** | Wire the approval queue, skill registry (shared with `LifecycleManager` so the panel reflects live reflection output) and adapter library into `cmd_serve`; a drainer carries the Dreaming phase's proposed skills into the queue, and approving one promotes it in the shared registry rather than only stamping the queue entry; periodic heartbeat on a 5 s wall-clock cadence; guidance echo raised from 200 to 4000 chars; forced-bubble renderer parses the colon-bearing label and the reason clause. | ✅ (`kernels/hosted/src/commands.rs`; `crates/console/src/server.rs`; `dashboard.html`; 4 tests) |
+| **S33.1 Conversation memory** | `vita::ConversationMemory` trait + `Subsystems::conversation`; `compose` on dispatch, `record_reply` on completion, `record_declined` when the gate refuses one at intake so a blocked message is still in the record; host `SessionConversation` over `sessions::SessionStore` with identity framing and a 6000-char window trimmed from the oldest end; `GET /conversation` with a `before` cursor; the dashboard loads history, adopts its replayed counterparts, and pages back through the rest. | ✅ (`crates/vita/src/conversation.rs`; `kernels/hosted/src/conversation.rs`; `crates/console/src/server.rs`; 11 tests) |
 | **S33.2 Correlation** | `message_id` and `reply_to` on `OperatorInput`; optional `message_id` on `Gate`/`TaskStarted`/`AgentMessage`; typed `Accepted` event; `AuditEntry::OperatorMessageLinked` emitted at intake; `console::CorrelationTracker` as the reader half; per-message status in the dashboard and id tags in the TUI. | ✅ (`console-proto`, `senses`, `vita`, `console`; 13 tests) |
 | **S33.3 Agent questions** | `AuditEntry::HelpRequested` from a sub-floor confidence score; `ApprovalProposalQueued` read the same way; both surface as `AgentQuestion`; the question is recorded as the agent's own turn so an answer arrives with it in context; question cards with quick replies routed by kind. | ✅ (`crates/vita/src/lib.rs`, `crates/console/src/audit.rs`, `dashboard.html`; 4 tests) |
 | **S33.4 Conversation view** | Markdown-lite rendering (escape-first), collapsible long replies, copy and rating controls, `POST /feedback` into the E24 store, multi-line composer with Enter-to-send and a force toggle that requires a reason, draft persistence, sleep-phase feed collapse; `consoleStream.ts` contract updated. | ✅ (`dashboard.html`, `crates/console/src/server.rs`, `web/src/lib/consoleStream.ts`; 4 tests) |
 | **S33.5 Identity** | `GET /whoami` from the E17 `UserRegistry`: the profile conversations and feedback are attributed to, and its trust tier. Trust is never inferred from reaching the console. | ✅ (`crates/console/src/server.rs`, `kernels/hosted/src/commands.rs`; 5 tests) |
-| **S33.6 Gate every packet** | The Striatal Gate arbitrates *all* operator guidance, not only forced packets, against the last real interoceptive reading. A stressed agent defers ordinary chatter and still takes Critical. `ANIMA_GATE_OPERATOR=0` restores unconditional admission. | ✅ (`crates/vita/src/lib.rs`; 3 tests) |
+| **S33.6 Gate every packet** | The Striatal Gate arbitrates *all* operator guidance, not only forced packets, against the last real interoceptive reading. A stressed agent defers ordinary chatter and still takes Critical. A declined message is still written to the conversation, with the gate's reasoning as a system turn, so the record holds what was said and the next prompt can explain the silence. `ANIMA_GATE_OPERATOR=0` restores unconditional admission. | ✅ (`crates/vita/src/lib.rs`; 3 tests) |
 
 **Epic exit criteria.**
 1. A reload shows the full conversation from the session store, not the ring. ✅
@@ -301,7 +305,7 @@ All shipped. Each row names where the behaviour now lives.
    echoes its prompt, so it cannot show this.
 4. A low-confidence completion produces a question card; answering it produces
    a reply that carries the question context. ✅
-5. `cargo test --workspace --all-targets` (2172 tests), `cargo clippy
+5. `cargo test --workspace --all-targets` (2187 tests), `cargo clippy
    --workspace --all-targets -- -D warnings` and `cargo fmt --check` clean;
    the `console-proto` manual/serde round trip covers both new variants
    including a `None` correlation; `vita` still builds
@@ -322,7 +326,16 @@ All shipped. Each row names where the behaviour now lives.
   would change — `compose` would return a message list rather than a string —
   and it does not need to move for it.
 - **Session growth.** `SessionRecord` grows without bound; archival is E22's
-  `anima sessions archive`, not automatic.
+  `anima sessions archive`, not automatic. The transcript in the browser is
+  still capped at 250 nodes, so paging far enough back evicts the newest end;
+  the store keeps everything either way.
+- **The adapter panel is empty under `serve`, and will stay that way** until
+  the sleep-phase consolidation that produces adapters runs in that process.
+  `serve` never calls `enable_consolidation`, and `AdapterLibrary` is in-memory
+  only, so there is neither a producer to share the handle with nor anything on
+  disk to load; adapters come from `cargo xtask finetune` today. The handle is
+  wired as the seam consolidation will register into — the panel reports
+  "none", which is true, rather than nothing at all.
 
 ## 4. What you need to try it
 

@@ -261,6 +261,10 @@
   }
   .notice { align-self: center; text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 14px; border-radius: 999px; border: 1px dashed var(--line); max-width: 90%; }
   .notice.veto { color: var(--crit); border-color: rgba(248, 113, 113, .4); border-style: solid; }
+  /* Paging control at the head of the transcript (E33 S33.1). */
+  .earlier { align-self: center; font: inherit; font-size: 11.5px; color: var(--muted); background: transparent; padding: 5px 14px; border-radius: 999px; border: 1px dashed var(--line); cursor: pointer; }
+  .earlier:hover:not(:disabled) { color: var(--ink); border-color: var(--accent); }
+  .earlier:disabled { opacity: .55; cursor: default; }
   .typing { align-self: flex-start; display: inline-flex; gap: 5px; padding: 12px 16px; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; }
   .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: tdot 1.2s infinite; }
   .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
@@ -589,16 +593,29 @@
   /** Replies longer than this are collapsed behind a "show more" control. */
   const LONG_REPLY_CHARS = 1200;
 
-  function bubble(cls, meta, text, force) {
-    const stick = nearBottom();
+  /** Build a bubble without placing it: the caller decides where it goes. */
+  function makeBubble(cls, meta, text) {
     const el = document.createElement("div");
     el.className = "bubble " + cls;
     // The agent answers in markdown; the operator's own text is shown exactly
     // as they typed it.
     const body = cls === "agent" ? mdLite(text) : esc(text);
     el.innerHTML = '<span class="meta">' + esc(meta) + '</span><div class="body">' + body + "</div>";
+    return el;
+  }
+
+  function bubble(cls, meta, text, force) {
+    const stick = nearBottom();
+    const el = makeBubble(cls, meta, text);
     chat.appendChild(el);
-    while (chat.childNodes.length > 250) chat.removeChild(chat.firstChild);
+    while (chat.childNodes.length > 250) {
+      // The paging control sits at the top of the transcript; evicting it
+      // would quietly strip the operator's only way back through history.
+      const first = chat.firstChild;
+      const victim = first && first.className === "earlier" ? chat.childNodes[1] : first;
+      if (!victim) break;
+      chat.removeChild(victim);
+    }
     scrollChat(force || stick);
     return el;
   }
@@ -634,17 +651,22 @@
     });
     acts.appendChild(copy);
 
-    if (taskKey && feedbackAvailable) {
-      for (const [label, rating] of [["\u2191 helpful", "up"], ["\u2193 not", "down"]]) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.textContent = label;
-        if (rating === "down") b.classList.add("down");
-        b.addEventListener("click", () => rateReply(taskKey, rating, acts, b));
-        acts.appendChild(b);
-      }
-    }
+    if (taskKey) attachRating(acts, taskKey);
     el.appendChild(acts);
+  }
+
+  /* The rating pair, separated out because a reply restored from history only
+     learns its task id when the replayed AgentMessage catches up with it. */
+  function attachRating(acts, taskKey) {
+    if (!feedbackAvailable || acts.querySelector("button.rate")) return;
+    for (const [label, rating] of [["\u2191 helpful", "up"], ["\u2193 not", "down"]]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "rate" + (rating === "down" ? " down" : "");
+      b.textContent = label;
+      b.addEventListener("click", () => rateReply(taskKey, rating, acts, b));
+      acts.appendChild(b);
+    }
   }
 
   let feedbackAvailable = true;
@@ -657,7 +679,7 @@
       });
       if (r.status === 404) { feedbackAvailable = false; acts.querySelectorAll("button.rate").forEach(b => b.remove()); return; }
       if (!r.ok) return;
-      for (const b of acts.querySelectorAll("button")) b.classList.remove("on");
+      for (const b of acts.querySelectorAll("button.rate")) b.classList.remove("on");
       btn.classList.add("on");
     } catch (e) { /* offline: leave the control untouched */ }
   }
@@ -874,29 +896,47 @@
         showTyping(ev.task_key || String(ev.task_id));
         if (ev.message_id) setStatus(ev.message_id, "working");
         break;
-      case "AgentMessage":
+      case "AgentMessage": {
         clearTyping(ev.task_key || String(ev.task_id));
-        if (ev.message_id) setStatus(ev.message_id, "answered");
-        if (alreadyRendered("agent", ev.text)) {
-          addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (replayed)");
+        const taskKey = ev.task_key || String(ev.task_id);
+        const prior = matchRendered("agent", ev.text);
+        if (prior) {
+          // The saved turn holds the text but not the task it came from, so
+          // the reply could not be rated until this event named it.
+          const acts = prior.querySelector(".acts");
+          if (acts) attachRating(acts, taskKey);
+          if (ev.message_id) setStatus(ev.message_id, "answered");
+          addFeed("msg", "agent", "#" + taskKey + " (replayed)");
           break;
         }
+        if (ev.message_id) setStatus(ev.message_id, "answered");
         decorateReply(
           bubble("agent", "anima · " + ev.tokens + " tok", ev.text),
           ev.text,
-          ev.task_key || String(ev.task_id)
+          taskKey
         );
-        addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (" + ev.tokens + " tok) " + ev.text);
+        addFeed("msg", "agent", "#" + taskKey + " (" + ev.tokens + " tok) " + ev.text);
         break;
+      }
       // E33 S33.2 — the operator's own message, typed and uncorrelated-free.
       // Every ingress (this browser, the CLI, a chat channel) renders here.
       case "Accepted": {
         if (ev.reply_to) markAnswered(ev.reply_to, null);
-        if (alreadyRendered("op", ev.text)) break;
         const tag = ev.forced ? "forced · critical" : String(ev.priority || "").toLowerCase();
-        const el = bubble("op", "operator · " + tag, ev.text);
+        // A bubble restored from history is the *same* message as this replayed
+        // event, so it is adopted rather than painted again — otherwise its id
+        // is never attached and every later status for this message (gated,
+        // working, answered) has no bubble to land under.
+        const prior = matchRendered("op", ev.text);
+        const el = prior || bubble("op", "operator · " + tag, ev.text);
+        if (prior) {
+          // The event knows the priority and the override; the saved turn does
+          // not. Upgrade the label to match a message that arrived live.
+          const meta = prior.querySelector(".meta");
+          if (meta) meta.textContent = "operator · " + tag;
+        }
         el.dataset.msg = ev.message_id || "";
-        if (ev.force_reason) {
+        if (ev.force_reason && !el.querySelector(".reason")) {
           const reason = document.createElement("span");
           reason.className = "reason";
           reason.textContent = "forced override · " + ev.force_reason;
@@ -1107,38 +1147,128 @@
      remain in the event hub's replay ring.
 
      That replay still arrives on connect, so the same recent exchange would
-     paint twice. `reconcile` holds one entry per turn already rendered from
-     history; a replayed conversation event matching one consumes it instead of
-     rendering. It is dropped on the first Heartbeat, which the server only
-     sends once the whole snapshot has been written — so live messages are
-     never mistaken for replay, even if someone sends the same text twice. */
+     paint twice. `reconcile` holds the bubble each restored turn was painted
+     into; a replayed conversation event matching one adopts that bubble
+     instead of rendering a second. Adoption rather than suppression is what
+     lets the event's correlation id reach the restored bubble — a saved turn
+     carries only a role and its text. It is dropped on the first Heartbeat,
+     which the server only sends once the whole snapshot has been written — so
+     live messages are never mistaken for replay, even if someone sends the
+     same text twice. */
   const reconcile = new Map();
   let reconciling = false;
   function turnKey(role, text) { return role + "\u0000" + String(text == null ? "" : text); }
-  function alreadyRendered(role, text) {
-    if (!reconciling) return false;
+  /** The restored bubble this replayed event belongs to, or null if it is new. */
+  function matchRendered(role, text) {
+    if (!reconciling) return null;
     const k = turnKey(role, text);
-    const n = reconcile.get(k) || 0;
-    if (n <= 0) return false;
-    reconcile.set(k, n - 1);
-    return true;
+    const pending = reconcile.get(k);
+    if (!pending) return null;
+    // The transcript is capped, so a restored bubble may already have been
+    // evicted; a detached one is no use to adopt and the event renders fresh.
+    while (pending.length) {
+      const el = pending.shift();
+      if (el.isConnected) return el;
+    }
+    return null;
+  }
+
+  /** One page of history, newest page first. 50 keeps a click responsive. */
+  const HISTORY_PAGE = 50;
+  /** Index of the oldest turn on screen — the cursor the next page steps back from. */
+  let oldestTurn = null;
+  let earlierBtn = null;
+
+  /** Render one stored turn, either appended (first load) or prepended (paging back). */
+  function renderTurn(t, before) {
+    const isUser = t.role === "user";
+    // A system turn is not speech — today it is the note left behind when the
+    // gate declined a message (E33 S33.6). It is the only explanation the
+    // operator has for a message that never got an answer, so it is shown as a
+    // notice rather than dropped with the rest of the non-speech roles. There
+    // is no live event to reconcile it against.
+    if (t.role === "system") {
+      const el = document.createElement("div");
+      el.className = "notice";
+      el.textContent = t.content;
+      if (before) chat.insertBefore(el, before); else chat.appendChild(el);
+      return;
+    }
+    if (!isUser && t.role !== "assistant") return; // tool turns stay out of the transcript
+    const role = isUser ? "op" : "agent";
+    const el = makeBubble(role, isUser ? "operator" : "anima", t.content);
+    if (before) chat.insertBefore(el, before); else chat.appendChild(el);
+    if (!isUser) decorateReply(el, t.content, null);
+    // Only the newest page can collide with the replay ring; an older page is
+    // long past the hub's window, so it is never reconciled against.
+    if (before) return;
+    const k = turnKey(role, t.content);
+    const pending = reconcile.get(k);
+    if (pending) pending.push(el); else reconcile.set(k, [el]);
+  }
+
+  /** Fetch one page; returns the turns, or null when the endpoint is not there. */
+  async function fetchTurns(before) {
+    const q = "/conversation?limit=" + HISTORY_PAGE +
+      (before == null ? "" : "&before=" + encodeURIComponent(before));
+    const r = await fetch(q, { headers: authHeaders });
+    if (!r.ok) return null; // 404 when not wired — fall back to the replay ring
+    const turns = await r.json();
+    return Array.isArray(turns) ? turns : null;
+  }
+
+  /* The store holds the whole conversation, but one page of it is all the
+     operator could reach before — anything older sat on disk, readable only
+     from the CLI. This walks back a page per click, keeping the reader's place
+     by restoring the scroll offset the inserted turns pushed down. */
+  function showEarlierControl() {
+    if (earlierBtn) return;
+    earlierBtn = document.createElement("button");
+    earlierBtn.type = "button";
+    earlierBtn.className = "earlier";
+    earlierBtn.textContent = "load earlier messages";
+    earlierBtn.addEventListener("click", loadEarlier);
+    chat.insertBefore(earlierBtn, chat.firstChild);
+  }
+
+  function retireEarlierControl() {
+    if (!earlierBtn) return;
+    earlierBtn.remove();
+    earlierBtn = null;
+    const el = document.createElement("div");
+    el.className = "notice";
+    el.textContent = "— start of the conversation —";
+    chat.insertBefore(el, chat.firstChild);
+  }
+
+  async function loadEarlier() {
+    if (oldestTurn == null || !earlierBtn) return;
+    earlierBtn.disabled = true;
+    earlierBtn.textContent = "loading…";
+    const before = chat.scrollHeight;
+    try {
+      const turns = await fetchTurns(oldestTurn);
+      if (!turns || !turns.length) { retireEarlierControl(); return; }
+      for (const t of turns) renderTurn(t, earlierBtn);
+      oldestTurn = turns[0].index;
+      // Keep the reader where they were: the new turns went in above them.
+      chat.scrollTop += chat.scrollHeight - before;
+      if (turns.length < HISTORY_PAGE || oldestTurn <= 0) retireEarlierControl();
+    } catch (e) {
+      // Offline: leave the control so the operator can try again.
+    } finally {
+      if (earlierBtn) { earlierBtn.disabled = false; earlierBtn.textContent = "load earlier messages"; }
+    }
   }
 
   async function loadHistory() {
     try {
-      const r = await fetch("/conversation?limit=100", { headers: authHeaders });
-      if (!r.ok) return; // 404 when not wired — fall back to the replay ring
-      const turns = await r.json();
-      if (!Array.isArray(turns) || !turns.length) return;
+      const turns = await fetchTurns(null);
+      if (!turns || !turns.length) return;
       reconciling = true;
-      for (const t of turns) {
-        const isUser = t.role === "user";
-        if (!isUser && t.role !== "assistant") continue; // system/tool stay out of the transcript
-        const el = bubble(isUser ? "op" : "agent", isUser ? "operator" : "anima", t.content);
-        if (!isUser) decorateReply(el, t.content, null);
-        const k = turnKey(isUser ? "op" : "agent", t.content);
-        reconcile.set(k, (reconcile.get(k) || 0) + 1);
-      }
+      for (const t of turns) renderTurn(t, null);
+      oldestTurn = turns[0].index;
+      if (turns.length >= HISTORY_PAGE && oldestTurn > 0) showEarlierControl();
       notice("— end of saved history —");
       scrollChat(true);
     } catch (e) { /* offline or not wired: the replay ring still paints */ }
