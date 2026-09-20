@@ -155,6 +155,21 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_parses_the_forced_guidance_echo_shape() {
+        // E33 S33.0: forced guidance echoes as
+        // `[FORCED:Critical] (Reason: …) text`; the renderer must strip both
+        // the colon-bearing label and the reason clause from the message body.
+        assert!(
+            DASHBOARD_HTML.contains("GUIDANCE_RE"),
+            "dashboard lost the guidance-echo pattern"
+        );
+        assert!(
+            DASHBOARD_HTML.contains("Reason:"),
+            "dashboard no longer recognises the forced-guidance reason clause"
+        );
+    }
+
+    #[test]
     fn console_wires_and_starts() {
         let dir = std::env::temp_dir().join(format!("anima-console-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

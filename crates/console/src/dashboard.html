@@ -193,6 +193,10 @@
   .bubble.op { align-self: flex-end; background: linear-gradient(135deg, rgba(92, 200, 255, .16), rgba(139, 124, 246, .16)); border: 1px solid rgba(92, 200, 255, .25); border-bottom-right-radius: 4px; }
   .bubble.agent { align-self: flex-start; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
   .bubble.agent .meta { color: var(--msg); }
+  .bubble .reason {
+    display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(248,113,113,.25);
+    font: 500 10.5px var(--mono); color: var(--crit); letter-spacing: .03em;
+  }
   .notice { align-self: center; text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 14px; border-radius: 999px; border: 1px dashed var(--line); max-width: 90%; }
   .notice.veto { color: var(--crit); border-color: rgba(248, 113, 113, .4); border-style: solid; }
   .typing { align-self: flex-start; display: inline-flex; gap: 5px; padding: 12px 16px; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; }
@@ -427,6 +431,9 @@
   function esc(s) { escEl.textContent = String(s); return escEl.innerHTML; }
 
   /* ── Conversation ───────────────────────────────────────────────── */
+  // Priority label, an optional "(Reason: …)" clause for operator-forced
+  // guidance, then the message body.
+  const GUIDANCE_RE = /^\[([A-Za-z]+(?::[A-Za-z]+)?)\]\s*(?:\(Reason:\s*([\s\S]*?)\)\s*)?([\s\S]*)$/;
   const chat = $("chat");
   const typing = new Map(); // task_id -> typing element
   function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80; }
@@ -540,9 +547,23 @@
         break;
       case "Audit":
         if (ev.kind === "OperatorGuidance") {
-          // detail shape: "[Priority] text" — render as an operator bubble.
-          const m = /^\[(\w+)\]\s*([\s\S]*)$/.exec(ev.detail || "");
-          bubble("op", "operator · " + (m ? m[1].toLowerCase() : "guidance"), m ? m[2] : ev.detail);
+          // Two detail shapes are emitted by POST /guidance:
+          //   "[Normal] text"
+          //   "[FORCED:Critical] (Reason: why) text"
+          // The old `[\w+]` pattern matched neither the colon nor the reason
+          // clause, so a forced line rendered its raw prefix as message body.
+          const m = GUIDANCE_RE.exec(ev.detail || "");
+          if (m) {
+            const el = bubble("op", "operator · " + m[1].toLowerCase().replace(":", " · "), m[3]);
+            if (m[2]) {
+              const reason = document.createElement("span");
+              reason.className = "reason";
+              reason.textContent = "forced override · " + m[2];
+              el.appendChild(reason);
+            }
+          } else {
+            bubble("op", "operator · guidance", ev.detail);
+          }
         }
         if (ev.kind === "DefenceVeto") notice("defence veto · " + ev.detail, true);
         if (ev.kind === "TaskFailed" || ev.kind === "CortexFault") {

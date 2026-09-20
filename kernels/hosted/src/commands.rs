@@ -5095,7 +5095,11 @@ pub(crate) fn cmd_serve() {
         Arc::clone(&backend),
         None, // run forever
     )
-    .with_tier_backends(tier_backends);
+    .with_tier_backends(tier_backends)
+    // E33 S33.0: install the skill registry on the manager, so the Dreaming
+    // phase's self-improvement reflection and the console's Skills panel read
+    // and write the *same* registry rather than two disconnected copies.
+    .with_skill_registry(skills::SkillRegistry::with_builtins());
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.subsystems.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
@@ -5143,8 +5147,28 @@ pub(crate) fn cmd_serve() {
         println!("  cognition: watchdog + confidence + prospective memory enabled (E14)");
     }
 
+    // ── E33 S33.0 — operator-facing shared state ──────────────────────────────
+    // The approval queue (E15 S15.2), the skill registry (E11) and the adapter
+    // library (E8) each back a console panel.  Without these handles the
+    // matching routes answer 404 and the panels stay permanently hidden, so the
+    // operator cannot see — let alone approve — anything the agent proposes.
+    // The skill handle is the one already installed on the manager, so the
+    // panel reflects live reflection output rather than an empty copy.
+    let approval_queue = Arc::new(std::sync::Mutex::new(
+        lifecycle::approval::ApprovalQueue::new(),
+    ));
+    let adapter_library = Arc::new(std::sync::Mutex::new(anima_finetune::AdapterLibrary::new(
+        ADAPTER_LIBRARY_CAPACITY,
+    )));
+    let skill_handle = manager.skill_registry_handle();
+
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
-    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
+    let mut console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
+        .with_approval_queue(Arc::clone(&approval_queue))
+        .with_adapter_library(Arc::clone(&adapter_library));
+    if let Some(registry) = skill_handle {
+        console = console.with_skill_registry(registry);
+    }
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
@@ -5173,6 +5197,9 @@ pub(crate) fn cmd_serve() {
         frontier_b.id()
     );
     println!("  audit log : {}", audit_path.display());
+    println!(
+        "  panels    : approval-queue, skills, adapters (GET /approval-queue, /skills, /adapters)"
+    );
     if corpus_dir != "off" {
         println!("  corpus    : {corpus_dir} (sleep-phase training pairs)");
     }
@@ -5210,6 +5237,13 @@ pub(crate) fn cmd_serve() {
         println!("\nanima-hosted: somatic loop stopped; shut down cleanly.");
     }
 }
+
+/// How many adapter artifacts the serving agent's library retains (E33 S33.0).
+///
+/// The library is an LRU over fine-tune outputs; the console's Adapters panel
+/// lists whatever it holds.  Eight is comfortably more than a single agent
+/// accumulates between restarts without letting the list grow unbounded.
+const ADAPTER_LIBRARY_CAPACITY: usize = 8;
 
 /// Maximum consecutive somatic-loop restarts before the supervisor gives up.
 const MAX_SOMATIC_RESTARTS: u32 = 100;

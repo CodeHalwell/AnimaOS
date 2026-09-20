@@ -191,6 +191,23 @@ fn check_bind_policy(addr: std::net::SocketAddr, has_token: bool) -> std::io::Re
 }
 
 /// Map a protocol priority onto the `senses` priority enum.
+/// How often an SSE connection emits a [`OperatorEvent::Heartbeat`], regardless
+/// of how much other traffic is flowing (E33 S33.0).  Also the proxy keep-alive.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a subscriber blocks waiting for the next event before re-checking
+/// the heartbeat cadence.  Short enough that the beat lands on time, long
+/// enough that an idle console costs one wakeup a second.
+const HEARTBEAT_POLL: Duration = Duration::from_secs(1);
+
+/// Longest guidance echo carried in the `OperatorGuidance` audit event.
+///
+/// The echo is what the conversation view renders for the operator's own
+/// message, so the old 200-byte cut silently truncated any message longer than
+/// a short paragraph.  The bound still exists — the feed must not carry a
+/// 64 KiB line — but it is now far above normal use (E33 S33.0).
+const GUIDANCE_ECHO_LIMIT: usize = 4000;
+
 fn to_sensory_priority(p: Priority) -> SensoryPriority {
     match p {
         Priority::Low => SensoryPriority::Low,
@@ -629,8 +646,25 @@ impl ConsoleServer {
             }
         }
 
+        // E33 S33.0: the heartbeat used to ride the receive timeout alone, so a
+        // console attached to a live agent never saw one — the 1 Hz vitals meant
+        // the channel was never idle for the full timeout, and the dashboard's
+        // uptime chip stayed blank forever.  Emit on a wall-clock cadence
+        // instead, independent of how busy the stream is.
+        let mut last_beat = std::time::Instant::now();
         loop {
-            match sub.rx.recv_timeout(Duration::from_secs(15)) {
+            if last_beat.elapsed() >= HEARTBEAT_INTERVAL {
+                last_beat = std::time::Instant::now();
+                // No `id:` line — heartbeats are synthesised per-connection and
+                // must not advance the client's replay cursor.
+                let beat = OperatorEvent::Heartbeat {
+                    uptime_secs: self.hub.uptime_secs(),
+                };
+                if write_sse(&mut out, None, &beat).is_err() {
+                    break;
+                }
+            }
+            match sub.rx.recv_timeout(HEARTBEAT_POLL) {
                 Ok((seq, event)) => {
                     // The same cursor filter as the snapshot: after a restart
                     // the tailer re-reads the audit file from offset 0 and
@@ -645,17 +679,9 @@ impl ConsoleServer {
                         break;
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Idle keep-alive so proxies and the client don't time out.
-                    // No `id:` line — heartbeats are synthesised per-connection
-                    // and must not advance the client's replay cursor.
-                    let beat = OperatorEvent::Heartbeat {
-                        uptime_secs: self.hub.uptime_secs(),
-                    };
-                    if write_sse(&mut out, None, &beat).is_err() {
-                        break;
-                    }
-                }
+                // Nothing published this tick: fall through to the cadence
+                // check at the top of the loop, which emits the keep-alive.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -724,13 +750,13 @@ impl ConsoleServer {
                 let detail = if let Some(reason) = input.force.as_deref() {
                     format!(
                         "[FORCED:Critical] (Reason: {reason}) {}",
-                        truncate(&input.text, 200)
+                        truncate(&input.text, GUIDANCE_ECHO_LIMIT)
                     )
                 } else {
                     format!(
                         "[{}] {}",
                         priority_label(to_sensory_priority(input.priority)),
-                        truncate(&input.text, 200)
+                        truncate(&input.text, GUIDANCE_ECHO_LIMIT)
                     )
                 };
                 self.hub.publish(OperatorEvent::Audit {
@@ -1166,6 +1192,106 @@ mod tests {
     #[test]
     fn bind_allows_loopback_without_token() {
         assert!(server_with("127.0.0.1:0", None).bind().is_ok());
+    }
+
+    // ── E33 S33.0 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn long_guidance_is_echoed_past_the_old_two_hundred_byte_cut() {
+        // The echo is what the conversation view renders as the operator's own
+        // message, so a 200-byte cut silently truncated anything longer than a
+        // short paragraph.
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let text = "y".repeat(1500);
+        let body = format!(r#"{{"text":"{text}","priority":"Normal"}}"#);
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+
+        let echo = sub
+            .rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("guidance echo published");
+        match echo {
+            (_, OperatorEvent::Audit { kind, detail }) => {
+                assert_eq!(kind, "OperatorGuidance");
+                assert!(
+                    detail.contains(&"y".repeat(1500)),
+                    "echo truncated at {} chars",
+                    detail.len()
+                );
+            }
+            other => panic!("expected an OperatorGuidance audit echo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guidance_echo_is_still_bounded_so_the_feed_cannot_carry_a_64_kib_line() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let text = "z".repeat(GUIDANCE_ECHO_LIMIT + 500);
+        let body = format!(r#"{{"text":"{text}","priority":"Normal"}}"#);
+        let _ = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Audit { detail, .. }) => assert!(
+                detail.len() < GUIDANCE_ECHO_LIMIT + 200,
+                "echo unbounded at {} chars",
+                detail.len()
+            ),
+            other => panic!("expected an audit echo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_arrives_on_a_busy_stream_not_only_an_idle_one() {
+        // Regression: the beat used to ride the receive timeout alone, so the
+        // 1 Hz vitals of a live agent starved it and the uptime chip never
+        // painted.  Publish continuously and assert a beat still lands.
+        let (addr, hub, _bridge) = start();
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        s.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3)).unwrap();
+
+        let pump = std::thread::spawn(move || {
+            for i in 0..(HEARTBEAT_INTERVAL.as_secs() * 4 + 8) {
+                hub.publish(OperatorEvent::Audit {
+                    kind: "Noise".into(),
+                    detail: format!("tick {i}"),
+                });
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+
+        let mut reader = BufReader::new(s);
+        let deadline = std::time::Instant::now() + HEARTBEAT_INTERVAL * 3;
+        let mut saw_beat = false;
+        while std::time::Instant::now() < deadline {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.contains("\"Heartbeat\"") {
+                saw_beat = true;
+                break;
+            }
+        }
+        let _ = pump.join();
+        assert!(saw_beat, "no heartbeat observed while events were flowing");
     }
 
     #[test]
