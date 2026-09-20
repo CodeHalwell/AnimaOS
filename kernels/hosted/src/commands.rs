@@ -5157,16 +5157,11 @@ pub(crate) fn cmd_serve() {
     // E33 S33.6 — ordinary operator guidance is arbitrated by the Striatal
     // Gate, as the operator interface has always documented.  Opt out with
     // ANIMA_GATE_OPERATOR=0 to restore unconditional admission.
-    if std::env::var("ANIMA_GATE_OPERATOR").as_deref() == Ok("0") {
-        manager.gate_operator_input = false;
-        println!("  gate      : operator guidance NOT gated (ANIMA_GATE_OPERATOR=0)");
-    } else {
-        println!("  gate      : every operator message is arbitrated by the Striatal Gate");
-    }
+    let gate_operator_input = std::env::var("ANIMA_GATE_OPERATOR").as_deref() != Ok("0");
+    manager.gate_operator_input = gate_operator_input;
 
     // Opt out with ANIMA_CONVERSATION=0 for a bare, stateless loop.
     let conversation_store = if std::env::var("ANIMA_CONVERSATION").as_deref() == Ok("0") {
-        println!("  memory    : conversation disabled (ANIMA_CONVERSATION=0)");
         None
     } else {
         let conversation = Arc::new(std::sync::Mutex::new(
@@ -5183,9 +5178,6 @@ pub(crate) fn cmd_serve() {
         manager.enable_conversation(
             conversation.clone() as Arc<std::sync::Mutex<dyn vita::ConversationMemory>>
         );
-        if let Some((_, session_id)) = &handle {
-            println!("  memory    : conversation on, session {session_id}");
-        }
         handle
     };
 
@@ -5214,6 +5206,8 @@ pub(crate) fn cmd_serve() {
     // The console serves the very history the agent composes from, so a
     // reloaded dashboard shows the real conversation rather than whatever
     // happens to remain in the hub's replay ring (E33 S33.1).
+    // Captured before the store is handed to the console, for the banner below.
+    let conversation_session = conversation_store.as_ref().map(|(_, id)| id.clone());
     if let Some((store, session_id)) = conversation_store {
         console = console.with_conversation(store, session_id);
     }
@@ -5290,15 +5284,34 @@ pub(crate) fn cmd_serve() {
     println!(
         "  panels    : approval-queue, skills, adapters (GET /approval-queue, /skills, /adapters)"
     );
+    println!(
+        "  memory    : {}",
+        match &conversation_session {
+            Some(session_id) =>
+                format!("conversation on, session {session_id} (ANIMA_CONVERSATION=0 to disable)"),
+            None => "conversation disabled (ANIMA_CONVERSATION=0)".to_string(),
+        }
+    );
     println!("  history   : GET /conversation (durable turns, survives restarts)");
     println!("  identity  : GET /whoami · feedback: POST /feedback");
+    println!(
+        "  gate      : {}",
+        if gate_operator_input {
+            "every operator message is arbitrated by the Striatal Gate"
+        } else {
+            "operator guidance NOT gated (ANIMA_GATE_OPERATOR=0)"
+        }
+    );
     if backend.id() == "mock" {
         // The mock backend echoes its prompt word for word, so with
         // conversation memory on it replies with the composed context rather
         // than an answer.  That is the parrot working as designed, not a
         // fault — say so, because it is the default first-run backend.
         println!(
-            "\n  note: the mock backend echoes whatever prompt it is given, so its replies\n               will repeat the composed context. Use a real backend (ANIMA_BACKEND=ollama,\n               or anthropic/openai with a key) to judge the conversation itself."
+            "\n  note: the mock backend echoes whatever prompt it is given, so its replies\n  \
+             repeat the composed context rather than answering. Use a real backend\n  \
+             (ANIMA_BACKEND=ollama, or anthropic/openai with a key) to judge the\n  \
+             conversation itself."
         );
     }
     if corpus_dir != "off" {
