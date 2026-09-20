@@ -71,11 +71,11 @@ impl FrameAllocator {
         }
 
         // SAFETY-equivalent reasoning (no unsafe needed here): we use
-        // `fetch_update` to atomically reserve `frames` slots while ensuring
+        // `try_update` to atomically reserve `frames` slots while ensuring
         // the resulting cursor never exceeds `capacity`.
         let result = self
             .next
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 cur.checked_add(frames).filter(|&end| end <= self.capacity)
             });
 

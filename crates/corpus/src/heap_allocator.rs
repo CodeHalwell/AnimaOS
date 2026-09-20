@@ -73,7 +73,7 @@ fn align_up(addr: usize, align: usize) -> usize {
 ///
 /// This establishes a proper happens-before edge: every write in `init` is
 /// visible to any subsequent `alloc` call.  Concurrent calls to `alloc` are
-/// also safe: `cursor` is advanced atomically via `fetch_update(AcqRel)`.
+/// also safe: `cursor` is advanced atomically via `try_update(AcqRel)`.
 ///
 /// The only precondition is that `init` completes before any thread calls
 /// `alloc` — a single-CPU UEFI boot path trivially satisfies this.
@@ -170,7 +170,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // check via address wrapping.
         let result = self
             .cursor
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cursor| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cursor| {
                 // Compute the remaining heap size (cannot overflow: end ≥ start).
                 let heap_size = heap_end.checked_sub(heap_start)?;
                 // Absolute address of the current cursor position.
@@ -194,7 +194,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
             Ok(old_cursor) => {
                 // Reconstruct the start address from the cursor value that was
                 // in place when we won the CAS.  This uses the same arithmetic
-                // as the `fetch_update` closure; `wrapping_add` is safe here
+                // as the `try_update` closure; `wrapping_add` is safe here
                 // because the closure already verified the result is in range.
                 let current_addr = heap_start.wrapping_add(old_cursor);
                 let alloc_start = align_up(current_addr, layout.align());
