@@ -193,6 +193,14 @@
   .bubble.op { align-self: flex-end; background: linear-gradient(135deg, rgba(92, 200, 255, .16), rgba(139, 124, 246, .16)); border: 1px solid rgba(92, 200, 255, .25); border-bottom-right-radius: 4px; }
   .bubble.agent { align-self: flex-start; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
   .bubble.agent .meta { color: var(--msg); }
+  .bubble .status {
+    display: block; margin-top: 6px; font: 500 10px var(--mono);
+    letter-spacing: .05em; color: var(--faint);
+  }
+  .bubble .status.working { color: var(--accent); }
+  .bubble .status.answered { color: var(--ok); }
+  .bubble .status.blocked { color: var(--warn); }
+  .bubble .status.failed { color: var(--crit); }
   .bubble .reason {
     display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(248,113,113,.25);
     font: 500 10.5px var(--mono); color: var(--crit); letter-spacing: .03em;
@@ -456,6 +464,38 @@
     chat.appendChild(el);
     scrollChat(stick);
   }
+  /* ── Per-message status (E33 S33.2) ─────────────────────────────────
+     Every accepted message owns a status line under its own bubble, so the
+     operator can see where *this* message got to — accepted, gated, being
+     worked, answered — rather than inferring it from the order replies
+     happen to arrive in. */
+  const statusEls = new Map(); // message_id -> status element
+  const STATUS_TEXT = {
+    accepted: "accepted · queued as a sensory packet",
+    blocked: "gate held this back",
+    working: "working…",
+    answered: "answered",
+    failed: "failed",
+  };
+  function setStatus(messageId, state, bubbleEl, detail) {
+    let el = statusEls.get(messageId);
+    if (!el) {
+      if (!bubbleEl) return;
+      el = document.createElement("span");
+      el.className = "status";
+      bubbleEl.appendChild(el);
+      statusEls.set(messageId, el);
+      // Bound the map alongside the bubble cap so a long session does not
+      // retain a handle per message forever.
+      if (statusEls.size > 250) {
+        const oldest = statusEls.keys().next().value;
+        statusEls.delete(oldest);
+      }
+    }
+    el.className = "status " + state;
+    el.textContent = (STATUS_TEXT[state] || state) + (detail ? " · " + detail : "");
+  }
+
   function showTyping(taskId) {
     if (typing.has(taskId)) return;
     const stick = nearBottom();
@@ -530,6 +570,10 @@
       case "Gate":
         gateCount++; $("gatecount").textContent = gateCount;
         setGate(ev);
+        if (ev.message_id) {
+          setStatus(ev.message_id, ev.invoke ? "accepted" : "blocked",
+            null, ev.invoke ? "gate cleared" : ev.reasoning);
+        }
         addFeed("gate", "gate",
           (ev.invoke ? "INVOKE" : "block") + " " + (ev.cost_class || "") +
           " · value " + (ev.value_score ?? 0).toFixed(2) + " vs " + (ev.threshold ?? 0).toFixed(2) +
@@ -539,12 +583,29 @@
       case "TaskStarted":
         addFeed("task", "task→", "#" + (ev.task_key || ev.task_id) + " " + ev.prompt);
         showTyping(ev.task_key || String(ev.task_id));
+        if (ev.message_id) setStatus(ev.message_id, "working");
         break;
       case "AgentMessage":
         clearTyping(ev.task_key || String(ev.task_id));
+        if (ev.message_id) setStatus(ev.message_id, "answered");
         bubble("agent", "anima · " + ev.tokens + " tok", ev.text);
         addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (" + ev.tokens + " tok) " + ev.text);
         break;
+      // E33 S33.2 — the operator's own message, typed and uncorrelated-free.
+      // Every ingress (this browser, the CLI, a chat channel) renders here.
+      case "Accepted": {
+        const tag = ev.forced ? "forced · critical" : String(ev.priority || "").toLowerCase();
+        const el = bubble("op", "operator · " + tag, ev.text);
+        el.dataset.msg = ev.message_id || "";
+        if (ev.force_reason) {
+          const reason = document.createElement("span");
+          reason.className = "reason";
+          reason.textContent = "forced override · " + ev.force_reason;
+          el.appendChild(reason);
+        }
+        if (ev.message_id) setStatus(ev.message_id, "accepted", el);
+        break;
+      }
       case "Audit":
         if (ev.kind === "OperatorGuidance") {
           // Two detail shapes are emitted by POST /guidance:
@@ -813,8 +874,9 @@
       });
       if (r.ok) {
         $("text").value = "";
-        // The bubble is rendered from the echoed OperatorGuidance audit event,
-        // so every ingress channel (web, CLI, comms) appears identically.
+        // The bubble is rendered from the echoed `Accepted` event, so every
+        // ingress channel (web, CLI, comms) appears identically — and carries
+        // the correlation id this message's status will be keyed on.
       } else {
         const j = await r.json().catch(() => ({}));
         notice("guidance rejected · " + (j.error || "HTTP " + r.status), true);

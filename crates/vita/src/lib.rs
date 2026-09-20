@@ -1103,6 +1103,18 @@ pub async fn somatic_execution_loop(
             let task_id = lifecycle.next_sensory_task_id;
             lifecycle.next_sensory_task_id = lifecycle.next_sensory_task_id.wrapping_add(1);
 
+            // E33 S33.2: tie this task to the operator message that caused it,
+            // emitted *first* so every later entry for the task — the gate
+            // decision included, which is recorded here at intake rather than
+            // at dispatch — can be attributed to that message by a log reader.
+            if let Some(message_id) = pkt.message_id.as_deref() {
+                lifecycle.audit.push(AuditEntry::OperatorMessageLinked {
+                    agent_id: lifecycle.agent_id.clone(),
+                    task_id,
+                    message_id: message_id.to_owned(),
+                });
+            }
+
             if let Some(reason) = pkt.gate_override_reason.as_deref() {
                 let event = EventFeatures {
                     urgency: 1.0,
@@ -1590,6 +1602,108 @@ mod tests {
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
         assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 2);
+    }
+
+    #[test]
+    fn a_tagged_packet_links_its_message_before_any_other_entry_for_that_task() {
+        // E33 S33.2: the link must precede both the gate decision (recorded at
+        // intake) and TaskStarted, so a log reader knows the correlation before
+        // it sees anything else about the task.
+        let mut m = manager("agent-linked", Some(2));
+        m.senses
+            .packetize_text_tagged(
+                "summarise the overnight logs",
+                SensoryPriority::Normal,
+                Some("op-7".to_string()),
+            )
+            .expect("valid tagged text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let link_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. }))
+            .unwrap_or_else(|| panic!("no link entry; entries: {entries:?}"));
+        let started_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::TaskStarted { .. }))
+            .expect("task started");
+        assert!(link_at < started_at, "link must precede TaskStarted");
+
+        let (task_id, message_id) = match &entries[link_at] {
+            AuditEntry::OperatorMessageLinked {
+                task_id,
+                message_id,
+                ..
+            } => (*task_id, message_id.clone()),
+            other => panic!("unexpected entry: {other:?}"),
+        };
+        assert_eq!(message_id, "op-7");
+        // The id it names is the task that actually ran.
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::TaskCompleted { task_id: t, .. } if *t == task_id)));
+    }
+
+    #[test]
+    fn an_untagged_packet_emits_no_link_entry() {
+        // Sensor input and CLI guidance have no conversational origin; the
+        // audit log must look exactly as it did before correlation existed.
+        let mut m = manager("agent-untagged", Some(2));
+        m.senses
+            .packetize_text_checked("tick", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. })),
+            "untagged packet produced a correlation entry"
+        );
+    }
+
+    #[test]
+    fn a_forced_tagged_packet_links_before_its_gate_decision() {
+        let mut m = manager("agent-forced-linked", Some(2));
+        m.senses
+            .packetize_text_forced_tagged(
+                "deploy immediately",
+                "on-call escalation",
+                Some("op-9".to_string()),
+            )
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let link_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. }))
+            .expect("link entry");
+        let gate_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::GateDecision { .. }))
+            .expect("gate decision");
+        assert!(
+            link_at < gate_at,
+            "link must precede the gate decision it explains"
+        );
+
+        // The gate's event id names the same task the link does.
+        match (&entries[link_at], &entries[gate_at]) {
+            (
+                AuditEntry::OperatorMessageLinked { task_id, .. },
+                AuditEntry::GateDecision { event_id, .. },
+            ) => assert_eq!(event_id, &format!("sensory-{task_id}")),
+            other => panic!("unexpected entries: {other:?}"),
+        }
     }
 
     #[test]

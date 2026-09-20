@@ -37,7 +37,7 @@ mod audit;
 mod hub;
 mod server;
 
-pub use audit::{event_from_audit_line, event_from_audit_value, AuditTailer};
+pub use audit::{event_from_audit_line, event_from_audit_value, AuditTailer, CorrelationTracker};
 pub use hub::{ConsoleHub, Subscription};
 pub use server::{ConsoleServer, ServerConfig};
 

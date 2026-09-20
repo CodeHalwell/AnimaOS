@@ -87,6 +87,15 @@ pub struct PrioritizedPacket {
     /// (E6.6).  vita's somatic loop wires this to `GateOverride::OperatorForced`
     /// and records an audited gate decision before admitting the task.
     pub gate_override_reason: Option<String>,
+    /// Correlation id assigned by the ingress that accepted this packet
+    /// (E33 S33.2).
+    ///
+    /// Carried through the somatic loop onto the audit trail so an operator
+    /// console can tie the task — and the reply it eventually produces — back
+    /// to the specific message the human sent, rather than guessing from
+    /// arrival order.  `None` for packets with no conversational origin
+    /// (sensors, the microVM serial line, the unchecked packetisers).
+    pub message_id: Option<String>,
 }
 
 // ── Policy bounds ─────────────────────────────────────────────────────────────
@@ -199,6 +208,7 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text.into()),
             priority: SensoryPriority::Normal,
             gate_override_reason: None,
+            message_id: None,
         });
     }
 
@@ -212,6 +222,7 @@ impl SensoryBridge {
             packet: SensoryPacket::Pcm(samples),
             priority: SensoryPriority::Normal,
             gate_override_reason: None,
+            message_id: None,
         });
     }
 
@@ -230,6 +241,22 @@ impl SensoryBridge {
         &self,
         text: impl Into<String>,
         priority: SensoryPriority,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_text_tagged(text, priority, None)
+    }
+
+    /// As [`SensoryBridge::packetize_text_checked`], additionally tagging the
+    /// packet with an ingress-assigned correlation id (E33 S33.2).
+    ///
+    /// The id is carried onto the audit trail alongside the task the packet
+    /// produces, letting an operator console show the status of *this* message.
+    /// It grants no privilege: policy bounds are applied exactly as they are
+    /// for an untagged line.
+    pub fn packetize_text_tagged(
+        &self,
+        text: impl Into<String>,
+        priority: SensoryPriority,
+        message_id: Option<String>,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
         let bounds = sync::lock_recover(&self.active_bounds).clone();
@@ -258,6 +285,7 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text),
             priority,
             gate_override_reason: None,
+            message_id,
         });
         Ok(())
     }
@@ -283,6 +311,17 @@ impl SensoryBridge {
         &self,
         text: impl Into<String>,
         reason: impl Into<String>,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_text_forced_tagged(text, reason, None)
+    }
+
+    /// As [`SensoryBridge::packetize_text_forced`], additionally tagging the
+    /// packet with an ingress-assigned correlation id (E33 S33.2).
+    pub fn packetize_text_forced_tagged(
+        &self,
+        text: impl Into<String>,
+        reason: impl Into<String>,
+        message_id: Option<String>,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
         let reason = reason.into();
@@ -325,6 +364,7 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text),
             priority: SensoryPriority::Critical,
             gate_override_reason: Some(reason),
+            message_id,
         });
         Ok(())
     }
@@ -362,6 +402,7 @@ impl SensoryBridge {
             packet: SensoryPacket::Pcm(samples),
             priority,
             gate_override_reason: None,
+            message_id: None,
         });
         Ok(())
     }
@@ -418,6 +459,7 @@ impl SensoryBridge {
             },
             priority,
             gate_override_reason: None,
+            message_id: None,
         });
         Ok(())
     }

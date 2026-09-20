@@ -258,6 +258,20 @@ pub enum AuditEntry {
         tokens_emitted: u32,
         response: String,
     },
+    /// Ties a dispatched task back to the operator message that caused it
+    /// (E33 S33.2).
+    ///
+    /// Emitted immediately *before* the matching [`AuditEntry::TaskStarted`],
+    /// so a consumer reading the log forward knows the correlation before it
+    /// sees the task.  Recorded as its own entry rather than a field on
+    /// `TaskStarted` / `TaskCompleted` so that every existing reader, digest
+    /// and metric keeps parsing unchanged, and logs written before this
+    /// existed stay valid.
+    OperatorMessageLinked {
+        agent_id: String,
+        task_id: u64,
+        message_id: String,
+    },
     /// The backend returned an error or the stream was cancelled.
     TaskFailed {
         agent_id: String,

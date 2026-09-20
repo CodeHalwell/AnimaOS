@@ -108,6 +108,25 @@ pub struct OperatorInput {
     /// Urgency tag; defaults to [`Priority::Normal`] when absent on the wire.
     #[cfg_attr(feature = "serde", serde(default))]
     pub priority: Priority,
+    /// Client-minted correlation id (E33 S33.2).
+    ///
+    /// Echoed back on [`OperatorEvent::Accepted`] and carried through to the
+    /// [`OperatorEvent::TaskStarted`] / [`OperatorEvent::AgentMessage`] this
+    /// guidance produces, so a console can show *this* message's status rather
+    /// than inferring it from arrival order.  Absent means "don't correlate";
+    /// the server mints one so every accepted line has an id.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub message_id: Option<String>,
+    /// When `Some`, this line answers the [`OperatorEvent::AgentQuestion`] with
+    /// this `question_id` (E33 S33.3).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub reply_to: Option<String>,
     /// When `Some`, requests an *audited* `GateOverride::OperatorForced` with
     /// this reason. This still flows through the audit trail and defence layer;
     /// it is an escalation, not a bypass.
@@ -124,8 +143,22 @@ impl OperatorInput {
         Self {
             text: text.into(),
             priority: Priority::Normal,
+            message_id: None,
+            reply_to: None,
             force: None,
         }
+    }
+
+    /// Attach a correlation id (builder style).
+    pub fn with_message_id(mut self, id: impl Into<String>) -> Self {
+        self.message_id = Some(id.into());
+        self
+    }
+
+    /// Mark this line as the answer to an [`OperatorEvent::AgentQuestion`].
+    pub fn in_reply_to(mut self, question_id: impl Into<String>) -> Self {
+        self.reply_to = Some(question_id.into());
+        self
     }
 
     /// Set the urgency tag (builder style).
@@ -173,8 +206,45 @@ pub enum OperatorEvent {
         /// Number of tasks waiting on the agenda.
         agenda_depth: u32,
     },
+    /// A guidance line cleared policy and entered the sensory queue (E33 S33.2).
+    ///
+    /// The typed successor to the free-text `OperatorGuidance` audit echo: it
+    /// carries the correlation id and the untruncated text, so a console can
+    /// render the operator's own message from the same stream every other
+    /// ingress channel appears on, and then track its fate by `message_id`.
+    Accepted {
+        /// Correlation id — the client's, or one the server minted.
+        message_id: String,
+        /// Urgency the packet was enqueued at.
+        priority: Priority,
+        /// Whether an audited operator-force override was requested.
+        forced: bool,
+        /// The override reason, when `forced`.
+        force_reason: Option<String>,
+        /// The full guidance text.
+        text: String,
+    },
+    /// The agent is asking the operator something (E33 S33.3).
+    ///
+    /// Efferent, like every other event here: it is a request for a *sense*,
+    /// not a blocking prompt.  The agent keeps running whether or not anyone
+    /// answers, consistent with graceful degradation when the human is absent.
+    AgentQuestion {
+        /// Task the question arose from, when it arose from one.
+        task_id: u64,
+        /// Stable id an answer references via [`OperatorInput::reply_to`].
+        question_id: String,
+        /// The question itself.
+        text: String,
+        /// Suggested answers, when the question is closed-form (may be empty).
+        options: Vec<String>,
+        /// Why the agent is asking (low confidence, pending approval, …).
+        reason: String,
+    },
     /// A Striatal-Gate decision — *why* the agent did or didn't act.
     Gate {
+        /// The operator message this decision concerns, when it concerns one.
+        message_id: Option<String>,
         /// Whether the gate authorised a cortex invocation.
         invoke: bool,
         /// Selected cost class (`CheapLocal` / `MidTier` / `Frontier`).
@@ -200,6 +270,8 @@ pub enum OperatorEvent {
     TaskStarted {
         /// Scheduler task id.
         task_id: u64,
+        /// The operator message that produced this task, when it was one.
+        message_id: Option<String>,
         /// The prompt / task description.
         prompt: String,
     },
@@ -207,6 +279,8 @@ pub enum OperatorEvent {
     AgentMessage {
         /// Scheduler task id.
         task_id: u64,
+        /// The operator message this answers, when it answers one.
+        message_id: Option<String>,
         /// Tokens emitted by the backend.
         tokens: u32,
         /// The agent's response text.
@@ -223,6 +297,8 @@ impl OperatorEvent {
     /// The `type` tag this event serialises with.
     pub fn kind(&self) -> &'static str {
         match self {
+            OperatorEvent::Accepted { .. } => "Accepted",
+            OperatorEvent::AgentQuestion { .. } => "AgentQuestion",
             OperatorEvent::Vitals { .. } => "Vitals",
             OperatorEvent::State { .. } => "State",
             OperatorEvent::Gate { .. } => "Gate",
@@ -273,7 +349,55 @@ impl OperatorEvent {
                 }
                 let _ = write!(s, ",\"agenda_depth\":{agenda_depth}}}");
             }
+            OperatorEvent::Accepted {
+                message_id,
+                priority,
+                forced,
+                force_reason,
+                text,
+            } => {
+                let _ = write!(s, "{{\"type\":\"Accepted\",\"message_id\":");
+                write_json_str(&mut s, message_id);
+                let _ = write!(s, ",\"priority\":");
+                write_json_str(&mut s, priority.as_str());
+                let _ = write!(s, ",\"forced\":{forced},\"force_reason\":");
+                match force_reason {
+                    Some(r) => write_json_str(&mut s, r),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
+                let _ = write!(s, ",\"text\":");
+                write_json_str(&mut s, text);
+                let _ = write!(s, "}}");
+            }
+            OperatorEvent::AgentQuestion {
+                task_id,
+                question_id,
+                text,
+                options,
+                reason,
+            } => {
+                let _ = write!(
+                    s,
+                    "{{\"type\":\"AgentQuestion\",\"task_id\":{task_id},\"question_id\":"
+                );
+                write_json_str(&mut s, question_id);
+                let _ = write!(s, ",\"text\":");
+                write_json_str(&mut s, text);
+                let _ = write!(s, ",\"options\":[");
+                for (i, option) in options.iter().enumerate() {
+                    if i > 0 {
+                        let _ = write!(s, ",");
+                    }
+                    write_json_str(&mut s, option);
+                }
+                let _ = write!(s, "],\"reason\":");
+                write_json_str(&mut s, reason);
+                let _ = write!(s, "}}");
+            }
             OperatorEvent::Gate {
+                message_id,
                 invoke,
                 cost_class,
                 value_score,
@@ -281,7 +405,14 @@ impl OperatorEvent {
                 override_active,
                 reasoning,
             } => {
-                let _ = write!(s, "{{\"type\":\"Gate\",\"invoke\":{invoke},\"cost_class\":");
+                let _ = write!(s, "{{\"type\":\"Gate\",\"message_id\":");
+                match message_id {
+                    Some(m) => write_json_str(&mut s, m),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
+                let _ = write!(s, ",\"invoke\":{invoke},\"cost_class\":");
                 match cost_class {
                     Some(c) => write_json_str(&mut s, c),
                     None => {
@@ -302,23 +433,42 @@ impl OperatorEvent {
                 write_json_str(&mut s, detail);
                 let _ = write!(s, "}}");
             }
-            OperatorEvent::TaskStarted { task_id, prompt } => {
+            OperatorEvent::TaskStarted {
+                task_id,
+                message_id,
+                prompt,
+            } => {
                 let _ = write!(
                     s,
-                    "{{\"type\":\"TaskStarted\",\"task_id\":{task_id},\"prompt\":"
+                    "{{\"type\":\"TaskStarted\",\"task_id\":{task_id},\"message_id\":"
                 );
+                match message_id {
+                    Some(m) => write_json_str(&mut s, m),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
+                let _ = write!(s, ",\"prompt\":");
                 write_json_str(&mut s, prompt);
                 let _ = write!(s, "}}");
             }
             OperatorEvent::AgentMessage {
                 task_id,
+                message_id,
                 tokens,
                 text,
             } => {
                 let _ = write!(
                     s,
-                    "{{\"type\":\"AgentMessage\",\"task_id\":{task_id},\"tokens\":{tokens},\"text\":"
+                    "{{\"type\":\"AgentMessage\",\"task_id\":{task_id},\"message_id\":"
                 );
+                match message_id {
+                    Some(m) => write_json_str(&mut s, m),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
+                let _ = write!(s, ",\"tokens\":{tokens},\"text\":");
                 write_json_str(&mut s, text);
                 let _ = write!(s, "}}");
             }
@@ -372,10 +522,14 @@ pub fn parse_input_line(line: &str) -> Option<OperatorInput> {
         .map(|p| Priority::parse(&p))
         .unwrap_or_default();
     let force = extract_json_string(line, "force");
+    let message_id = extract_json_string(line, "message_id");
+    let reply_to = extract_json_string(line, "reply_to");
 
     Some(OperatorInput {
         text,
         priority,
+        message_id,
+        reply_to,
         force,
     })
 }
@@ -694,6 +848,7 @@ mod tests {
                 aggregate_stress: 0.5,
             },
             OperatorEvent::Gate {
+                message_id: Some("msg-17".to_string()),
                 invoke: true,
                 cost_class: Some("Frontier".to_string()),
                 value_score: 0.8,
@@ -708,8 +863,45 @@ mod tests {
             },
             OperatorEvent::AgentMessage {
                 task_id: 7,
+                message_id: Some("msg-17".to_string()),
                 tokens: 128,
                 text: "done:\n\tbuilt the report".to_string(),
+            },
+            // E33 S33.2 / S33.3 — the correlation and question variants must
+            // survive the same manual-writer ↔ serde round trip, including the
+            // `None` correlation a microVM-originated event carries.
+            OperatorEvent::TaskStarted {
+                task_id: 8,
+                message_id: None,
+                prompt: "summarise the overnight logs".to_string(),
+            },
+            OperatorEvent::Accepted {
+                message_id: "msg-18".to_string(),
+                priority: Priority::High,
+                forced: true,
+                force_reason: Some("operator \"emergency\"".to_string()),
+                text: "check disk space\nnow".to_string(),
+            },
+            OperatorEvent::Accepted {
+                message_id: "msg-19".to_string(),
+                priority: Priority::Normal,
+                forced: false,
+                force_reason: None,
+                text: "hello".to_string(),
+            },
+            OperatorEvent::AgentQuestion {
+                task_id: 9,
+                question_id: "q-1".to_string(),
+                text: "Which environment should I target?".to_string(),
+                options: vec!["staging".to_string(), "production".to_string()],
+                reason: "confidence 0.21 is below the help-request floor".to_string(),
+            },
+            OperatorEvent::AgentQuestion {
+                task_id: 0,
+                question_id: "q-2".to_string(),
+                text: "Approve the new skill?".to_string(),
+                options: Vec::new(),
+                reason: "pending approval".to_string(),
             },
         ];
         for e in &events {
@@ -726,6 +918,7 @@ mod tests {
         // `ANIMA_TLM <ndjson>` and the host bridge strips the prefix to parse.
         let event = OperatorEvent::AgentMessage {
             task_id: 1,
+            message_id: None,
             tokens: 7,
             text: "microVM operator console online".to_string(),
         };

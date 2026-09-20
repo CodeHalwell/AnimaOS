@@ -261,6 +261,7 @@ mod tests {
             agenda_depth: 2,
         });
         hub.publish(OperatorEvent::AgentMessage {
+            message_id: None,
             task_id: 1,
             tokens: 10,
             text: "hi".into(),

@@ -341,6 +341,7 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
             s.agenda = agenda_depth;
         }
         OperatorEvent::Gate {
+            message_id,
             invoke,
             cost_class,
             value_score,
@@ -350,20 +351,69 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
         } => {
             let verdict = if invoke { "INVOKE" } else { "block " };
             s.feed.push_front(format!(
-                "gate  {verdict} {} v{value_score:.2}/t{threshold:.2} — {reasoning}",
+                "gate  {verdict}{} {} v{value_score:.2}/t{threshold:.2} — {reasoning}",
+                msg_tag(message_id.as_deref()),
                 cost_class.unwrap_or_default()
             ));
         }
-        OperatorEvent::TaskStarted { task_id, prompt } => {
-            s.feed.push_front(format!("task→ #{task_id} {prompt}"));
+        OperatorEvent::TaskStarted {
+            task_id,
+            message_id,
+            prompt,
+        } => {
+            s.feed.push_front(format!(
+                "task→ #{task_id}{} {prompt}",
+                msg_tag(message_id.as_deref())
+            ));
         }
         OperatorEvent::AgentMessage {
             task_id,
+            message_id,
             tokens,
             text,
         } => {
+            s.feed.push_front(format!(
+                "agent #{task_id}{} ({tokens}t) {text}",
+                msg_tag(message_id.as_deref())
+            ));
+        }
+        // E33 S33.2 — the operator's own message, echoed from the same stream
+        // every ingress appears on, so a TUI shows guidance sent from the
+        // browser, a chat channel or another terminal.
+        OperatorEvent::Accepted {
+            message_id,
+            priority,
+            forced,
+            force_reason,
+            text,
+        } => {
+            let urgency = if forced {
+                format!("FORCED:{}", priority.as_str())
+            } else {
+                priority.as_str().to_string()
+            };
+            s.feed.push_front(format!(
+                "you   [{urgency}] [{message_id}]{} {text}",
+                force_reason
+                    .map(|r| format!(" (reason: {r})"))
+                    .unwrap_or_default()
+            ));
+        }
+        // E33 S33.3 — the agent asking for something.
+        OperatorEvent::AgentQuestion {
+            question_id,
+            text,
+            options,
+            reason,
+            ..
+        } => {
+            let choices = if options.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", options.join(" / "))
+            };
             s.feed
-                .push_front(format!("agent #{task_id} ({tokens}t) {text}"));
+                .push_front(format!("ASK?  [{question_id}] {text}{choices} — {reason}"));
         }
         OperatorEvent::Audit { kind, detail } => {
             s.feed.push_front(format!("{kind}: {detail}"));
@@ -373,6 +423,12 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
     while s.feed.len() > 200 {
         s.feed.pop_back();
     }
+}
+
+/// Render an operator-message correlation id as a compact feed tag, or nothing
+/// when the event has no conversational origin (E33 S33.2).
+fn msg_tag(message_id: Option<&str>) -> String {
+    message_id.map(|m| format!(" [{m}]")).unwrap_or_default()
 }
 
 fn bar(v: f32, width: usize) -> String {

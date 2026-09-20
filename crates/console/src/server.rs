@@ -166,6 +166,12 @@ pub struct ConsoleServer {
     /// Optional adapter library — when set, `GET /adapters` is active (E8
     /// adapter-library dashboard surface).
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    /// Counter behind server-minted operator-message ids (E33 S33.2).
+    ///
+    /// Seeded from the process start time so ids stay distinct across restarts:
+    /// the audit log outlives the process, and a re-read must not conflate a
+    /// message from this run with one from the last.
+    message_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -208,6 +214,23 @@ const HEARTBEAT_POLL: Duration = Duration::from_secs(1);
 /// 64 KiB line — but it is now far above normal use (E33 S33.0).
 const GUIDANCE_ECHO_LIMIT: usize = 4000;
 
+/// Longest client-supplied correlation id accepted on `POST /guidance`.
+const MAX_MESSAGE_ID_LEN: usize = 64;
+
+/// Whether a client-supplied correlation id is acceptable (E33 S33.2).
+///
+/// The id is written to the durable audit log and rendered by every attached
+/// console, so it is untrusted input on the operator channel (threat model §5)
+/// and is restricted to an unambiguous, quoting-free alphabet rather than
+/// being escaped at each of the places it later appears.
+fn valid_message_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_MESSAGE_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn to_sensory_priority(p: Priority) -> SensoryPriority {
     match p {
         Priority::Low => SensoryPriority::Low,
@@ -235,6 +258,13 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            message_seq: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .wrapping_mul(1_000_000),
+            ),
         }
     }
 
@@ -730,16 +760,42 @@ impl ConsoleServer {
             );
         };
 
+        // E33 S33.2: every accepted line gets a correlation id — the client's
+        // when it supplied a usable one, otherwise one minted here — so the
+        // reply can be tied back to the message that asked for it.
+        let message_id = match input.message_id.as_deref() {
+            Some(id) if valid_message_id(id) => id.to_string(),
+            Some(_) => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"message_id must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+                );
+            }
+            None => format!(
+                "op-{:x}",
+                self.message_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+        };
+
         // E6.6: when `force` is set, route through `packetize_text_forced` so
         // vita's somatic loop can record an audited GateOverride::OperatorForced
         // entry.  Policy bounds still apply — the operator is a potentially-
         // compromised channel (threat model §5 in 11-operator-interface.md).
         let result = if let Some(reason) = input.force.as_deref() {
-            self.bridge
-                .packetize_text_forced(input.text.clone(), reason)
+            self.bridge.packetize_text_forced_tagged(
+                input.text.clone(),
+                reason,
+                Some(message_id.clone()),
+            )
         } else {
-            self.bridge
-                .packetize_text_checked(input.text.clone(), to_sensory_priority(input.priority))
+            self.bridge.packetize_text_tagged(
+                input.text.clone(),
+                to_sensory_priority(input.priority),
+                Some(message_id.clone()),
+            )
         };
 
         match result {
@@ -747,23 +803,26 @@ impl ConsoleServer {
                 // Echo the accepted guidance into the event feed so every
                 // connected operator sees what was injected (and by implication,
                 // that it is now subject to the gate, not executed directly).
-                let detail = if let Some(reason) = input.force.as_deref() {
-                    format!(
-                        "[FORCED:Critical] (Reason: {reason}) {}",
-                        truncate(&input.text, GUIDANCE_ECHO_LIMIT)
-                    )
-                } else {
-                    format!(
-                        "[{}] {}",
-                        priority_label(to_sensory_priority(input.priority)),
-                        truncate(&input.text, GUIDANCE_ECHO_LIMIT)
-                    )
-                };
-                self.hub.publish(OperatorEvent::Audit {
-                    kind: "OperatorGuidance".to_string(),
-                    detail,
+                //
+                // E33 S33.2: the typed `Accepted` event replaces the free-text
+                // `OperatorGuidance` audit echo.  It carries the correlation id
+                // and the untruncated text, so a console renders the operator's
+                // own message without reparsing a "[Priority] …" string, and
+                // can then follow that message through gate, task and reply.
+                let forced = input.force.is_some();
+                self.hub.publish(OperatorEvent::Accepted {
+                    message_id: message_id.clone(),
+                    priority: if forced {
+                        Priority::Critical
+                    } else {
+                        input.priority
+                    },
+                    forced,
+                    force_reason: input.force.clone(),
+                    text: truncate(&input.text, GUIDANCE_ECHO_LIMIT),
                 });
-                write_json(out, 202, "Accepted", br#"{"ok":true}"#)
+                let body = format!(r#"{{"ok":true,"message_id":{}}}"#, json_string(&message_id));
+                write_json(out, 202, "Accepted", body.as_bytes())
             }
             Err(SensoryBridgeError::PolicyViolation { reason }) => {
                 let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&reason));
@@ -969,15 +1028,6 @@ fn read_audit_entries(path: &std::path::Path) -> Vec<vita::AuditEntry> {
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(&l).ok())
         .collect()
-}
-
-fn priority_label(p: SensoryPriority) -> &'static str {
-    match p {
-        SensoryPriority::Low => "Low",
-        SensoryPriority::Normal => "Normal",
-        SensoryPriority::High => "High",
-        SensoryPriority::Critical => "Critical",
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1220,15 +1270,12 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("guidance echo published");
         match echo {
-            (_, OperatorEvent::Audit { kind, detail }) => {
-                assert_eq!(kind, "OperatorGuidance");
-                assert!(
-                    detail.contains(&"y".repeat(1500)),
-                    "echo truncated at {} chars",
-                    detail.len()
-                );
-            }
-            other => panic!("expected an OperatorGuidance audit echo, got {other:?}"),
+            (_, OperatorEvent::Accepted { text: echoed, .. }) => assert!(
+                echoed.contains(&"y".repeat(1500)),
+                "echo truncated at {} chars",
+                echoed.len()
+            ),
+            other => panic!("expected an Accepted echo, got {other:?}"),
         }
     }
 
@@ -1247,12 +1294,146 @@ mod tests {
             ),
         );
         match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
-            (_, OperatorEvent::Audit { detail, .. }) => assert!(
-                detail.len() < GUIDANCE_ECHO_LIMIT + 200,
+            (_, OperatorEvent::Accepted { text: echoed, .. }) => assert!(
+                echoed.len() < GUIDANCE_ECHO_LIMIT + 200,
                 "echo unbounded at {} chars",
-                detail.len()
+                echoed.len()
             ),
-            other => panic!("expected an audit echo, got {other:?}"),
+            other => panic!("expected an Accepted echo, got {other:?}"),
+        }
+    }
+
+    // ── E33 S33.2 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn accepted_guidance_reports_a_correlation_id_the_caller_can_follow() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"hello","priority":"Normal"}"#;
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        assert!(
+            resp.contains(r#""message_id":"op-"#),
+            "response carries no minted id: {resp}"
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Accepted { message_id, .. }) => {
+                assert!(resp.contains(&message_id), "id in body differs from event")
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_supplied_correlation_id_is_honoured_and_reaches_the_packet() {
+        let (addr, hub, bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"hello","priority":"High","message_id":"client-42"}"#;
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Accepted { message_id, .. }) => {
+                assert_eq!(message_id, "client-42")
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+        let packet = bridge.next_prioritized_packet().expect("packet enqueued");
+        assert_eq!(packet.message_id.as_deref(), Some("client-42"));
+    }
+
+    #[test]
+    fn a_hostile_correlation_id_is_rejected_rather_than_written_to_the_audit_log() {
+        // The id lands in the durable audit trail and in every attached
+        // console's DOM, so the operator channel does not get to choose its
+        // alphabet (threat model §5).
+        let (addr, _hub, _bridge) = start();
+        for hostile in [
+            r#"<script>alert(1)</script>"#,
+            r#"a"b"#,
+            "",
+            "x x",
+            "../../etc/passwd",
+        ] {
+            let body = format!(
+                r#"{{"text":"hello","message_id":"{}"}}"#,
+                hostile.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let resp = http_request(
+                addr,
+                &format!(
+                    "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                ),
+            );
+            assert!(
+                resp.contains("400 Bad Request"),
+                "accepted hostile id {hostile:?}: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_correlation_id_is_rejected() {
+        let (addr, _hub, _bridge) = start();
+        let body = format!(
+            r#"{{"text":"hello","message_id":"{}"}}"#,
+            "a".repeat(MAX_MESSAGE_ID_LEN + 1)
+        );
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("400 Bad Request"), "resp: {resp}");
+    }
+
+    #[test]
+    fn forced_guidance_is_accepted_as_critical_with_its_reason() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"check disk","priority":"Low","force":"operator emergency"}"#;
+        let _ = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (
+                _,
+                OperatorEvent::Accepted {
+                    priority,
+                    forced,
+                    force_reason,
+                    ..
+                },
+            ) => {
+                assert!(forced);
+                // A forced line is enqueued at Critical whatever the client asked for.
+                assert_eq!(priority, Priority::Critical);
+                assert_eq!(force_reason.as_deref(), Some("operator emergency"));
+            }
+            other => panic!("expected Accepted, got {other:?}"),
         }
     }
 
@@ -1600,6 +1781,7 @@ mod tests {
         // Give the connection thread time to subscribe, then publish.
         std::thread::sleep(Duration::from_millis(100));
         hub.publish(OperatorEvent::AgentMessage {
+            message_id: None,
             task_id: 1,
             tokens: 3,
             text: "hello from the agent".into(),
@@ -1639,6 +1821,7 @@ mod tests {
         // Three feed events land in the replay ring as seqs 0, 1, 2.
         for (i, word) in ["alpha", "beta", "gamma"].iter().enumerate() {
             hub.publish(OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: i as u64,
                 tokens: 1,
                 text: (*word).into(),
@@ -1705,6 +1888,7 @@ mod tests {
         hub.publish_at(
             5,
             OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: 1,
                 tokens: 1,
                 text: "historical-replay".into(),
@@ -1713,6 +1897,7 @@ mod tests {
         hub.publish_at(
             11,
             OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: 2,
                 tokens: 1,
                 text: "fresh-line".into(),

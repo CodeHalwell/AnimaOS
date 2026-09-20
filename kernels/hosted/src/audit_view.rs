@@ -36,6 +36,12 @@ pub(crate) fn print_audit(manager: &LifecycleManager) {
             AuditEntry::TaskFailed { task_id, error, .. } => {
                 println!("  ✗ failed    task={task_id} error={error}")
             }
+            // E33 S33.2 — which operator message caused this task.
+            AuditEntry::OperatorMessageLinked {
+                task_id,
+                message_id,
+                ..
+            } => println!("  ↪ message   task={task_id} message={message_id}"),
             AuditEntry::SleepEntered { .. } => println!("  zzz sleep_entered"),
             AuditEntry::WakeEntered { .. } => println!("  ☀  wake_entered"),
             AuditEntry::SleepPhaseStarted { phase, .. } => {

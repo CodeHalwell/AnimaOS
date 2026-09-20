@@ -66,6 +66,9 @@ pub fn run_operator_console_demo(serial: impl Fn(&str)) -> Result<(), &'static s
             aggregate_stress: 0.18,
         },
         OperatorEvent::AgentMessage {
+            // The kernel has no operator-message correlation: guidance arrives
+            // on COM1 without a console session to mint ids (E33 S33.2).
+            message_id: None,
             task_id: 1,
             tokens: 7,
             text: String::from("microVM operator console online"),
