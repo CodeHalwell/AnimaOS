@@ -290,12 +290,14 @@ impl ConsoleServer {
             identity: None,
             feedback: None,
             conversation: None,
+            // Nanoseconds, not seconds: two servers started in the same
+            // second would otherwise mint the identical `op-…` sequence and
+            // the audit log could not tell their messages apart.
             message_seq: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-                    .wrapping_mul(1_000_000),
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
             ),
         }
     }
@@ -499,6 +501,7 @@ impl ConsoleServer {
                                 detail: format!(
                                     "source {ip} locked out after {MAX_AUTH_FAILURES} failed console auth attempts"
                                 ),
+                                message_id: None,
                             });
                         }
                     }
@@ -1074,7 +1077,12 @@ impl ConsoleServer {
                 );
             }
         };
-        match guard.record(record) {
+        match guard.record(record).and_then(|()| {
+            // `record` only mutates memory; without this the rating is lost on
+            // restart and invisible to `anima feedback`, while the caller has
+            // already been told it was accepted.
+            guard.flush()
+        }) {
             Ok(()) => write_json(out, 202, "Accepted", br#"{"ok":true}"#),
             Err(e) => {
                 let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e.to_string()));
@@ -2039,6 +2047,7 @@ mod tests {
                 hub.publish(OperatorEvent::Audit {
                     kind: "Noise".into(),
                     detail: format!("tick {i}"),
+                    message_id: None,
                 });
                 std::thread::sleep(Duration::from_millis(250));
             }

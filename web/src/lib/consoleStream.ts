@@ -31,7 +31,7 @@
  *                       value_score: f32, threshold: f32,
  *                       override_active: bool, reasoning: string
  *   type "Audit"        kind: string (AuditEntry variant name),
- *                       detail: string
+ *                       detail: string, message_id: string|null
  *   type "TaskStarted"  task_id: u64, message_id: string|null, prompt: string
  *   type "AgentMessage" task_id: u64, message_id: string|null, tokens: u32,
  *                       text: string
@@ -91,6 +91,8 @@ export interface AuditEvent {
   type: 'Audit';
   kind: string;
   detail: string;
+  /** Operator message this line concerns, when it concerns one (E33 S33.2). */
+  message_id: string | null;
 }
 
 export interface TaskStartedEvent {
@@ -298,6 +300,30 @@ export function reduceEvent(prev: ConsoleSnapshot, ev: OperatorEvent): ConsoleSn
         cls: 'msg',
         tag: 'agent',
         body: `#${ev.task_key ?? ev.task_id} (${ev.tokens} tok) ${ev.text}`,
+      });
+    // E33 S33.2 — the operator's own message. Its former representation
+    // (`Audit { kind: "OperatorGuidance" }`) was rendered here, so without a
+    // case guidance would silently vanish from the feed against a live server.
+    case 'Accepted':
+      return pushFeed(prev, {
+        cls: 'msg',
+        tag: 'you',
+        body:
+          `[${ev.forced ? `FORCED:${ev.priority}` : ev.priority}] ` +
+          `[${ev.message_id}]` +
+          (ev.reply_to ? ` ↩${ev.reply_to}` : '') +
+          (ev.force_reason ? ` (reason: ${ev.force_reason})` : '') +
+          ` ${ev.text}`,
+      });
+    // E33 S33.3 — the agent asking the operator something.
+    case 'AgentQuestion':
+      return pushFeed(prev, {
+        cls: 'audit',
+        tag: 'ask?',
+        body:
+          `[${ev.question_id}] ${ev.text}` +
+          (ev.options.length ? ` [${ev.options.join(' / ')}]` : '') +
+          (ev.reason ? ` — ${ev.reason}` : ''),
       });
     case 'Audit':
       return pushFeed(prev, {

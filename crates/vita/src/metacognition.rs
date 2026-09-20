@@ -215,6 +215,21 @@ pub struct HelpRequest {
 }
 
 impl HelpRequest {
+    /// Render the question an operator actually sees and answers (E33 S33.3).
+    ///
+    /// The single source of this wording: the somatic loop records it as the
+    /// agent's conversational turn, and the console's audit tailer renders the
+    /// same string into [`console_proto::OperatorEvent::AgentQuestion`]. If the
+    /// two diverged, a quick reply like "try again" would reach the model with
+    /// a different question in context than the one the human answered.
+    pub fn operator_question(&self) -> String {
+        format!(
+            "I answered {:?} but I'm not confident in it ({:.2}). \
+             Is that good enough, or should I try again?",
+            self.task_description, self.confidence
+        )
+    }
+
     /// Build a help-request from a confidence score below the floor.
     pub fn from_low_confidence(task: &str, score: &ConfidenceScore) -> Self {
         HelpRequest {

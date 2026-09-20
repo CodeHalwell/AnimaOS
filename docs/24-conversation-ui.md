@@ -161,12 +161,24 @@ touches:
 
 ```rust
 pub trait ConversationMemory: Send {
-    /// Wrap freshly-accepted guidance in the context the model needs:
-    /// identity framing, the last N turns, the open question if `reply_to`.
-    fn compose(&mut self, task_id: u64, guidance: &str, reply_to: Option<&str>) -> String;
-    /// A reply landed; persist it as the assistant turn.
+    /// Wrap freshly-dispatched guidance in the context the model needs:
+    /// identity framing and the last N turns.
+    fn compose(&mut self, task_id: u64, guidance: &str) -> String;
+    /// A reply landed; persist it as the agent's turn.
     fn record_reply(&mut self, task_id: u64, response: &str);
+    /// Something the agent said that was not a reply — a question it is
+    /// asking. Defaults to `record_reply`.
+    fn record_question(&mut self, task_id: u64, question: &str) { … }
 }
+```
+
+`compose` takes no `reply_to`: the question is recorded as the agent's own turn
+when it is asked, so an answer arrives with it already in the transcript. The
+`reply_to` field on `OperatorInput` threads the answer for the *UI*, and is
+echoed on `Accepted` so any console — not just the one that clicked — can close
+the question card.
+
+```rust
 ```
 
 The host implementation (`kernels/hosted`) sits over `sessions::SessionStore`:
@@ -206,7 +218,7 @@ invariant holds.
 
 | Route | Purpose |
 |---|---|
-| `GET /conversation?limit=N&before=<turn>` | turns from the session store, for page load and scroll-back; replaces reliance on the 256-event ring |
+| `GET /conversation?limit=N` | the newest `N` turns from the session store (default 100, hard cap 1000), oldest-first; replaces reliance on the 256-event ring. No cursor: a page loads the tail and the live stream appends, which is all the dashboard needs today. Older history is reachable with `anima sessions show`. |
 | `POST /guidance` | accepts `message_id` and `reply_to`; the 202 body returns the `message_id` (server-minted when absent) |
 | `POST /feedback` | `{ task_id, rating, comment? }` → `FeedbackStore` + `FeedbackReceived` audit |
 | `GET /whoami` | operator identity (S33.5) |
@@ -221,8 +233,11 @@ Changes:
   line under it (accepted · gated invoke / block with the reason · working ·
   answered / failed / vetoed); the reply nests under it. Gate and veto
   notices move from free-floating to under the message they belong to.
-- **History.** Load `GET /conversation` on open; "load earlier" on scroll-up;
-  the SSE stream only appends.
+- **History.** Load `GET /conversation` on open; the SSE stream only appends.
+  The replay ring still delivers the same recent events, so the page reconciles
+  the two: turns drawn from history consume their replayed counterparts, and
+  reconciliation ends at the first heartbeat, which the server sends only once
+  the snapshot is fully written.
 - **Composer.** Multi-line (`Shift+Enter`), `Ctrl+Enter` to send, priority as
   a segmented control, a `force` toggle that reveals a reason field
   (audited), the draft kept in `localStorage`.

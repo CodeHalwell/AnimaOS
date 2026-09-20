@@ -107,6 +107,8 @@ pub use watchdog::{AgentSnapshot, CognitiveWatchdog, WatchdogConfig, WatchdogTri
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(not(feature = "std"))]
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -118,6 +120,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -416,6 +420,11 @@ pub struct LifecycleManager {
     /// which only forced packets were evaluated and everything else was
     /// admitted unconditionally.
     pub gate_operator_input: bool,
+    /// Task ids that came from an operator packet (E33 S33.1/S33.6).
+    ///
+    /// Drained at dispatch.  Bounded by [`MAX_TRACKED_OPERATOR_TASKS`] so a
+    /// task admitted but never dispatched — shutdown mid-flight — cannot leak.
+    operator_tasks: BTreeSet<u64>,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
@@ -502,6 +511,7 @@ impl LifecycleManager {
             audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             next_sensory_task_id: 1u64 << 63,
+            operator_tasks: BTreeSet::new(),
             last_signals: HomeostaticSignals::neutral(),
             gate_operator_input: true,
             max_iterations,
@@ -1091,6 +1101,12 @@ fn priority_to_mlfq_tier(priority: SensoryPriority) -> u8 {
     }
 }
 
+/// Upper bound on operator-originated task ids awaiting dispatch (E33 S33.1).
+///
+/// Drained at dispatch. A task admitted but never dispatched — shutdown
+/// mid-flight — must not leak an entry.
+const MAX_TRACKED_OPERATOR_TASKS: usize = 256;
+
 /// Autonomous lifecycle control loop.
 ///
 /// Each iteration:
@@ -1182,7 +1198,14 @@ pub async fn somatic_execution_loop(
             // override, which means the gate can decline it: under real
             // thermal, memory or budget stress the agent defers ordinary
             // chatter while still taking a Critical message.
-            let gate_this = pkt.gate_override_reason.is_some() || lifecycle.gate_operator_input;
+            // Only a human's packet is arbitrated as an operator command.
+            // `PrioritizedPacket::origin` is what makes that decidable here:
+            // without it, a sensor reading or any synthetic feed would be
+            // scored as `SemanticClass::OperatorCommand` and could be dropped
+            // under pressure, with no operator behind it to notice.
+            let from_operator = pkt.origin.is_operator();
+            let gate_this = pkt.gate_override_reason.is_some()
+                || (from_operator && lifecycle.gate_operator_input);
             if gate_this {
                 let event = EventFeatures {
                     // Urgency is the operator's own priority tag; novelty has
@@ -1267,6 +1290,21 @@ pub async fn somatic_execution_loop(
                 if !decision.invoke {
                     continue;
                 }
+            }
+
+            // E33 S33.1/S33.6: only an operator-originated task belongs in
+            // the conversation.  The agenda also carries autonomous work —
+            // prospective intentions injected below, and anything a caller
+            // pushes directly — which must never be recorded as operator
+            // speech or fed back as conversational context.
+            if from_operator {
+                if lifecycle.operator_tasks.len() >= MAX_TRACKED_OPERATOR_TASKS {
+                    // Task ids are monotonic, so the lowest is the stalest.
+                    if let Some(oldest) = lifecycle.operator_tasks.iter().next().copied() {
+                        lifecycle.operator_tasks.remove(&oldest);
+                    }
+                }
+                lifecycle.operator_tasks.insert(task_id);
             }
 
             lifecycle.agenda.push(Task::new(task_id, tier, prompt));
@@ -1395,17 +1433,25 @@ pub async fn somatic_execution_loop(
             let prompt_for_help = task.prompt.clone();
             #[cfg(feature = "std")]
             let mut help_request: Option<AuditEntry> = None;
+            #[cfg(feature = "std")]
+            let mut help_question: Option<String> = None;
 
             // E33 S33.1: wrap the human's text in conversational context on the
             // way to the backend.  Deliberately *after* the TaskStarted entry
             // above, so the audit log — and every console built on it — keeps
             // showing what the operator actually said rather than the whole
             // composed context repeated on each turn.
+            // Drained on both targets so the set cannot grow on the
+            // bare-metal path; only the std build has a conversation to use it.
+            #[cfg_attr(not(feature = "std"), allow(unused_variables))]
+            let operator_task = lifecycle.operator_tasks.remove(&task_id);
             #[cfg(feature = "std")]
             let task = {
                 let mut task = task;
-                if let Some(memory) = lifecycle.subsystems.conversation.clone() {
-                    task.prompt = lock_recover(&memory).compose(task_id, &task.prompt);
+                if operator_task {
+                    if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                        task.prompt = lock_recover(&memory).compose(task_id, &task.prompt);
+                    }
                 }
                 task
             };
@@ -1465,6 +1511,10 @@ pub async fn somatic_execution_loop(
                                     &prompt_for_help,
                                     &score,
                                 );
+                                // The operator-facing wording, not the internal
+                                // diagnostic — an answer must arrive with the
+                                // question the human actually saw in context.
+                                help_question = Some(help.operator_question());
                                 help_request = Some(AuditEntry::HelpRequested {
                                     agent_id: agent_id.clone(),
                                     task_id,
@@ -1480,8 +1530,10 @@ pub async fn somatic_execution_loop(
                     // are absorbed by the implementation — the lifecycle must
                     // not stall because history could not be written.
                     #[cfg(feature = "std")]
-                    if let Some(memory) = lifecycle.subsystems.conversation.clone() {
-                        lock_recover(&memory).record_reply(task_id, &outcome.response);
+                    if operator_task {
+                        if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                            lock_recover(&memory).record_reply(task_id, &outcome.response);
+                        }
                     }
 
                     lifecycle.audit.push(AuditEntry::TaskCompleted {
@@ -1495,14 +1547,15 @@ pub async fn somatic_execution_loop(
                     // log (or the console) sees the answer and then the doubt
                     // about it, in that order.
                     #[cfg(feature = "std")]
-                    if let Some(entry) = help_request {
-                        if let AuditEntry::HelpRequested { ref reason, .. } = entry {
-                            // The question is the agent's own turn: an answer
-                            // then arrives with it already in context, so no
-                            // separate question-tracking state is needed.
-                            if let Some(memory) = lifecycle.subsystems.conversation.clone() {
-                                lock_recover(&memory).record_question(task_id, reason);
-                            }
+                    if let Some(entry) = help_request.filter(|_| operator_task) {
+                        // The question is the agent's own turn: an answer then
+                        // arrives with it already in context, so no separate
+                        // question-tracking state is needed.
+                        if let (Some(memory), Some(question)) = (
+                            lifecycle.subsystems.conversation.clone(),
+                            help_question.as_deref(),
+                        ) {
+                            lock_recover(&memory).record_question(task_id, question);
                         }
                         lifecycle.audit.push(entry);
                     }
@@ -2316,6 +2369,91 @@ mod tests {
         assert!(decision.2.starts_with("sensory-"));
         // Admitted, so the task actually ran.
         assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+    }
+
+    #[test]
+    fn machine_input_is_neither_gated_nor_treated_as_operator_speech() {
+        // E33 S33.6: the bridge is the human sense, but the unchecked
+        // packetisers carry synthetic and sensor input. Scoring those as an
+        // OperatorCommand would let real pressure drop a reading nobody is
+        // waiting on, and would fold it into the operator's transcript.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<String>,
+            replies: Vec<String>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                self.composed.push(guidance.to_string());
+                format!("[context] {guidance}")
+            }
+            fn record_reply(&mut self, _task_id: u64, response: &str) {
+                self.replies.push(response.to_string());
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-machine-input", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        // The unchecked packetiser is the machine path.
+        m.senses.packetize_text("sensor reading 0.42");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::GateDecision { .. })),
+            "machine input was arbitrated as an operator command"
+        );
+        // It still runs — not gating is not the same as discarding.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            m.scheduler.dispatched_tasks[0].prompt,
+            "sensor reading 0.42"
+        );
+
+        let rec = recorder.lock().unwrap();
+        assert!(
+            rec.composed.is_empty() && rec.replies.is_empty(),
+            "machine input leaked into the operator conversation: composed={:?} replies={:?}",
+            rec.composed,
+            rec.replies
+        );
+    }
+
+    #[test]
+    fn an_autonomous_agenda_task_is_never_recorded_as_operator_speech() {
+        // Prospective intentions and anything else pushed straight onto the
+        // agenda have no operator behind them.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<String>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                self.composed.push(guidance.to_string());
+                guidance.to_string()
+            }
+            fn record_reply(&mut self, _task_id: u64, _response: &str) {}
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-autonomous", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        m.agenda
+            .push(Task::new(7, 1, "self-directed work".to_string()));
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert!(
+            recorder.lock().unwrap().composed.is_empty(),
+            "autonomous work was composed as operator conversation"
+        );
     }
 
     #[test]

@@ -220,10 +220,12 @@ pub enum OperatorEvent {
         /// Whether an audited operator-force override was requested.
         forced: bool,
         /// The override reason, when `forced`.
+        #[cfg_attr(feature = "serde", serde(default))]
         force_reason: Option<String>,
         /// The [`AgentQuestion::question_id`] this line answers, when it
         /// answers one — so every console can thread the reply under the
         /// question, not just the one that happened to send it.
+        #[cfg_attr(feature = "serde", serde(default))]
         reply_to: Option<String>,
         /// The full guidance text.
         text: String,
@@ -248,6 +250,7 @@ pub enum OperatorEvent {
     /// A Striatal-Gate decision — *why* the agent did or didn't act.
     Gate {
         /// The operator message this decision concerns, when it concerns one.
+        #[cfg_attr(feature = "serde", serde(default))]
         message_id: Option<String>,
         /// Whether the gate authorised a cortex invocation.
         invoke: bool,
@@ -269,12 +272,21 @@ pub enum OperatorEvent {
         kind: String,
         /// A one-line human-readable detail.
         detail: String,
+        /// The operator message this line concerns, when it concerns one
+        /// (E33 S33.2).
+        ///
+        /// A task failure arrives here rather than as an `AgentMessage`, so
+        /// without this a message whose task failed would sit at "working"
+        /// forever — the per-message status would have no terminal state.
+        #[cfg_attr(feature = "serde", serde(default))]
+        message_id: Option<String>,
     },
     /// The agent began working a task.
     TaskStarted {
         /// Scheduler task id.
         task_id: u64,
         /// The operator message that produced this task, when it was one.
+        #[cfg_attr(feature = "serde", serde(default))]
         message_id: Option<String>,
         /// The prompt / task description.
         prompt: String,
@@ -284,6 +296,7 @@ pub enum OperatorEvent {
         /// Scheduler task id.
         task_id: u64,
         /// The operator message this answers, when it answers one.
+        #[cfg_attr(feature = "serde", serde(default))]
         message_id: Option<String>,
         /// Tokens emitted by the backend.
         tokens: u32,
@@ -438,11 +451,22 @@ impl OperatorEvent {
                 write_json_str(&mut s, reasoning);
                 let _ = write!(s, "}}");
             }
-            OperatorEvent::Audit { kind, detail } => {
+            OperatorEvent::Audit {
+                kind,
+                detail,
+                message_id,
+            } => {
                 let _ = write!(s, "{{\"type\":\"Audit\",\"kind\":");
                 write_json_str(&mut s, kind);
                 let _ = write!(s, ",\"detail\":");
                 write_json_str(&mut s, detail);
+                let _ = write!(s, ",\"message_id\":");
+                match message_id {
+                    Some(m) => write_json_str(&mut s, m),
+                    None => {
+                        let _ = write!(s, "null");
+                    }
+                }
                 let _ = write!(s, "}}");
             }
             OperatorEvent::TaskStarted {
@@ -923,6 +947,24 @@ mod tests {
             let parsed = json::event_from_line(&manual)
                 .unwrap_or_else(|| panic!("serde failed to parse manual line: {manual}"));
             assert_eq!(&parsed, e, "round-trip mismatch for {}", e.kind());
+        }
+    }
+
+    #[test]
+    fn frames_written_before_e33_still_parse() {
+        // The correlation fields are additive, so a console or kernel emitting
+        // the pre-E33 shape must keep interoperating. Without `serde(default)`
+        // on each new Option, serde rejects the frame outright.
+        for line in [
+            r#"{"type":"Gate","invoke":true,"cost_class":"MidTier","value_score":0.8,"threshold":0.4,"override_active":false,"reasoning":"ok"}"#,
+            r#"{"type":"TaskStarted","task_id":7,"prompt":"hello"}"#,
+            r#"{"type":"AgentMessage","task_id":7,"tokens":3,"text":"hi"}"#,
+            r#"{"type":"Audit","kind":"SleepEntered","detail":"zzz"}"#,
+        ] {
+            let parsed = json::event_from_line(line)
+                .unwrap_or_else(|| panic!("pre-E33 frame rejected: {line}"));
+            // And they round-trip back out through the manual writer.
+            assert!(json::event_from_line(&parsed.to_ndjson()).is_some());
         }
     }
 

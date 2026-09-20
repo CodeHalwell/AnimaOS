@@ -77,6 +77,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
         "TaskFailed" => OperatorEvent::Audit {
             kind: "TaskFailed".into(),
             detail: format!("task {} failed: {}", u64f("task_id"), s("error")),
+            message_id: None,
         },
         "GateDecision" => OperatorEvent::Gate {
             message_id: None,
@@ -122,6 +123,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 s("phase"),
                 if boolf("success") { "ok" } else { "FAILED" }
             ),
+            message_id: None,
         },
         "MemoryPressureEvent" => OperatorEvent::Audit {
             kind: "MemoryPressureEvent".into(),
@@ -131,6 +133,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 u64f("active_tokens"),
                 u64f("max_context")
             ),
+            message_id: None,
         },
         // Security-relevant — surfaced prominently in the feed.
         "DefenceVeto" => OperatorEvent::Audit {
@@ -141,6 +144,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 s("action_blocked"),
                 s("reason")
             ),
+            message_id: None,
         },
         "AttentionDemandEscalated" => OperatorEvent::Audit {
             kind: "AttentionDemandEscalated".into(),
@@ -148,10 +152,12 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 "{} vetoes in window — operator attention requested",
                 u64f("veto_count")
             ),
+            message_id: None,
         },
         "CortexFault" => OperatorEvent::Audit {
             kind: "CortexFault".into(),
             detail: format!("task {}: {}", s("task_id"), s("error")),
+            message_id: None,
         },
         // E33 S33.3 — the agent asking its operator something.  Suggested
         // answers are rendered here rather than carried in the audit entry:
@@ -159,12 +165,14 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
         "HelpRequested" => OperatorEvent::AgentQuestion {
             task_id: u64f("task_id"),
             question_id: format!("help-{}", u64f("task_id")),
-            text: format!(
-                "I answered {:?} but I'm not confident in it ({:.2}). \
-                 Is that good enough, or should I try again?",
-                s("task_description"),
-                f32f("confidence")
-            ),
+            // Rendered by `vita`, so the transcript the model sees and the
+            // card the operator answers carry the identical question.
+            text: vita::HelpRequest {
+                task_description: s("task_description"),
+                confidence: f32f("confidence"),
+                reason: s("reason"),
+            }
+            .operator_question(),
             options: vec!["that's fine".to_string(), "try again".to_string()],
             reason: s("reason"),
         },
@@ -184,12 +192,14 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
         "IdentityUpdated" => OperatorEvent::Audit {
             kind: "IdentityUpdated".into(),
             detail: format!("{} = {}", s("key"), s("new_value")),
+            message_id: None,
         },
         // Everything else: a compact generic audit line so nothing is silently
         // dropped from the operator's view.
         other => OperatorEvent::Audit {
             kind: other.to_string(),
             detail: fields.as_object().map(compact_fields).unwrap_or_default(),
+            message_id: None,
         },
     };
     Some(event)
@@ -284,6 +294,12 @@ impl CorrelationTracker {
 
         let mut event = event_from_audit_value(value)?;
         match &mut event {
+            // A failure arrives as a generic audit line, but it ends the
+            // message's life as surely as a reply does — without the id the
+            // console would leave that message at "working" forever.
+            OperatorEvent::Audit { message_id, .. } if failed_task.is_some() => {
+                *message_id = failed_task.and_then(|id| self.links.get(&id).cloned());
+            }
             OperatorEvent::TaskStarted {
                 task_id,
                 message_id,
@@ -575,6 +591,41 @@ mod correlation_tests {
     }
 
     #[test]
+    fn a_failure_carries_the_correlation_so_the_message_reaches_a_terminal_state() {
+        // Without this the console leaves a message whose task failed sitting
+        // at "working" forever — the per-message status never terminates.
+        let mut t = CorrelationTracker::new();
+        t.translate_line(&link(5, "op-3"));
+        let failed = t
+            .translate_line(r#"{"TaskFailed":{"agent_id":"a","task_id":5,"error":"boom"}}"#)
+            .expect("failure event");
+        match failed {
+            OperatorEvent::Audit {
+                kind, message_id, ..
+            } => {
+                assert_eq!(kind, "TaskFailed");
+                assert_eq!(message_id.as_deref(), Some("op-3"));
+            }
+            other => panic!("expected an Audit event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_uncorrelated_failure_carries_no_message_id() {
+        let mut t = CorrelationTracker::new();
+        let failed = t
+            .translate_line(r#"{"TaskFailed":{"agent_id":"a","task_id":9,"error":"boom"}}"#)
+            .expect("failure event");
+        assert!(matches!(
+            failed,
+            OperatorEvent::Audit {
+                message_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_failure_releases_the_link_too() {
         let mut t = CorrelationTracker::new();
         t.translate_line(&link(5, "op-3"));
@@ -680,7 +731,7 @@ mod tests {
     fn unknown_variant_falls_through_to_generic_audit() {
         let line = r#"{"RouterDecision":{"agent_id":"a","event_id":"e","route_id":"mid-tier","model_selector":"mid-tier","tool_scope_name":"std","tools_available":3,"tools_permitted":2,"memory_scope_identity":true,"memory_scope_l1":true,"memory_scope_l2":true,"memory_scope_l3":false,"max_turns":8,"max_tool_calls":8}}"#;
         match event_from_audit_line(line).unwrap() {
-            OperatorEvent::Audit { kind, detail } => {
+            OperatorEvent::Audit { kind, detail, .. } => {
                 assert_eq!(kind, "RouterDecision");
                 assert!(detail.contains("route_id=mid-tier"), "detail was: {detail}");
                 assert!(!detail.contains("agent_id"), "agent_id should be skipped");
@@ -693,7 +744,7 @@ mod tests {
     fn defence_veto_is_surfaced_with_detector_and_reason() {
         let line = r#"{"DefenceVeto":{"agent_id":"a","invocation_id":"i","detector":"PromptInjectionDetector","action_blocked":"shell rm -rf","reason":"injection pattern"}}"#;
         match event_from_audit_line(line).unwrap() {
-            OperatorEvent::Audit { kind, detail } => {
+            OperatorEvent::Audit { kind, detail, .. } => {
                 assert_eq!(kind, "DefenceVeto");
                 assert!(detail.contains("PromptInjectionDetector"));
                 assert!(detail.contains("injection pattern"));

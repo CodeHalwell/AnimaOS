@@ -417,8 +417,15 @@ fn apply_event(state: &Arc<Mutex<TuiState>>, event: OperatorEvent) {
             s.feed
                 .push_front(format!("ASK?  [{question_id}] {text}{choices} — {reason}"));
         }
-        OperatorEvent::Audit { kind, detail } => {
-            s.feed.push_front(format!("{kind}: {detail}"));
+        OperatorEvent::Audit {
+            kind,
+            detail,
+            message_id,
+        } => {
+            s.feed.push_front(format!(
+                "{kind}{}: {detail}",
+                msg_tag(message_id.as_deref())
+            ));
         }
         OperatorEvent::Heartbeat { uptime_secs } => s.uptime = uptime_secs,
     }

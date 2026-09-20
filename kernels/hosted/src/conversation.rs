@@ -154,12 +154,11 @@ impl SessionConversation {
         };
         // The index is reassigned by `SessionRecord::append_turn`.
         let turn = ConversationTurn::new(0, role, content);
+        // `SessionStore::append_turn` already flushes, and a flush rewrites
+        // the whole store atomically — a second one here would double the
+        // write amplification on what is now a per-turn hot path.
         if let Err(e) = store.append_turn(&self.session_id, turn) {
             eprintln!("anima-hosted: could not record a conversation turn ({e})");
-            return;
-        }
-        if let Err(e) = store.flush() {
-            eprintln!("anima-hosted: could not persist the conversation ({e})");
         }
     }
 

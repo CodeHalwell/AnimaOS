@@ -90,10 +90,15 @@ TUI and COM1 serial bridge for the kernel.
       `GET /digest` endpoint reads the audit JSONL, calls `lifecycle::generate_digest`,
       returns JSON; the browser dashboard fetches it on connect and shows a
       dismissible summary panel (suppressed when the agent has no recorded history).
-- [x] Auth beyond the bearer token for non-loopback deployments — `GET
-      /whoami` answers from the E17 `UserRegistry` (the profile
-      conversations and feedback are attributed to, plus its trust tier).
-      Trust is never inferred from reaching the console. (E33 S33.5)
+- [x] **Operator identity and attribution** — `GET /whoami` answers from the
+      E17 `UserRegistry`: the profile conversations and feedback are recorded
+      against, plus its trust tier. Trust is never inferred from reaching the
+      console. (E33 S33.5)
+- [ ] **Authentication** beyond the bearer token for non-loopback deployments.
+      Still open, and deliberately distinguished from the item above: a shared
+      token identifies a *console*, not a person, so `/whoami` reports who the
+      server is configured to attribute requests to — it does not authenticate
+      the human sending them. Per-user credentials remain to be designed.
 - [x] Conversation UI (E33, `docs/24-conversation-ui.md`): conversation
       memory on the serve path over the E22 session store, per-message
       correlation and status, agent-initiated questions, durable history,

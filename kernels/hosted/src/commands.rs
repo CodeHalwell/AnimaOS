@@ -5201,7 +5201,10 @@ pub(crate) fn cmd_serve() {
         .with_approval_queue(Arc::clone(&approval_queue))
         .with_adapter_library(Arc::clone(&adapter_library));
     if let Some(registry) = skill_handle {
-        console = console.with_skill_registry(registry);
+        console = console.with_skill_registry(Arc::clone(&registry));
+        // E33 S33.0: without this the panel is wired but permanently empty — the agent
+        // proposes skills and no operator is ever asked.
+        spawn_skill_approval_drainer(agent_id.clone(), registry, Arc::clone(&approval_queue));
     }
     // The console serves the very history the agent composes from, so a
     // reloaded dashboard shows the real conversation rather than whatever
@@ -5250,6 +5253,11 @@ pub(crate) fn cmd_serve() {
         // from the fact that someone reached the console.
         if let Err(e) = registry.register(profile) {
             eprintln!("anima-hosted: cannot register the operator profile ({e})");
+        } else if let Err(e) = registry.flush() {
+            // `register` only mutates memory.  Without this the profile is
+            // gone on the next start, and `anima users` cannot find the
+            // identity `/whoami` reports.
+            eprintln!("anima-hosted: cannot persist the operator profile ({e})");
         }
     }
     console = console.with_identity(Arc::new(std::sync::Mutex::new(registry)), user_id);
@@ -5349,6 +5357,105 @@ pub(crate) fn cmd_serve() {
         eprintln!("anima-hosted: somatic-loop supervisor thread panicked");
     } else {
         println!("\nanima-hosted: somatic loop stopped; shut down cleanly.");
+    }
+}
+
+/// How often the serve loop drains newly-proposed skills into the operator's
+/// approval queue (E33 S33.0).
+const APPROVAL_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Move agent-authored skill proposals from the live registry into the
+/// operator's approval queue (E33 S33.0).
+///
+/// The Dreaming phase registers reflected skills as `Proposed` in the shared
+/// `SkillRegistry` and stops there: `vita` cannot reach the E15 queue without a
+/// `vita → lifecycle` dependency, which would cycle. The hosted kernel is the
+/// layer that may depend on both, so the hand-off belongs here — the same
+/// division `anima skills` already uses for its one-shot demo.
+///
+/// Without this the console's approval panel is wired but permanently empty:
+/// the agent proposes, and nobody is ever asked.
+///
+/// Each hand-off is written to the agent's audit log through its own append
+/// handle, so the console's tailer turns it into the operator's question. The
+/// registry guard is released before the queue is locked, so this never holds
+/// two subsystem locks at once.
+fn spawn_skill_approval_drainer(
+    agent_id: String,
+    registry: Arc<std::sync::Mutex<skills::SkillRegistry>>,
+    queue: Arc<std::sync::Mutex<lifecycle::approval::ApprovalQueue>>,
+) {
+    use lifecycle::skill_bridge::SkillApprovalBridge;
+    use skills::{ProposalAction, SkillAuthor, SkillProposal, SkillState};
+
+    let builder = std::thread::Builder::new().name("anima-approval-drainer".to_string());
+    let spawned = builder.spawn(move || {
+        let mut bridge = SkillApprovalBridge::new();
+        let mut audit = AuditLog::from_env(&agent_id);
+        loop {
+            std::thread::sleep(APPROVAL_DRAIN_INTERVAL);
+
+            // 1. Snapshot the pending proposals, then let the registry go.
+            let pending: Vec<(String, SkillProposal)> = {
+                let Ok(reg) = registry.lock() else { continue };
+                reg.list_all()
+                    .into_iter()
+                    .filter(|e| matches!(e.state, SkillState::Proposed))
+                    .filter(|e| bridge.skill_id_for(&e.id).is_none())
+                    .map(|e| {
+                        let body = reg
+                            .load_body(&e.id)
+                            .ok()
+                            .map(|b| b.instructions.clone())
+                            .unwrap_or_default();
+                        let skill_text = format!(
+                            "---\nname: {}\ndescription: {}\n---\n{}",
+                            e.manifest.name, e.manifest.description, body
+                        );
+                        (
+                            e.id.clone(),
+                            SkillProposal {
+                                skill_text,
+                                authored_by: SkillAuthor::Agent,
+                                proposed_at_ns: e.provenance.proposed_at_ns,
+                                source_episode: e.provenance.source_episode.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            };
+            if pending.is_empty() {
+                continue;
+            }
+
+            // 2. Hand them to the queue the console serves.
+            for (skill_id, proposal) in pending {
+                let outcome = skills::ProposalOutcome {
+                    artifact_id: Some(skill_id.clone()),
+                    action: ProposalAction::PendingApproval,
+                };
+                let enqueued = {
+                    let Ok(mut q) = queue.lock() else { continue };
+                    bridge.enqueue_skill(&mut q, &outcome, &proposal)
+                };
+                match enqueued {
+                    Ok(Some(proposal_id)) => audit.push(AuditEntry::ApprovalProposalQueued {
+                        agent_id: agent_id.clone(),
+                        proposal_id,
+                        kind: "new-skill".to_string(),
+                        provenance: "agent (dreaming-phase reflection)".to_string(),
+                    }),
+                    // Auto-promoted or rejected upstream — nothing to ask about.
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "anima-hosted: could not queue skill {skill_id} for approval: {e}"
+                    ),
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("anima-hosted: approval-queue drainer did not start ({e}); agent-authored skills will not reach the console");
     }
 }
 

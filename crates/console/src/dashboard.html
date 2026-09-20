@@ -707,6 +707,18 @@
      an approval decision has its own audited endpoint, so a quick reply
      for one posts there rather than sending guidance. */
   const answered = new Set();
+  const questionCards = new Map(); // question_id -> card element
+
+  /** Retire a question card, wherever the answer came from. */
+  function markAnswered(questionId, el) {
+    if (!questionId) return;
+    answered.add(questionId);
+    const card = el || questionCards.get(questionId);
+    if (!card) return;
+    for (const b of card.querySelectorAll("button")) b.disabled = true;
+    card.classList.add("answered");
+  }
+
   function renderQuestion(ev) {
     if (answered.has(ev.question_id)) return;
     const stick = nearBottom();
@@ -727,6 +739,10 @@
     }
     if (opts.childNodes.length) el.appendChild(opts);
     chat.appendChild(el);
+    questionCards.set(ev.question_id, el);
+    if (questionCards.size > 250) {
+      questionCards.delete(questionCards.keys().next().value);
+    }
     scrollChat(stick);
   }
 
@@ -736,25 +752,33 @@
       ? ev.question_id.slice("approval:".length)
       : null;
     try {
+      let r;
       if (approvalId) {
         // An approval has its own audited decision endpoint; routing it
         // through guidance would record a chat line instead of a decision.
         const act = option === "approve" ? "approve" : "reject";
-        await fetch("/approval-queue/" + encodeURIComponent(approvalId) + "/" + act, {
+        r = await fetch("/approval-queue/" + encodeURIComponent(approvalId) + "/" + act, {
           method: "POST",
           headers: { ...authHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({ reason: "answered from the console" }),
         });
-        refreshApprovalQueue();
       } else {
-        await fetch("/guidance", {
+        r = await fetch("/guidance", {
           method: "POST",
           headers: { ...authHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({ text: option, priority: "Normal", reply_to: ev.question_id }),
         });
       }
-      answered.add(ev.question_id);
-      el.classList.add("answered");
+      // `fetch` resolves for 4xx/5xx too. Without this check a rejected
+      // answer still disabled the buttons and told the operator it landed.
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        for (const b of el.querySelectorAll("button")) b.disabled = false;
+        notice("answer rejected · " + (body.error || "HTTP " + r.status), true);
+        return;
+      }
+      if (approvalId) refreshApprovalQueue();
+      markAnswered(ev.question_id, el);
     } catch (err) {
       for (const b of el.querySelectorAll("button")) b.disabled = false;
       notice("could not answer · " + String(err), true);
@@ -867,6 +891,7 @@
       // E33 S33.2 — the operator's own message, typed and uncorrelated-free.
       // Every ingress (this browser, the CLI, a chat channel) renders here.
       case "Accepted": {
+        if (ev.reply_to) markAnswered(ev.reply_to, null);
         if (alreadyRendered("op", ev.text)) break;
         const tag = ev.forced ? "forced · critical" : String(ev.priority || "").toLowerCase();
         const el = bubble("op", "operator · " + tag, ev.text);
@@ -905,6 +930,7 @@
           }
         }
         if (ev.kind === "DefenceVeto") notice("defence veto · " + ev.detail, true);
+        if (ev.message_id) setStatus(ev.message_id, "failed", null, ev.detail);
         if (ev.kind === "TaskFailed" || ev.kind === "CortexFault") {
           // "task <id> failed: …" / "task <id>: …" — the matching typing
           // indicator will never see an AgentMessage; retire it and tell the
