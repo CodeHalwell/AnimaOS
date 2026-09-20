@@ -349,6 +349,7 @@ dependencies = [
  "metrics",
  "senses",
  "serde_json",
+ "sessions",
  "skills",
  "vita",
 ]
@@ -1036,6 +1037,7 @@ dependencies = [
  "sessions",
  "signal-hook",
  "skills",
+ "tempfile",
  "tool-cache",
  "users",
  "vita",

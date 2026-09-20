@@ -63,6 +63,7 @@ pub struct Console {
     approval_queue: Option<Arc<Mutex<lifecycle::approval::ApprovalQueue>>>,
     skill_registry: Option<Arc<Mutex<skills::SkillRegistry>>>,
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
 }
 
 impl Console {
@@ -80,7 +81,19 @@ impl Console {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            conversation: None,
         }
+    }
+
+    /// Wire in the shared conversation store so `GET /conversation` serves the
+    /// durable history the agent itself composes from (E33 S33.1).
+    pub fn with_conversation(
+        mut self,
+        store: Arc<Mutex<sessions::SessionStore>>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.conversation = Some((store, session_id.into()));
+        self
     }
 
     /// Wire in a shared approval queue so the console can serve
@@ -138,6 +151,9 @@ impl Console {
         }
         if let Some(l) = &self.adapter_library {
             server = server.with_adapter_library(Arc::clone(l));
+        }
+        if let Some((store, session_id)) = &self.conversation {
+            server = server.with_conversation(Arc::clone(store), session_id.clone());
         }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)

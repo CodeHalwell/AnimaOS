@@ -588,12 +588,17 @@
       case "AgentMessage":
         clearTyping(ev.task_key || String(ev.task_id));
         if (ev.message_id) setStatus(ev.message_id, "answered");
+        if (alreadyRendered("agent", ev.text)) {
+          addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (replayed)");
+          break;
+        }
         bubble("agent", "anima · " + ev.tokens + " tok", ev.text);
         addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (" + ev.tokens + " tok) " + ev.text);
         break;
       // E33 S33.2 — the operator's own message, typed and uncorrelated-free.
       // Every ingress (this browser, the CLI, a chat channel) renders here.
       case "Accepted": {
+        if (alreadyRendered("op", ev.text)) break;
         const tag = ev.forced ? "forced · critical" : String(ev.priority || "").toLowerCase();
         const el = bubble("op", "operator · " + tag, ev.text);
         el.dataset.msg = ev.message_id || "";
@@ -637,7 +642,12 @@
         }
         addFeed(["DefenceVeto", "AttentionDemandEscalated", "TaskFailed", "CortexFault"].includes(ev.kind) ? "veto" : "audit", ev.kind, ev.detail);
         break;
-      case "Heartbeat": $("uptime").textContent = fmtUptime(ev.uptime_secs); break;
+      case "Heartbeat":
+        $("uptime").textContent = fmtUptime(ev.uptime_secs);
+        // The snapshot is fully written before the server's first beat, so
+        // anything after this point is live and must never be suppressed.
+        if (reconciling) { reconciling = false; reconcile.clear(); }
+        break;
     }
   }
   function fmtUptime(s) {
@@ -792,6 +802,48 @@
   setInterval(refreshSkills, 8000);
   setInterval(refreshAdapters, 8000);
 
+  /* ── Durable history (E33 S33.1) ────────────────────────────────────
+     The conversation is loaded from the agent's own session store — the very
+     turns it composes its prompts from — rather than from whatever happens to
+     remain in the event hub's replay ring.
+
+     That replay still arrives on connect, so the same recent exchange would
+     paint twice. `reconcile` holds one entry per turn already rendered from
+     history; a replayed conversation event matching one consumes it instead of
+     rendering. It is dropped on the first Heartbeat, which the server only
+     sends once the whole snapshot has been written — so live messages are
+     never mistaken for replay, even if someone sends the same text twice. */
+  const reconcile = new Map();
+  let reconciling = false;
+  function turnKey(role, text) { return role + "\u0000" + String(text == null ? "" : text); }
+  function alreadyRendered(role, text) {
+    if (!reconciling) return false;
+    const k = turnKey(role, text);
+    const n = reconcile.get(k) || 0;
+    if (n <= 0) return false;
+    reconcile.set(k, n - 1);
+    return true;
+  }
+
+  async function loadHistory() {
+    try {
+      const r = await fetch("/conversation?limit=100", { headers: authHeaders });
+      if (!r.ok) return; // 404 when not wired — fall back to the replay ring
+      const turns = await r.json();
+      if (!Array.isArray(turns) || !turns.length) return;
+      reconciling = true;
+      for (const t of turns) {
+        const isUser = t.role === "user";
+        if (!isUser && t.role !== "assistant") continue; // system/tool stay out of the transcript
+        bubble(isUser ? "op" : "agent", isUser ? "operator" : "anima", t.content);
+        const k = turnKey(isUser ? "op" : "agent", t.content);
+        reconcile.set(k, (reconcile.get(k) || 0) + 1);
+      }
+      notice("— end of saved history —");
+      scrollChat(true);
+    } catch (e) { /* offline or not wired: the replay ring still paints */ }
+  }
+
   /* ── Transport ──────────────────────────────────────────────────── */
   const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
   function connect() {
@@ -810,7 +862,9 @@
       } catch (e) { /* tolerate partial lines */ }
     };
   }
-  connect();
+  // History first, then the live stream: the reconciliation above depends on
+  // the saved turns being rendered before the replay reaches the handler.
+  loadHistory().finally(connect);
 
   /* ── "While you were away" digest ──────────────────────────────── */
   (function () {

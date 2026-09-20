@@ -5147,6 +5147,38 @@ pub(crate) fn cmd_serve() {
         println!("  cognition: watchdog + confidence + prospective memory enabled (E14)");
     }
 
+    // ── E33 S33.1 — conversation memory ───────────────────────────────────────
+    // Without this the agent answers every operator message as though it were
+    // the first thing ever said: the task's prompt is the raw sensory text,
+    // with no identity framing and no prior turns.  The memory composes each
+    // dispatch from the durable E22 session store and records every reply back
+    // into it, so a follow-up ("and the second one?") means something and the
+    // history survives a restart.
+    // Opt out with ANIMA_CONVERSATION=0 for a bare, stateless loop.
+    let conversation_store = if std::env::var("ANIMA_CONVERSATION").as_deref() == Ok("0") {
+        println!("  memory    : conversation disabled (ANIMA_CONVERSATION=0)");
+        None
+    } else {
+        let conversation = Arc::new(std::sync::Mutex::new(
+            conversation::SessionConversation::open(
+                &agent_id,
+                &operator_user_id(),
+                build_identity_framing(&agent_id),
+            ),
+        ));
+        let handle = conversation
+            .lock()
+            .map(|c| (c.store(), c.session_id().to_string()))
+            .ok();
+        manager.enable_conversation(
+            conversation.clone() as Arc<std::sync::Mutex<dyn vita::ConversationMemory>>
+        );
+        if let Some((_, session_id)) = &handle {
+            println!("  memory    : conversation on, session {session_id}");
+        }
+        handle
+    };
+
     // ── E33 S33.0 — operator-facing shared state ──────────────────────────────
     // The approval queue (E15 S15.2), the skill registry (E11) and the adapter
     // library (E8) each back a console panel.  Without these handles the
@@ -5168,6 +5200,12 @@ pub(crate) fn cmd_serve() {
         .with_adapter_library(Arc::clone(&adapter_library));
     if let Some(registry) = skill_handle {
         console = console.with_skill_registry(registry);
+    }
+    // The console serves the very history the agent composes from, so a
+    // reloaded dashboard shows the real conversation rather than whatever
+    // happens to remain in the hub's replay ring (E33 S33.1).
+    if let Some((store, session_id)) = conversation_store {
+        console = console.with_conversation(store, session_id);
     }
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
@@ -5200,6 +5238,16 @@ pub(crate) fn cmd_serve() {
     println!(
         "  panels    : approval-queue, skills, adapters (GET /approval-queue, /skills, /adapters)"
     );
+    println!("  history   : GET /conversation (durable turns, survives restarts)");
+    if backend.id() == "mock" {
+        // The mock backend echoes its prompt word for word, so with
+        // conversation memory on it replies with the composed context rather
+        // than an answer.  That is the parrot working as designed, not a
+        // fault — say so, because it is the default first-run backend.
+        println!(
+            "\n  note: the mock backend echoes whatever prompt it is given, so its replies\n               will repeat the composed context. Use a real backend (ANIMA_BACKEND=ollama,\n               or anthropic/openai with a key) to judge the conversation itself."
+        );
+    }
     if corpus_dir != "off" {
         println!("  corpus    : {corpus_dir} (sleep-phase training pairs)");
     }
@@ -5236,6 +5284,38 @@ pub(crate) fn cmd_serve() {
     } else {
         println!("\nanima-hosted: somatic loop stopped; shut down cleanly.");
     }
+}
+
+/// The operator identity conversations are recorded against (E33 S33.1).
+///
+/// A single console operator today; `ANIMA_OPERATOR_ID` names them when more
+/// than one person shares an agent, which is what ties the history to an E17
+/// `UserRegistry` profile.
+fn operator_user_id() -> String {
+    std::env::var("ANIMA_OPERATOR_ID").unwrap_or_else(|_| "user:operator".to_string())
+}
+
+/// Build the system framing prepended to every composed prompt (E33 S33.1).
+///
+/// Uses the agent's own identity memory, so what it has learned about itself
+/// actually reaches the model instead of sitting unread on disk.  A missing or
+/// unreadable identity document degrades to the bare framing rather than
+/// failing the boot.
+fn build_identity_framing(agent_id: &str) -> String {
+    let mut framing = format!(
+        "You are {agent_id}, an autonomous agent that runs as its own operating system. \
+         You are speaking with your human operator, who is one of your senses rather than \
+         your controller. Answer in the context of the conversation so far, briefly and plainly."
+    );
+    let path = IdentityMemory::default_path(agent_id);
+    if let Ok(store) = IdentityMemory::open(&path) {
+        let doc = store.to_json();
+        if !doc.is_null() {
+            framing.push_str("\n\nWhat you know about yourself: ");
+            framing.push_str(&doc.to_string());
+        }
+    }
+    framing
 }
 
 /// How many adapter artifacts the serving agent's library retains (E33 S33.0).

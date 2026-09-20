@@ -10,6 +10,8 @@ pub mod audit;
 #[cfg(feature = "std")]
 pub mod consolidation;
 #[cfg(feature = "std")]
+pub mod conversation;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
@@ -36,6 +38,8 @@ pub mod sleep;
 pub mod watchdog;
 
 pub use audit::{AuditEntry, AuditLog};
+#[cfg(feature = "std")]
+pub use conversation::ConversationMemory;
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
@@ -281,6 +285,17 @@ pub struct Subsystems {
     /// call and the `&self` `decide_motivated` call can both go through it.
     #[cfg(feature = "std")]
     pub motivated_gate: Option<Arc<Mutex<MotivatedGate>>>,
+    /// Conversation memory for operator-originated tasks (E33 S33.1).
+    ///
+    /// `None` by default, in which case a task's prompt is the raw sensory
+    /// text and the loop behaves exactly as it did before this existed.  When
+    /// installed, each dispatch is composed through it and each completion
+    /// recorded back, so the agent answers in the context of what was already
+    /// said.  Shared rather than owned so the surface that supplies the
+    /// history — the hosted kernel's session store — can also serve it to an
+    /// operator console.
+    #[cfg(feature = "std")]
+    pub conversation: Option<Arc<Mutex<dyn ConversationMemory>>>,
     /// Optional E9 S9.5 per-tier backend map (router-aware dispatch).
     ///
     /// `None` by default — when absent, every task dispatches through the single
@@ -569,6 +584,30 @@ impl LifecycleManager {
     #[cfg(feature = "std")]
     pub fn enable_skill_reflection(&mut self, registry: SkillRegistry) {
         self.subsystems.skill_registry = Some(Arc::new(Mutex::new(registry)));
+    }
+
+    /// Install conversation memory for operator-originated tasks (E33 S33.1).
+    ///
+    /// Without this the loop is unchanged: a task's prompt is the raw sensory
+    /// text.  With it, each dispatch is composed through `memory` and each
+    /// completion recorded back, so the agent answers in the context of what
+    /// has already been said.
+    #[cfg(feature = "std")]
+    pub fn enable_conversation(&mut self, memory: Arc<Mutex<dyn ConversationMemory>>) {
+        self.subsystems.conversation = Some(memory);
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_conversation`].
+    #[cfg(feature = "std")]
+    pub fn with_conversation(mut self, memory: Arc<Mutex<dyn ConversationMemory>>) -> Self {
+        self.enable_conversation(memory);
+        self
+    }
+
+    /// `true` when conversation memory is installed.
+    #[cfg(feature = "std")]
+    pub fn conversation_enabled(&self) -> bool {
+        self.subsystems.conversation.is_some()
     }
 
     /// Builder variant of [`LifecycleManager::enable_skill_reflection`]
@@ -1306,6 +1345,20 @@ pub async fn somatic_execution_loop(
                 prompt,
             });
 
+            // E33 S33.1: wrap the human's text in conversational context on the
+            // way to the backend.  Deliberately *after* the TaskStarted entry
+            // above, so the audit log — and every console built on it — keeps
+            // showing what the operator actually said rather than the whole
+            // composed context repeated on each turn.
+            #[cfg(feature = "std")]
+            let task = {
+                let mut task = task;
+                if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                    task.prompt = lock_recover(&memory).compose(task_id, &task.prompt);
+                }
+                task
+            };
+
             let cancel = lifecycle.install_fresh_cancel();
             // E9 S9.5: when a per-tier backend map is installed, resolve the
             // dispatch backend for this task's cost-class tier and record the
@@ -1351,6 +1404,14 @@ pub async fn somatic_execution_loop(
                             let score = ct.estimate_confidence(&outcome.response, 0);
                             ct.record_outcome(score.value, true);
                         }
+                    }
+
+                    // E33 S33.1: the agent's turn in the conversation.  Errors
+                    // are absorbed by the implementation — the lifecycle must
+                    // not stall because history could not be written.
+                    #[cfg(feature = "std")]
+                    if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                        lock_recover(&memory).record_reply(task_id, &outcome.response);
                     }
 
                     lifecycle.audit.push(AuditEntry::TaskCompleted {
@@ -1602,6 +1663,77 @@ mod tests {
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
         assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 2);
+    }
+
+    #[test]
+    fn conversation_memory_composes_the_prompt_but_not_the_audit_entry() {
+        // E33 S33.1: the backend must see the composed context; the audit log
+        // must still show what the human actually typed.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<(u64, String)>,
+            replies: Vec<(u64, String)>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, task_id: u64, guidance: &str) -> String {
+                self.composed.push((task_id, guidance.to_string()));
+                format!("[context]\noperator: {guidance}\nanima:")
+            }
+            fn record_reply(&mut self, task_id: u64, response: &str) {
+                self.replies.push((task_id, response.to_string()));
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-conversation", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        assert!(m.conversation_enabled());
+        m.senses
+            .packetize_text_checked("what are you working on?", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // The backend saw the composed prompt …
+        let dispatched = &m.scheduler.dispatched_tasks[0];
+        assert!(
+            dispatched.prompt.starts_with("[context]"),
+            "backend did not receive the composed prompt: {:?}",
+            dispatched.prompt
+        );
+
+        // … while the audit log kept the operator's own words.
+        let started = m
+            .audit
+            .entries()
+            .iter()
+            .find_map(|e| match e {
+                AuditEntry::TaskStarted { prompt, .. } => Some(prompt.clone()),
+                _ => None,
+            })
+            .expect("task started");
+        assert_eq!(started, "what are you working on?");
+
+        let rec = recorder.lock().unwrap();
+        assert_eq!(rec.composed.len(), 1, "compose called once per dispatch");
+        assert_eq!(rec.composed[0].1, "what are you working on?");
+        assert_eq!(rec.replies.len(), 1, "the reply was recorded");
+        assert_eq!(rec.replies[0].0, rec.composed[0].0, "same task id");
+    }
+
+    #[test]
+    fn without_conversation_memory_the_prompt_reaches_the_backend_untouched() {
+        let mut m = manager("agent-no-conversation", Some(2));
+        assert!(!m.conversation_enabled());
+        m.senses
+            .packetize_text_checked("plain text", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks[0].prompt, "plain text");
     }
 
     #[test]

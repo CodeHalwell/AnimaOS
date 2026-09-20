@@ -69,6 +69,7 @@
 //! cargo run --bin anima-hosted -- init --non-interactive   # CI / scripted
 //! ```
 
+mod conversation;
 mod cortex;
 mod doctor;
 mod init;

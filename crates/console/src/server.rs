@@ -166,6 +166,12 @@ pub struct ConsoleServer {
     /// Optional adapter library — when set, `GET /adapters` is active (E8
     /// adapter-library dashboard surface).
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    /// Shared conversation history, when wired: `(store, session_id)`.
+    ///
+    /// The same store the agent's conversation memory writes to (E33 S33.1),
+    /// so `GET /conversation` serves exactly what the model was given rather
+    /// than a parallel transcript that could drift from it.
+    conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
     /// Counter behind server-minted operator-message ids (E33 S33.2).
     ///
     /// Seeded from the process start time so ids stay distinct across restarts:
@@ -205,6 +211,13 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// the heartbeat cadence.  Short enough that the beat lands on time, long
 /// enough that an idle console costs one wakeup a second.
 const HEARTBEAT_POLL: Duration = Duration::from_secs(1);
+
+/// Turns returned by `GET /conversation` when no `limit` is given.
+const DEFAULT_CONVERSATION_LIMIT: usize = 100;
+
+/// Hard cap on `GET /conversation?limit=`, so one request cannot serialise a
+/// whole long-lived session into memory.
+const MAX_CONVERSATION_LIMIT: usize = 1000;
 
 /// Longest guidance echo carried in the `OperatorGuidance` audit event.
 ///
@@ -258,6 +271,7 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            conversation: None,
             message_seq: std::sync::atomic::AtomicU64::new(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -300,6 +314,18 @@ impl ConsoleServer {
 
     /// Wire in a shared adapter library. When set, `GET /adapters` returns all
     /// registered adapters as JSON (E8 adapter-library dashboard surface).
+    /// Wire in the shared conversation store so `GET /conversation` is active
+    /// (E33 S33.1).  Without it the route answers 404 and a client falls back
+    /// to whatever the event stream replays.
+    pub fn with_conversation(
+        mut self,
+        store: Arc<Mutex<sessions::SessionStore>>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.conversation = Some((store, session_id.into()));
+        self
+    }
+
     pub fn with_adapter_library(
         mut self,
         library: Arc<Mutex<anima_finetune::AdapterLibrary>>,
@@ -496,6 +522,9 @@ impl ConsoleServer {
             ),
             ("GET", "/events") => self.serve_events(out, last_event_id),
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
+            // E33 S33.1 — durable conversation history, so a reloaded page
+            // paints the real transcript instead of the replay ring's tail.
+            ("GET", "/conversation") => self.serve_conversation(&query, &mut out),
             // S15.1 — "While you were away" activity digest
             ("GET", "/digest") => self.serve_digest(&mut out),
             // E21 — Prometheus metrics endpoint
@@ -833,6 +862,61 @@ impl ConsoleServer {
                 400,
                 "Bad Request",
                 br#"{"ok":false,"error":"invalid input"}"#,
+            ),
+        }
+    }
+
+    /// Serve the durable conversation history as JSON (E33 S33.1).
+    ///
+    /// `?limit=N` returns the newest `N` turns (default
+    /// [`DEFAULT_CONVERSATION_LIMIT`], capped at [`MAX_CONVERSATION_LIMIT`] so
+    /// one request cannot serialise an entire long-lived session).  Turns come
+    /// back oldest-first, the order a transcript is read in.
+    fn serve_conversation(&self, query: &str, out: &mut TcpStream) -> std::io::Result<()> {
+        let Some((store, session_id)) = &self.conversation else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"error":"conversation history not available"}"#,
+            );
+        };
+        let limit = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("limit="))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CONVERSATION_LIMIT)
+            .clamp(1, MAX_CONVERSATION_LIMIT);
+
+        let turns = {
+            let guard = match store.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"session store lock poisoned"}"#,
+                    );
+                }
+            };
+            match guard.get(session_id) {
+                // Newest `limit` turns, still in chronological order.
+                Some(session) => {
+                    let skip = session.turns.len().saturating_sub(limit);
+                    session.turns[skip..].to_vec()
+                }
+                None => Vec::new(),
+            }
+        };
+
+        match serde_json::to_vec(&turns) {
+            Ok(body) => write_json(out, 200, "OK", &body),
+            Err(_) => write_json(
+                out,
+                500,
+                "Internal Server Error",
+                br#"{"error":"serialisation failed"}"#,
             ),
         }
     }
@@ -1301,6 +1385,124 @@ mod tests {
             ),
             other => panic!("expected an Accepted echo, got {other:?}"),
         }
+    }
+
+    // ── E33 S33.1 — conversation history ──────────────────────────────────
+
+    fn start_with_conversation(turns: usize) -> std::net::SocketAddr {
+        use sessions::{ConversationRole, ConversationTurn, SessionRecord, SessionStore};
+        let mut store = SessionStore::in_memory();
+        store
+            .insert(SessionRecord::new("sess-1", "user:operator", "anima"))
+            .unwrap();
+        for i in 0..turns {
+            let role = if i % 2 == 0 {
+                ConversationRole::User
+            } else {
+                ConversationRole::Assistant
+            };
+            store
+                .append_turn(
+                    "sess-1",
+                    ConversationTurn::new(0, role, format!("turn {i}")),
+                )
+                .unwrap();
+        }
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_conversation(Arc::new(Mutex::new(store)), "sess-1");
+        server.spawn().expect("spawn").0
+    }
+
+    #[test]
+    fn conversation_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("404 Not Found"), "resp: {resp}");
+    }
+
+    #[test]
+    fn conversation_serves_turns_oldest_first() {
+        let addr = start_with_conversation(4);
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        let first = body.find("turn 0").expect("oldest turn present");
+        let last = body.find("turn 3").expect("newest turn present");
+        assert!(first < last, "turns are not in chronological order: {body}");
+        assert!(body.contains(r#""role":"user""#), "roles missing: {body}");
+    }
+
+    #[test]
+    fn conversation_limit_returns_the_newest_turns() {
+        let addr = start_with_conversation(10);
+        let resp = http_request(
+            addr,
+            "GET /conversation?limit=3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.contains("turn 9"), "newest turn missing: {body}");
+        assert!(body.contains("turn 7"), "third-newest missing: {body}");
+        assert!(
+            !body.contains("turn 6"),
+            "limit not applied from the newest end: {body}"
+        );
+    }
+
+    #[test]
+    fn conversation_limit_is_capped_and_a_garbage_limit_falls_back() {
+        // A caller must not be able to ask the server to serialise an entire
+        // long-lived session, nor crash it with a non-numeric limit.
+        let addr = start_with_conversation(5);
+        for q in ["?limit=99999999", "?limit=abc", "?limit=0", "?limit=-4"] {
+            let resp = http_request(
+                addr,
+                &format!("GET /conversation{q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(resp.contains("200 OK"), "limit {q} failed: {resp}");
+        }
+    }
+
+    #[test]
+    fn conversation_for_an_unknown_session_is_empty_not_an_error() {
+        use sessions::SessionStore;
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let addr = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_conversation(Arc::new(Mutex::new(SessionStore::in_memory())), "missing")
+        .spawn()
+        .expect("spawn")
+        .0;
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        assert!(
+            resp.trim_end().ends_with("[]"),
+            "expected empty list: {resp}"
+        );
     }
 
     // ── E33 S33.2 ─────────────────────────────────────────────────────────
