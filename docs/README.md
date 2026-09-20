@@ -60,6 +60,7 @@ build sequence.
 | [`19-constitution-and-alignment.md`](./19-constitution-and-alignment.md) | **E13 — Alignment Assurance** | Immutable value charter the agent can't rewrite; constitution enforcement; continuous alignment evals; defence red-team + corrigibility test suites. |
 | [`20-higher-cognition.md`](./20-higher-cognition.md) | **E14 — Higher Cognition** | Metacognition & calibration; prospective/temporal memory; personal knowledge corpus (RAG); cognitive watchdogs + agent-level rollback. |
 | [`21-operator-trust-and-lifecycle.md`](./21-operator-trust-and-lifecycle.md) | **E15 — Trust & Lifecycle** | "While you were away" digest; approval-queue; decision replay / time-travel debug; digital-twin sandbox; state versioning & migration. |
+| [`24-conversation-ui.md`](./24-conversation-ui.md) | **E33 — Conversation** | Human ↔ agent conversation UI: conversation memory on the serve path, message correlation and status, agent-initiated questions, persistent history, dashboard/TUI upgrade. Scoping audit of the current console included. |
 | [`18-forward-epics.md`](./18-forward-epics.md) | *(index)* | Forward-epics catalogue: dependency graph, shared-spine primitives, recommended build sequence. |
 | [`23-production-readiness.md`](./23-production-readiness.md) | *(tracker)* | The four pillars of production grade — Docker MVP, bare-metal, operator UI, self-extension/tuning — shipped vs remaining, with a definition of done. |
 

@@ -92,6 +92,12 @@ TUI and COM1 serial bridge for the kernel.
       dismissible summary panel (suppressed when the agent has no recorded history).
 - [ ] Auth beyond the bearer token for non-loopback deployments (per-user
       identity exists in `crates/users` / E17; wire it to the console).
+- [ ] Conversation UI (E33, `docs/24-conversation-ui.md`): conversation
+      memory on the serve path, per-message status and correlation,
+      agent-initiated questions, persistent history. Note: the three panels
+      above are only live once `cmd_serve` actually calls the `with_*`
+      builders — it does not yet (`GET /approval-queue` returns 404 under
+      `serve`).
 
 ## Pillar 4 — Self-extending, self-tuning agent
 
