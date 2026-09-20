@@ -168,6 +168,13 @@ unsafe impl GlobalAlloc for BumpAllocator {
         // All intermediate arithmetic is checked (returning None on overflow)
         // so that an adversarially large `layout` cannot bypass the bounds
         // check via address wrapping.
+        // `fetch_update` is deprecated on newer toolchains in favour of
+        // `try_update`, which is the same call renamed. We keep the old name —
+        // silencing the rename on this statement rather than crate-wide —
+        // because `try_update` only stabilised in Rust 1.98, and adopting it
+        // would quietly raise this workspace's minimum toolchain for a purely
+        // cosmetic change to the TCB.
+        #[allow(deprecated)]
         let result = self
             .cursor
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cursor| {

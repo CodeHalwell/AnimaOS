@@ -15,6 +15,12 @@ senses = { path = "../senses" }
 interoception = { path = "../interoception" }
 vita = { path = "../vita" }
 lifecycle = { path = "../lifecycle" }
+# E33 S33.1 — durable conversation history served by `GET /conversation`.
+sessions = { path = "../sessions" }
+# E33 S33.4 — response feedback collected from the conversation view.
+feedback = { path = "../feedback" }
+# E33 S33.5 — operator identity behind `GET /whoami`.
+users = { path = "../users" }
 metrics = { path = "../metrics" }
 skills = { path = "../skills" }
 anima-finetune = { path = "../finetune" }

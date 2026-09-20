@@ -73,6 +73,38 @@ pub enum SensoryPacket {
     },
 }
 
+/// Where a sensory packet came from, and therefore how the somatic loop should
+/// treat it (E33 S33.6).
+///
+/// The bridge is `/dev/anima/senses/human`, but not everything arriving on it
+/// is a human talking: the unchecked packetisers exist for synthetic and
+/// internal input, and future sensor producers will use them too.  Without an
+/// explicit marker the loop cannot tell the difference, and would classify a
+/// sensor reading as a `SemanticClass::OperatorCommand` — gating it, and
+/// folding it into the operator's conversation, as though a person had typed
+/// it.  Marking origin at the ingress keeps that decision at the point where
+/// it is actually known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SensoryOrigin {
+    /// A human addressing the agent — the operator console, or a comms channel
+    /// carrying their message (`docs/15` treats a chat app as another operator
+    /// transport).  Arbitrated by the Striatal Gate and recorded in the
+    /// conversation.
+    Operator,
+    /// Machine-generated input: sensors, synthetic feeds, the unchecked
+    /// packetisers.  Admitted without gate arbitration and never recorded as
+    /// operator speech.
+    #[default]
+    Internal,
+}
+
+impl SensoryOrigin {
+    /// Whether this packet represents a person addressing the agent.
+    pub fn is_operator(self) -> bool {
+        matches!(self, SensoryOrigin::Operator)
+    }
+}
+
 /// A sensory packet paired with its assigned priority level.
 ///
 /// `vita`'s somatic loop consumes [`PrioritizedPacket`]s from the bridge and
@@ -87,6 +119,20 @@ pub struct PrioritizedPacket {
     /// (E6.6).  vita's somatic loop wires this to `GateOverride::OperatorForced`
     /// and records an audited gate decision before admitting the task.
     pub gate_override_reason: Option<String>,
+    /// Correlation id assigned by the ingress that accepted this packet
+    /// (E33 S33.2).
+    ///
+    /// Carried through the somatic loop onto the audit trail so an operator
+    /// console can tie the task — and the reply it eventually produces — back
+    /// to the specific message the human sent, rather than guessing from
+    /// arrival order.  `None` for packets with no conversational origin
+    /// (sensors, the microVM serial line, the unchecked packetisers).
+    pub message_id: Option<String>,
+    /// Who produced this packet (E33 S33.6).
+    ///
+    /// Only [`SensoryOrigin::Operator`] packets are arbitrated by the gate and
+    /// folded into the operator's conversation.
+    pub origin: SensoryOrigin,
 }
 
 // ── Policy bounds ─────────────────────────────────────────────────────────────
@@ -199,6 +245,8 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text.into()),
             priority: SensoryPriority::Normal,
             gate_override_reason: None,
+            message_id: None,
+            origin: SensoryOrigin::Internal,
         });
     }
 
@@ -212,6 +260,8 @@ impl SensoryBridge {
             packet: SensoryPacket::Pcm(samples),
             priority: SensoryPriority::Normal,
             gate_override_reason: None,
+            message_id: None,
+            origin: SensoryOrigin::Internal,
         });
     }
 
@@ -230,6 +280,38 @@ impl SensoryBridge {
         &self,
         text: impl Into<String>,
         priority: SensoryPriority,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_text_tagged(text, priority, None)
+    }
+
+    /// As [`SensoryBridge::packetize_text_checked`], additionally tagging the
+    /// packet with an ingress-assigned correlation id (E33 S33.2).
+    ///
+    /// The id is carried onto the audit trail alongside the task the packet
+    /// produces, letting an operator console show the status of *this* message.
+    /// It grants no privilege: policy bounds are applied exactly as they are
+    /// for an untagged line.
+    pub fn packetize_text_tagged(
+        &self,
+        text: impl Into<String>,
+        priority: SensoryPriority,
+        message_id: Option<String>,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_text_from(text, priority, message_id, SensoryOrigin::Operator)
+    }
+
+    /// As [`SensoryBridge::packetize_text_tagged`], declaring the packet's
+    /// [`SensoryOrigin`] (E33 S33.6).
+    ///
+    /// Machine-generated text must pass [`SensoryOrigin::Internal`] so the
+    /// somatic loop neither arbitrates it as an operator command nor folds it
+    /// into the operator's conversation.
+    pub fn packetize_text_from(
+        &self,
+        text: impl Into<String>,
+        priority: SensoryPriority,
+        message_id: Option<String>,
+        origin: SensoryOrigin,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
         let bounds = sync::lock_recover(&self.active_bounds).clone();
@@ -258,6 +340,8 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text),
             priority,
             gate_override_reason: None,
+            message_id,
+            origin,
         });
         Ok(())
     }
@@ -283,6 +367,17 @@ impl SensoryBridge {
         &self,
         text: impl Into<String>,
         reason: impl Into<String>,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_text_forced_tagged(text, reason, None)
+    }
+
+    /// As [`SensoryBridge::packetize_text_forced`], additionally tagging the
+    /// packet with an ingress-assigned correlation id (E33 S33.2).
+    pub fn packetize_text_forced_tagged(
+        &self,
+        text: impl Into<String>,
+        reason: impl Into<String>,
+        message_id: Option<String>,
     ) -> Result<(), SensoryBridgeError> {
         let text = text.into();
         let reason = reason.into();
@@ -325,6 +420,8 @@ impl SensoryBridge {
             packet: SensoryPacket::Text(text),
             priority: SensoryPriority::Critical,
             gate_override_reason: Some(reason),
+            message_id,
+            origin: SensoryOrigin::Operator,
         });
         Ok(())
     }
@@ -342,6 +439,17 @@ impl SensoryBridge {
         &self,
         samples: Vec<i16>,
         priority: SensoryPriority,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_pcm_from(samples, priority, SensoryOrigin::Operator)
+    }
+
+    /// As [`SensoryBridge::packetize_pcm_checked`], declaring the packet's
+    /// [`SensoryOrigin`] (E33 S33.6).
+    pub fn packetize_pcm_from(
+        &self,
+        samples: Vec<i16>,
+        priority: SensoryPriority,
+        origin: SensoryOrigin,
     ) -> Result<(), SensoryBridgeError> {
         if samples.is_empty() {
             return Err(SensoryBridgeError::PolicyViolation {
@@ -362,6 +470,8 @@ impl SensoryBridge {
             packet: SensoryPacket::Pcm(samples),
             priority,
             gate_override_reason: None,
+            message_id: None,
+            origin,
         });
         Ok(())
     }
@@ -383,6 +493,20 @@ impl SensoryBridge {
         mime: impl Into<String>,
         caption: Option<String>,
         priority: SensoryPriority,
+    ) -> Result<(), SensoryBridgeError> {
+        self.packetize_image_from(bytes, mime, caption, priority, SensoryOrigin::Operator)
+    }
+
+    /// As [`SensoryBridge::packetize_image_checked`], declaring the packet's
+    /// [`SensoryOrigin`] (E33 S33.6).
+    #[allow(clippy::too_many_arguments)]
+    pub fn packetize_image_from(
+        &self,
+        bytes: Vec<u8>,
+        mime: impl Into<String>,
+        caption: Option<String>,
+        priority: SensoryPriority,
+        origin: SensoryOrigin,
     ) -> Result<(), SensoryBridgeError> {
         let mime = mime.into();
         if bytes.is_empty() {
@@ -418,6 +542,8 @@ impl SensoryBridge {
             },
             priority,
             gate_override_reason: None,
+            message_id: None,
+            origin,
         });
         Ok(())
     }

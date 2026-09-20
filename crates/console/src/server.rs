@@ -166,6 +166,31 @@ pub struct ConsoleServer {
     /// Optional adapter library — when set, `GET /adapters` is active (E8
     /// adapter-library dashboard surface).
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    /// Operator identity, when wired: `(registry, user_id)` (E33 S33.5).
+    ///
+    /// Answers "who does this console think I am": the profile conversations
+    /// and feedback are recorded against, and the trust tier the E17 registry
+    /// holds for them.  The bearer token still decides *whether* a request is
+    /// served; this says who it is attributed to.
+    identity: Option<(Arc<Mutex<users::UserRegistry>>, String)>,
+    /// Shared feedback store, when wired — backs `POST /feedback` (E33 S33.4).
+    ///
+    /// The E24 store has existed since the operational wave with only a CLI in
+    /// front of it, so quality signal could only be recorded by someone who
+    /// had already left the conversation.
+    feedback: Option<(Arc<Mutex<feedback::FeedbackStore>>, String)>,
+    /// Shared conversation history, when wired: `(store, session_id)`.
+    ///
+    /// The same store the agent's conversation memory writes to (E33 S33.1),
+    /// so `GET /conversation` serves exactly what the model was given rather
+    /// than a parallel transcript that could drift from it.
+    conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
+    /// Counter behind server-minted operator-message ids (E33 S33.2).
+    ///
+    /// Seeded from the process start time so ids stay distinct across restarts:
+    /// the audit log outlives the process, and a re-read must not conflate a
+    /// message from this run with one from the last.
+    message_seq: std::sync::atomic::AtomicU64,
 }
 
 /// Enforce the exposure policy for a console bind: a network-reachable address
@@ -191,6 +216,50 @@ fn check_bind_policy(addr: std::net::SocketAddr, has_token: bool) -> std::io::Re
 }
 
 /// Map a protocol priority onto the `senses` priority enum.
+/// How often an SSE connection emits a [`OperatorEvent::Heartbeat`], regardless
+/// of how much other traffic is flowing (E33 S33.0).  Also the proxy keep-alive.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a subscriber blocks waiting for the next event before re-checking
+/// the heartbeat cadence.  Short enough that the beat lands on time, long
+/// enough that an idle console costs one wakeup a second.
+const HEARTBEAT_POLL: Duration = Duration::from_secs(1);
+
+/// Longest free-text correction stored with a feedback rating.
+const MAX_FEEDBACK_COMMENT: usize = 2000;
+
+/// Turns returned by `GET /conversation` when no `limit` is given.
+const DEFAULT_CONVERSATION_LIMIT: usize = 100;
+
+/// Hard cap on `GET /conversation?limit=`, so one request cannot serialise a
+/// whole long-lived session into memory.
+const MAX_CONVERSATION_LIMIT: usize = 1000;
+
+/// Longest guidance echo carried in the `OperatorGuidance` audit event.
+///
+/// The echo is what the conversation view renders for the operator's own
+/// message, so the old 200-byte cut silently truncated any message longer than
+/// a short paragraph.  The bound still exists — the feed must not carry a
+/// 64 KiB line — but it is now far above normal use (E33 S33.0).
+const GUIDANCE_ECHO_LIMIT: usize = 4000;
+
+/// Longest client-supplied correlation id accepted on `POST /guidance`.
+const MAX_MESSAGE_ID_LEN: usize = 64;
+
+/// Whether a client-supplied correlation id is acceptable (E33 S33.2).
+///
+/// The id is written to the durable audit log and rendered by every attached
+/// console, so it is untrusted input on the operator channel (threat model §5)
+/// and is restricted to an unambiguous, quoting-free alphabet rather than
+/// being escaped at each of the places it later appears.
+fn valid_message_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_MESSAGE_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn to_sensory_priority(p: Priority) -> SensoryPriority {
     match p {
         Priority::Low => SensoryPriority::Low,
@@ -218,6 +287,18 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            identity: None,
+            feedback: None,
+            conversation: None,
+            // Nanoseconds, not seconds: two servers started in the same
+            // second would otherwise mint the identical `op-…` sequence and
+            // the audit log could not tell their messages apart.
+            message_seq: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+            ),
         }
     }
 
@@ -253,6 +334,39 @@ impl ConsoleServer {
 
     /// Wire in a shared adapter library. When set, `GET /adapters` returns all
     /// registered adapters as JSON (E8 adapter-library dashboard surface).
+    /// Wire in the operator identity so `GET /whoami` is active (E33 S33.5).
+    pub fn with_identity(
+        mut self,
+        registry: Arc<Mutex<users::UserRegistry>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.identity = Some((registry, user_id.into()));
+        self
+    }
+
+    /// Wire in the shared feedback store so `POST /feedback` is active
+    /// (E33 S33.4).  `user_id` is the operator the ratings are attributed to.
+    pub fn with_feedback(
+        mut self,
+        store: Arc<Mutex<feedback::FeedbackStore>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.feedback = Some((store, user_id.into()));
+        self
+    }
+
+    /// Wire in the shared conversation store so `GET /conversation` is active
+    /// (E33 S33.1).  Without it the route answers 404 and a client falls back
+    /// to whatever the event stream replays.
+    pub fn with_conversation(
+        mut self,
+        store: Arc<Mutex<sessions::SessionStore>>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.conversation = Some((store, session_id.into()));
+        self
+    }
+
     pub fn with_adapter_library(
         mut self,
         library: Arc<Mutex<anima_finetune::AdapterLibrary>>,
@@ -387,6 +501,7 @@ impl ConsoleServer {
                                 detail: format!(
                                     "source {ip} locked out after {MAX_AUTH_FAILURES} failed console auth attempts"
                                 ),
+                                message_id: None,
                             });
                         }
                     }
@@ -449,6 +564,13 @@ impl ConsoleServer {
             ),
             ("GET", "/events") => self.serve_events(out, last_event_id),
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
+            // E33 S33.1 — durable conversation history, so a reloaded page
+            // paints the real transcript instead of the replay ring's tail.
+            // E33 S33.5 — who this console is talking as.
+            ("GET", "/whoami") => self.serve_whoami(&mut out),
+            ("GET", "/conversation") => self.serve_conversation(&query, &mut out),
+            // E33 S33.4 — rate a reply from the conversation view.
+            ("POST", "/feedback") => self.serve_feedback(&mut reader, content_length, &mut out),
             // S15.1 — "While you were away" activity digest
             ("GET", "/digest") => self.serve_digest(&mut out),
             // E21 — Prometheus metrics endpoint
@@ -629,8 +751,25 @@ impl ConsoleServer {
             }
         }
 
+        // E33 S33.0: the heartbeat used to ride the receive timeout alone, so a
+        // console attached to a live agent never saw one — the 1 Hz vitals meant
+        // the channel was never idle for the full timeout, and the dashboard's
+        // uptime chip stayed blank forever.  Emit on a wall-clock cadence
+        // instead, independent of how busy the stream is.
+        let mut last_beat = std::time::Instant::now();
         loop {
-            match sub.rx.recv_timeout(Duration::from_secs(15)) {
+            if last_beat.elapsed() >= HEARTBEAT_INTERVAL {
+                last_beat = std::time::Instant::now();
+                // No `id:` line — heartbeats are synthesised per-connection and
+                // must not advance the client's replay cursor.
+                let beat = OperatorEvent::Heartbeat {
+                    uptime_secs: self.hub.uptime_secs(),
+                };
+                if write_sse(&mut out, None, &beat).is_err() {
+                    break;
+                }
+            }
+            match sub.rx.recv_timeout(HEARTBEAT_POLL) {
                 Ok((seq, event)) => {
                     // The same cursor filter as the snapshot: after a restart
                     // the tailer re-reads the audit file from offset 0 and
@@ -645,17 +784,9 @@ impl ConsoleServer {
                         break;
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // Idle keep-alive so proxies and the client don't time out.
-                    // No `id:` line — heartbeats are synthesised per-connection
-                    // and must not advance the client's replay cursor.
-                    let beat = OperatorEvent::Heartbeat {
-                        uptime_secs: self.hub.uptime_secs(),
-                    };
-                    if write_sse(&mut out, None, &beat).is_err() {
-                        break;
-                    }
-                }
+                // Nothing published this tick: fall through to the cadence
+                // check at the top of the loop, which emits the keep-alive.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -704,16 +835,57 @@ impl ConsoleServer {
             );
         };
 
+        // E33 S33.2: every accepted line gets a correlation id — the client's
+        // when it supplied a usable one, otherwise one minted here — so the
+        // reply can be tied back to the message that asked for it.
+        let message_id = match input.message_id.as_deref() {
+            Some(id) if valid_message_id(id) => id.to_string(),
+            Some(_) => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"message_id must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+                );
+            }
+            None => format!(
+                "op-{:x}",
+                self.message_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+        };
+
+        // Same alphabet rule as the correlation id: it is echoed to every
+        // console and must not need escaping at each point of use.
+        let reply_to = match input.reply_to.as_deref() {
+            Some(id) if valid_message_id(id) => Some(id.to_string()),
+            Some(_) => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"reply_to must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+                );
+            }
+            None => None,
+        };
+
         // E6.6: when `force` is set, route through `packetize_text_forced` so
         // vita's somatic loop can record an audited GateOverride::OperatorForced
         // entry.  Policy bounds still apply — the operator is a potentially-
         // compromised channel (threat model §5 in 11-operator-interface.md).
         let result = if let Some(reason) = input.force.as_deref() {
-            self.bridge
-                .packetize_text_forced(input.text.clone(), reason)
+            self.bridge.packetize_text_forced_tagged(
+                input.text.clone(),
+                reason,
+                Some(message_id.clone()),
+            )
         } else {
-            self.bridge
-                .packetize_text_checked(input.text.clone(), to_sensory_priority(input.priority))
+            self.bridge.packetize_text_tagged(
+                input.text.clone(),
+                to_sensory_priority(input.priority),
+                Some(message_id.clone()),
+            )
         };
 
         match result {
@@ -721,23 +893,27 @@ impl ConsoleServer {
                 // Echo the accepted guidance into the event feed so every
                 // connected operator sees what was injected (and by implication,
                 // that it is now subject to the gate, not executed directly).
-                let detail = if let Some(reason) = input.force.as_deref() {
-                    format!(
-                        "[FORCED:Critical] (Reason: {reason}) {}",
-                        truncate(&input.text, 200)
-                    )
-                } else {
-                    format!(
-                        "[{}] {}",
-                        priority_label(to_sensory_priority(input.priority)),
-                        truncate(&input.text, 200)
-                    )
-                };
-                self.hub.publish(OperatorEvent::Audit {
-                    kind: "OperatorGuidance".to_string(),
-                    detail,
+                //
+                // E33 S33.2: the typed `Accepted` event replaces the free-text
+                // `OperatorGuidance` audit echo.  It carries the correlation id
+                // and the untruncated text, so a console renders the operator's
+                // own message without reparsing a "[Priority] …" string, and
+                // can then follow that message through gate, task and reply.
+                let forced = input.force.is_some();
+                self.hub.publish(OperatorEvent::Accepted {
+                    message_id: message_id.clone(),
+                    priority: if forced {
+                        Priority::Critical
+                    } else {
+                        input.priority
+                    },
+                    forced,
+                    force_reason: input.force.clone(),
+                    reply_to,
+                    text: truncate(&input.text, GUIDANCE_ECHO_LIMIT),
                 });
-                write_json(out, 202, "Accepted", br#"{"ok":true}"#)
+                let body = format!(r#"{{"ok":true,"message_id":{}}}"#, json_string(&message_id));
+                write_json(out, 202, "Accepted", body.as_bytes())
             }
             Err(SensoryBridgeError::PolicyViolation { reason }) => {
                 let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&reason));
@@ -748,6 +924,224 @@ impl ConsoleServer {
                 400,
                 "Bad Request",
                 br#"{"ok":false,"error":"invalid input"}"#,
+            ),
+        }
+    }
+
+    /// Serve the operator's identity as JSON (E33 S33.5).
+    ///
+    /// `authenticated` reports whether a bearer token gates this server at
+    /// all — a request that reached this handler has already satisfied it.  It
+    /// is deliberately not a claim that the *person* was authenticated: a
+    /// shared token identifies a console, not a human, which is why the trust
+    /// tier comes from the registry rather than from the request.
+    fn serve_whoami(&self, out: &mut TcpStream) -> std::io::Result<()> {
+        let Some((registry, user_id)) = &self.identity else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"error":"identity not available"}"#,
+            );
+        };
+        let (display_name, trust_tier, known) = match registry.lock() {
+            Ok(reg) => match reg.get(user_id) {
+                Some(record) => (
+                    record.profile.display_name.clone(),
+                    record.profile.trust_tier.as_str().to_string(),
+                    true,
+                ),
+                None => (user_id.clone(), "unknown".to_string(), false),
+            },
+            Err(_) => {
+                return write_json(
+                    out,
+                    500,
+                    "Internal Server Error",
+                    br#"{"error":"user registry lock poisoned"}"#,
+                );
+            }
+        };
+        let body = format!(
+            r#"{{"user_id":{},"display_name":{},"trust_tier":{},"registered":{},"token_required":{}}}"#,
+            json_string(user_id),
+            json_string(&display_name),
+            json_string(&trust_tier),
+            known,
+            self.config.token.is_some(),
+        );
+        write_json(out, 200, "OK", body.as_bytes())
+    }
+
+    /// Record operator feedback on one reply (E33 S33.4).
+    ///
+    /// Body: `{"task_id": "<id>", "rating": "up"|"down", "comment": "…"}`.
+    /// `task_id` identifies the invocation being rated and is echoed into the
+    /// durable record, so a correction can be traced back to the exact answer.
+    fn serve_feedback(
+        &self,
+        reader: &mut BufReader<TcpStream>,
+        content_length: usize,
+        out: &mut TcpStream,
+    ) -> std::io::Result<()> {
+        let Some((store, user_id)) = &self.feedback else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"ok":false,"error":"feedback not available"}"#,
+            );
+        };
+
+        const MAX_BODY: usize = 8 * 1024;
+        if content_length > MAX_BODY {
+            return write_json(
+                out,
+                413,
+                "Payload Too Large",
+                br#"{"ok":false,"error":"request body exceeds 8 KiB limit"}"#,
+            );
+        }
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body)?;
+        let Ok(body) = String::from_utf8(body) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"request body is not valid UTF-8"}"#,
+            );
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"request body is not valid JSON"}"#,
+            );
+        };
+
+        let Some(task_id) = value.get("task_id").and_then(|v| v.as_str()) else {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"task_id is required"}"#,
+            );
+        };
+        // Same alphabet rule as the correlation ids: this reaches the durable
+        // store and every surface that renders it.
+        if !valid_message_id(task_id) {
+            return write_json(
+                out,
+                400,
+                "Bad Request",
+                br#"{"ok":false,"error":"task_id must be 1-64 chars of [A-Za-z0-9_-]"}"#,
+            );
+        }
+
+        let rating = match value.get("rating").and_then(|v| v.as_str()) {
+            Some("up") => feedback::FeedbackRating::ThumbsUp,
+            Some("down") => feedback::FeedbackRating::ThumbsDown,
+            _ => {
+                return write_json(
+                    out,
+                    400,
+                    "Bad Request",
+                    br#"{"ok":false,"error":"rating must be 'up' or 'down'"}"#,
+                );
+            }
+        };
+
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut record = feedback::FeedbackRecord::new(user_id, task_id, rating, now_ns);
+        if let Some(comment) = value
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .filter(|c| !c.trim().is_empty())
+        {
+            record = record.with_correction(truncate(comment, MAX_FEEDBACK_COMMENT));
+        }
+
+        let mut guard = match store.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return write_json(
+                    out,
+                    500,
+                    "Internal Server Error",
+                    br#"{"ok":false,"error":"feedback store lock poisoned"}"#,
+                );
+            }
+        };
+        match guard.record(record).and_then(|()| {
+            // `record` only mutates memory; without this the rating is lost on
+            // restart and invisible to `anima feedback`, while the caller has
+            // already been told it was accepted.
+            guard.flush()
+        }) {
+            Ok(()) => write_json(out, 202, "Accepted", br#"{"ok":true}"#),
+            Err(e) => {
+                let body = format!(r#"{{"ok":false,"error":{}}}"#, json_string(&e.to_string()));
+                write_json(out, 500, "Internal Server Error", body.as_bytes())
+            }
+        }
+    }
+
+    /// Serve the durable conversation history as JSON (E33 S33.1).
+    ///
+    /// `?limit=N` returns the newest `N` turns (default
+    /// [`DEFAULT_CONVERSATION_LIMIT`], capped at [`MAX_CONVERSATION_LIMIT`] so
+    /// one request cannot serialise an entire long-lived session).  Turns come
+    /// back oldest-first, the order a transcript is read in.
+    fn serve_conversation(&self, query: &str, out: &mut TcpStream) -> std::io::Result<()> {
+        let Some((store, session_id)) = &self.conversation else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"error":"conversation history not available"}"#,
+            );
+        };
+        let limit = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("limit="))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CONVERSATION_LIMIT)
+            .clamp(1, MAX_CONVERSATION_LIMIT);
+
+        let turns = {
+            let guard = match store.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    return write_json(
+                        out,
+                        500,
+                        "Internal Server Error",
+                        br#"{"error":"session store lock poisoned"}"#,
+                    );
+                }
+            };
+            match guard.get(session_id) {
+                // Newest `limit` turns, still in chronological order.
+                Some(session) => {
+                    let skip = session.turns.len().saturating_sub(limit);
+                    session.turns[skip..].to_vec()
+                }
+                None => Vec::new(),
+            }
+        };
+
+        match serde_json::to_vec(&turns) {
+            Ok(body) => write_json(out, 200, "OK", &body),
+            Err(_) => write_json(
+                out,
+                500,
+                "Internal Server Error",
+                br#"{"error":"serialisation failed"}"#,
             ),
         }
     }
@@ -943,15 +1337,6 @@ fn read_audit_entries(path: &std::path::Path) -> Vec<vita::AuditEntry> {
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str(&l).ok())
         .collect()
-}
-
-fn priority_label(p: SensoryPriority) -> &'static str {
-    match p {
-        SensoryPriority::Low => "Low",
-        SensoryPriority::Normal => "Normal",
-        SensoryPriority::High => "High",
-        SensoryPriority::Critical => "Critical",
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1166,6 +1551,523 @@ mod tests {
     #[test]
     fn bind_allows_loopback_without_token() {
         assert!(server_with("127.0.0.1:0", None).bind().is_ok());
+    }
+
+    // ── E33 S33.0 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn long_guidance_is_echoed_past_the_old_two_hundred_byte_cut() {
+        // The echo is what the conversation view renders as the operator's own
+        // message, so a 200-byte cut silently truncated anything longer than a
+        // short paragraph.
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let text = "y".repeat(1500);
+        let body = format!(r#"{{"text":"{text}","priority":"Normal"}}"#);
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+
+        let echo = sub
+            .rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("guidance echo published");
+        match echo {
+            (_, OperatorEvent::Accepted { text: echoed, .. }) => assert!(
+                echoed.contains(&"y".repeat(1500)),
+                "echo truncated at {} chars",
+                echoed.len()
+            ),
+            other => panic!("expected an Accepted echo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guidance_echo_is_still_bounded_so_the_feed_cannot_carry_a_64_kib_line() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let text = "z".repeat(GUIDANCE_ECHO_LIMIT + 500);
+        let body = format!(r#"{{"text":"{text}","priority":"Normal"}}"#);
+        let _ = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Accepted { text: echoed, .. }) => assert!(
+                echoed.len() < GUIDANCE_ECHO_LIMIT + 200,
+                "echo unbounded at {} chars",
+                echoed.len()
+            ),
+            other => panic!("expected an Accepted echo, got {other:?}"),
+        }
+    }
+
+    // ── E33 S33.5 — operator identity ─────────────────────────────────────
+
+    fn start_with_identity(register: bool, token: Option<&str>) -> std::net::SocketAddr {
+        let mut registry = users::UserRegistry::in_memory();
+        if register {
+            let mut profile =
+                users::UserProfile::new("user:operator", "Dana", "console", 1_000_000);
+            profile.trust_tier = users::TrustTier::Trusted;
+            registry.register(profile).unwrap();
+        }
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: token.map(str::to_string),
+            },
+        )
+        .with_identity(Arc::new(Mutex::new(registry)), "user:operator")
+        .spawn()
+        .expect("spawn")
+        .0
+    }
+
+    fn get_whoami(addr: std::net::SocketAddr, auth: &str) -> String {
+        http_request(
+            addr,
+            &format!("GET /whoami HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"),
+        )
+    }
+
+    #[test]
+    fn whoami_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        assert!(get_whoami(addr, "").contains("404 Not Found"));
+    }
+
+    #[test]
+    fn whoami_names_the_registered_operator_and_their_trust_tier() {
+        let addr = start_with_identity(true, None);
+        let resp = get_whoami(addr, "");
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        assert!(resp.contains(r#""display_name":"Dana""#), "resp: {resp}");
+        assert!(resp.contains(r#""trust_tier":"trusted""#), "resp: {resp}");
+        assert!(resp.contains(r#""registered":true"#), "resp: {resp}");
+        // Loopback with no token configured.
+        assert!(resp.contains(r#""token_required":false"#), "resp: {resp}");
+    }
+
+    #[test]
+    fn whoami_reports_an_unregistered_operator_without_inventing_trust() {
+        let addr = start_with_identity(false, None);
+        let resp = get_whoami(addr, "");
+        assert!(resp.contains(r#""registered":false"#), "resp: {resp}");
+        assert!(
+            resp.contains(r#""trust_tier":"unknown""#),
+            "an unregistered operator must not be granted a tier: {resp}"
+        );
+    }
+
+    #[test]
+    fn whoami_is_behind_the_bearer_token_like_every_other_route() {
+        let addr = start_with_identity(true, Some("sekret"));
+        assert!(get_whoami(addr, "").contains("401 Unauthorized"));
+        let ok = get_whoami(addr, "Authorization: Bearer sekret\r\n");
+        assert!(ok.contains("200 OK"), "resp: {ok}");
+        assert!(ok.contains(r#""token_required":true"#), "resp: {ok}");
+    }
+
+    #[test]
+    fn whoami_body_is_valid_json() {
+        let addr = start_with_identity(true, None);
+        let resp = get_whoami(addr, "");
+        let payload = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(payload).is_ok(),
+            "not valid JSON: {payload}"
+        );
+    }
+
+    // ── E33 S33.4 — feedback ──────────────────────────────────────────────
+
+    fn start_with_feedback() -> (std::net::SocketAddr, Arc<Mutex<feedback::FeedbackStore>>) {
+        let store = Arc::new(Mutex::new(feedback::FeedbackStore::in_memory()));
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let addr = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_feedback(Arc::clone(&store), "user:operator")
+        .spawn()
+        .expect("spawn")
+        .0;
+        (addr, store)
+    }
+
+    fn post_feedback(addr: std::net::SocketAddr, body: &str) -> String {
+        http_request(
+            addr,
+            &format!(
+                "POST /feedback HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        )
+    }
+
+    #[test]
+    fn feedback_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = post_feedback(addr, r#"{"task_id":"7","rating":"up"}"#);
+        assert!(resp.contains("404 Not Found"), "resp: {resp}");
+    }
+
+    #[test]
+    fn a_rating_reaches_the_durable_store() {
+        let (addr, store) = start_with_feedback();
+        let resp = post_feedback(addr, r#"{"task_id":"7","rating":"up"}"#);
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        let guard = store.lock().unwrap();
+        let records = guard.list();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].invocation_id, "7");
+        assert_eq!(records[0].rating, feedback::FeedbackRating::ThumbsUp);
+    }
+
+    #[test]
+    fn a_comment_is_stored_as_a_correction() {
+        let (addr, store) = start_with_feedback();
+        let resp = post_feedback(
+            addr,
+            r#"{"task_id":"7","rating":"down","comment":"it missed the second question"}"#,
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        let guard = store.lock().unwrap();
+        assert!(guard.list()[0].has_correction());
+    }
+
+    #[test]
+    fn malformed_feedback_is_rejected_with_a_parseable_error() {
+        let (addr, _store) = start_with_feedback();
+        for body in [
+            r#"{"rating":"up"}"#,                     // no task_id
+            r#"{"task_id":"7"}"#,                     // no rating
+            r#"{"task_id":"7","rating":"sideways"}"#, // unknown rating
+            r#"{"task_id":"bad id","rating":"up"}"#,  // hostile id
+            r#"not json at all"#,
+        ] {
+            let resp = post_feedback(addr, body);
+            assert!(resp.contains("400 Bad Request"), "accepted {body}: {resp}");
+            // Every error body must itself be valid JSON — a client that
+            // parses the response must not choke on the rejection.
+            let payload = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(payload).is_ok(),
+                "error body is not valid JSON: {payload}"
+            );
+        }
+    }
+
+    // ── E33 S33.1 — conversation history ──────────────────────────────────
+
+    fn start_with_conversation(turns: usize) -> std::net::SocketAddr {
+        use sessions::{ConversationRole, ConversationTurn, SessionRecord, SessionStore};
+        let mut store = SessionStore::in_memory();
+        store
+            .insert(SessionRecord::new("sess-1", "user:operator", "anima"))
+            .unwrap();
+        for i in 0..turns {
+            let role = if i % 2 == 0 {
+                ConversationRole::User
+            } else {
+                ConversationRole::Assistant
+            };
+            store
+                .append_turn(
+                    "sess-1",
+                    ConversationTurn::new(0, role, format!("turn {i}")),
+                )
+                .unwrap();
+        }
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let server = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_conversation(Arc::new(Mutex::new(store)), "sess-1");
+        server.spawn().expect("spawn").0
+    }
+
+    #[test]
+    fn conversation_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("404 Not Found"), "resp: {resp}");
+    }
+
+    #[test]
+    fn conversation_serves_turns_oldest_first() {
+        let addr = start_with_conversation(4);
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        let first = body.find("turn 0").expect("oldest turn present");
+        let last = body.find("turn 3").expect("newest turn present");
+        assert!(first < last, "turns are not in chronological order: {body}");
+        assert!(body.contains(r#""role":"user""#), "roles missing: {body}");
+    }
+
+    #[test]
+    fn conversation_limit_returns_the_newest_turns() {
+        let addr = start_with_conversation(10);
+        let resp = http_request(
+            addr,
+            "GET /conversation?limit=3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.contains("turn 9"), "newest turn missing: {body}");
+        assert!(body.contains("turn 7"), "third-newest missing: {body}");
+        assert!(
+            !body.contains("turn 6"),
+            "limit not applied from the newest end: {body}"
+        );
+    }
+
+    #[test]
+    fn conversation_limit_is_capped_and_a_garbage_limit_falls_back() {
+        // A caller must not be able to ask the server to serialise an entire
+        // long-lived session, nor crash it with a non-numeric limit.
+        let addr = start_with_conversation(5);
+        for q in ["?limit=99999999", "?limit=abc", "?limit=0", "?limit=-4"] {
+            let resp = http_request(
+                addr,
+                &format!("GET /conversation{q} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(resp.contains("200 OK"), "limit {q} failed: {resp}");
+        }
+    }
+
+    #[test]
+    fn conversation_for_an_unknown_session_is_empty_not_an_error() {
+        use sessions::SessionStore;
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        let addr = ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: None,
+            },
+        )
+        .with_conversation(Arc::new(Mutex::new(SessionStore::in_memory())), "missing")
+        .spawn()
+        .expect("spawn")
+        .0;
+        let resp = http_request(
+            addr,
+            "GET /conversation HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        assert!(
+            resp.trim_end().ends_with("[]"),
+            "expected empty list: {resp}"
+        );
+    }
+
+    // ── E33 S33.2 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn accepted_guidance_reports_a_correlation_id_the_caller_can_follow() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"hello","priority":"Normal"}"#;
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        assert!(
+            resp.contains(r#""message_id":"op-"#),
+            "response carries no minted id: {resp}"
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Accepted { message_id, .. }) => {
+                assert!(resp.contains(&message_id), "id in body differs from event")
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_supplied_correlation_id_is_honoured_and_reaches_the_packet() {
+        let (addr, hub, bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"hello","priority":"High","message_id":"client-42"}"#;
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("202 Accepted"), "resp: {resp}");
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (_, OperatorEvent::Accepted { message_id, .. }) => {
+                assert_eq!(message_id, "client-42")
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+        let packet = bridge.next_prioritized_packet().expect("packet enqueued");
+        assert_eq!(packet.message_id.as_deref(), Some("client-42"));
+    }
+
+    #[test]
+    fn a_hostile_correlation_id_is_rejected_rather_than_written_to_the_audit_log() {
+        // The id lands in the durable audit trail and in every attached
+        // console's DOM, so the operator channel does not get to choose its
+        // alphabet (threat model §5).
+        let (addr, _hub, _bridge) = start();
+        for hostile in [
+            r#"<script>alert(1)</script>"#,
+            r#"a"b"#,
+            "",
+            "x x",
+            "../../etc/passwd",
+        ] {
+            let body = format!(
+                r#"{{"text":"hello","message_id":"{}"}}"#,
+                hostile.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            let resp = http_request(
+                addr,
+                &format!(
+                    "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                ),
+            );
+            assert!(
+                resp.contains("400 Bad Request"),
+                "accepted hostile id {hostile:?}: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_correlation_id_is_rejected() {
+        let (addr, _hub, _bridge) = start();
+        let body = format!(
+            r#"{{"text":"hello","message_id":"{}"}}"#,
+            "a".repeat(MAX_MESSAGE_ID_LEN + 1)
+        );
+        let resp = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        assert!(resp.contains("400 Bad Request"), "resp: {resp}");
+    }
+
+    #[test]
+    fn forced_guidance_is_accepted_as_critical_with_its_reason() {
+        let (addr, hub, _bridge) = start();
+        let sub = hub.subscribe();
+        let body = r#"{"text":"check disk","priority":"Low","force":"operator emergency"}"#;
+        let _ = http_request(
+            addr,
+            &format!(
+                "POST /guidance HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            ),
+        );
+        match sub.rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            (
+                _,
+                OperatorEvent::Accepted {
+                    priority,
+                    forced,
+                    force_reason,
+                    ..
+                },
+            ) => {
+                assert!(forced);
+                // A forced line is enqueued at Critical whatever the client asked for.
+                assert_eq!(priority, Priority::Critical);
+                assert_eq!(force_reason.as_deref(), Some("operator emergency"));
+            }
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_arrives_on_a_busy_stream_not_only_an_idle_one() {
+        // Regression: the beat used to ride the receive timeout alone, so the
+        // 1 Hz vitals of a live agent starved it and the uptime chip never
+        // painted.  Publish continuously and assert a beat still lands.
+        let (addr, hub, _bridge) = start();
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        s.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3)).unwrap();
+
+        let pump = std::thread::spawn(move || {
+            for i in 0..(HEARTBEAT_INTERVAL.as_secs() * 4 + 8) {
+                hub.publish(OperatorEvent::Audit {
+                    kind: "Noise".into(),
+                    detail: format!("tick {i}"),
+                    message_id: None,
+                });
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+
+        let mut reader = BufReader::new(s);
+        let deadline = std::time::Instant::now() + HEARTBEAT_INTERVAL * 3;
+        let mut saw_beat = false;
+        while std::time::Instant::now() < deadline {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            if line.contains("\"Heartbeat\"") {
+                saw_beat = true;
+                break;
+            }
+        }
+        let _ = pump.join();
+        assert!(saw_beat, "no heartbeat observed while events were flowing");
     }
 
     #[test]
@@ -1474,6 +2376,7 @@ mod tests {
         // Give the connection thread time to subscribe, then publish.
         std::thread::sleep(Duration::from_millis(100));
         hub.publish(OperatorEvent::AgentMessage {
+            message_id: None,
             task_id: 1,
             tokens: 3,
             text: "hello from the agent".into(),
@@ -1513,6 +2416,7 @@ mod tests {
         // Three feed events land in the replay ring as seqs 0, 1, 2.
         for (i, word) in ["alpha", "beta", "gamma"].iter().enumerate() {
             hub.publish(OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: i as u64,
                 tokens: 1,
                 text: (*word).into(),
@@ -1579,6 +2483,7 @@ mod tests {
         hub.publish_at(
             5,
             OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: 1,
                 tokens: 1,
                 text: "historical-replay".into(),
@@ -1587,6 +2492,7 @@ mod tests {
         hub.publish_at(
             11,
             OperatorEvent::AgentMessage {
+                message_id: None,
                 task_id: 2,
                 tokens: 1,
                 text: "fresh-line".into(),

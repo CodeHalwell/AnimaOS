@@ -41,3 +41,7 @@ webhooks = { path = "../../crates/webhooks" }
 diagnostics = { path = "../../crates/diagnostics" }
 workspace = { path = "../../crates/workspace" }
 jobs = { path = "../../crates/jobs" }
+
+[dev-dependencies]
+# Scratch directories for the conversation-memory tests (E33 S33.1).
+tempfile = "3"

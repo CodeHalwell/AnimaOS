@@ -10,6 +10,8 @@ pub mod audit;
 #[cfg(feature = "std")]
 pub mod consolidation;
 #[cfg(feature = "std")]
+pub mod conversation;
+#[cfg(feature = "std")]
 pub mod cortex_bridge;
 #[cfg(feature = "std")]
 pub mod defence_bridge;
@@ -36,6 +38,8 @@ pub mod sleep;
 pub mod watchdog;
 
 pub use audit::{AuditEntry, AuditLog};
+#[cfg(feature = "std")]
+pub use conversation::ConversationMemory;
 #[cfg(feature = "std")]
 pub use cortex_bridge::{
     archive_episode, cortex_handle, ChatCortexBridge, CortexBackend, CortexError, CortexHandle,
@@ -103,6 +107,8 @@ pub use watchdog::{AgentSnapshot, CognitiveWatchdog, WatchdogConfig, WatchdogTri
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(not(feature = "std"))]
+use alloc::collections::BTreeSet;
+#[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -114,6 +120,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
+#[cfg(feature = "std")]
+use std::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -281,6 +289,17 @@ pub struct Subsystems {
     /// call and the `&self` `decide_motivated` call can both go through it.
     #[cfg(feature = "std")]
     pub motivated_gate: Option<Arc<Mutex<MotivatedGate>>>,
+    /// Conversation memory for operator-originated tasks (E33 S33.1).
+    ///
+    /// `None` by default, in which case a task's prompt is the raw sensory
+    /// text and the loop behaves exactly as it did before this existed.  When
+    /// installed, each dispatch is composed through it and each completion
+    /// recorded back, so the agent answers in the context of what was already
+    /// said.  Shared rather than owned so the surface that supplies the
+    /// history — the hosted kernel's session store — can also serve it to an
+    /// operator console.
+    #[cfg(feature = "std")]
+    pub conversation: Option<Arc<Mutex<dyn ConversationMemory>>>,
     /// Optional E9 S9.5 per-tier backend map (router-aware dispatch).
     ///
     /// `None` by default — when absent, every task dispatches through the single
@@ -383,6 +402,29 @@ pub struct LifecycleManager {
     /// loop is called multiple times on the same `LifecycleManager`.
     /// Starts at `2^63` to avoid collisions with caller-supplied task IDs.
     next_sensory_task_id: u64,
+    /// Most recent interoceptive reading, for gate decisions taken at sensory
+    /// intake (E33 S33.6).
+    ///
+    /// The snapshot is sampled once a second in step 4 of the loop, while
+    /// intake runs every iteration — so a gate evaluated here uses a reading at
+    /// most a second old.  Neutral until the first sample, which is the same
+    /// assumption the operator-force path has always made.
+    last_signals: HomeostaticSignals,
+    /// Whether ordinary (un-forced) operator guidance is arbitrated by the
+    /// Striatal Gate (E33 S33.6).
+    ///
+    /// `true` matches what `docs/11-operator-interface.md` has always claimed
+    /// and what the dashboard tells the operator: guidance "enters the
+    /// prioritisation queue and is weighted against the agent's current state
+    /// by the Striatal Gate".  Set `false` to restore the older behaviour in
+    /// which only forced packets were evaluated and everything else was
+    /// admitted unconditionally.
+    pub gate_operator_input: bool,
+    /// Task ids that came from an operator packet (E33 S33.1/S33.6).
+    ///
+    /// Drained at dispatch.  Bounded by [`MAX_TRACKED_OPERATOR_TASKS`] so a
+    /// task admitted but never dispatched — shutdown mid-flight — cannot leak.
+    operator_tasks: BTreeSet<u64>,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
@@ -469,6 +511,9 @@ impl LifecycleManager {
             audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             next_sensory_task_id: 1u64 << 63,
+            operator_tasks: BTreeSet::new(),
+            last_signals: HomeostaticSignals::neutral(),
+            gate_operator_input: true,
             max_iterations,
             iterations: 0,
             last_pressure_level: memory::MemoryPressureEvent::Normal,
@@ -569,6 +614,30 @@ impl LifecycleManager {
     #[cfg(feature = "std")]
     pub fn enable_skill_reflection(&mut self, registry: SkillRegistry) {
         self.subsystems.skill_registry = Some(Arc::new(Mutex::new(registry)));
+    }
+
+    /// Install conversation memory for operator-originated tasks (E33 S33.1).
+    ///
+    /// Without this the loop is unchanged: a task's prompt is the raw sensory
+    /// text.  With it, each dispatch is composed through `memory` and each
+    /// completion recorded back, so the agent answers in the context of what
+    /// has already been said.
+    #[cfg(feature = "std")]
+    pub fn enable_conversation(&mut self, memory: Arc<Mutex<dyn ConversationMemory>>) {
+        self.subsystems.conversation = Some(memory);
+    }
+
+    /// Builder variant of [`LifecycleManager::enable_conversation`].
+    #[cfg(feature = "std")]
+    pub fn with_conversation(mut self, memory: Arc<Mutex<dyn ConversationMemory>>) -> Self {
+        self.enable_conversation(memory);
+        self
+    }
+
+    /// `true` when conversation memory is installed.
+    #[cfg(feature = "std")]
+    pub fn conversation_enabled(&self) -> bool {
+        self.subsystems.conversation.is_some()
     }
 
     /// Builder variant of [`LifecycleManager::enable_skill_reflection`]
@@ -1032,6 +1101,12 @@ fn priority_to_mlfq_tier(priority: SensoryPriority) -> u8 {
     }
 }
 
+/// Upper bound on operator-originated task ids awaiting dispatch (E33 S33.1).
+///
+/// Drained at dispatch. A task admitted but never dispatched — shutdown
+/// mid-flight — must not leak an entry.
+const MAX_TRACKED_OPERATOR_TASKS: usize = 256;
+
 /// Autonomous lifecycle control loop.
 ///
 /// Each iteration:
@@ -1103,16 +1178,55 @@ pub async fn somatic_execution_loop(
             let task_id = lifecycle.next_sensory_task_id;
             lifecycle.next_sensory_task_id = lifecycle.next_sensory_task_id.wrapping_add(1);
 
-            if let Some(reason) = pkt.gate_override_reason.as_deref() {
+            // E33 S33.2: tie this task to the operator message that caused it,
+            // emitted *first* so every later entry for the task — the gate
+            // decision included, which is recorded here at intake rather than
+            // at dispatch — can be attributed to that message by a log reader.
+            if let Some(message_id) = pkt.message_id.as_deref() {
+                lifecycle.audit.push(AuditEntry::OperatorMessageLinked {
+                    agent_id: lifecycle.agent_id.clone(),
+                    task_id,
+                    message_id: message_id.to_owned(),
+                });
+            }
+
+            // E33 S33.6: every operator packet is arbitrated, not just the
+            // forced ones.  Before this, only `force` reached the gate and
+            // everything else was admitted unconditionally — so the console's
+            // promise that guidance "is arbitrated by the Striatal Gate" was
+            // true of one path in four.  An un-forced packet now carries no
+            // override, which means the gate can decline it: under real
+            // thermal, memory or budget stress the agent defers ordinary
+            // chatter while still taking a Critical message.
+            // Only a human's packet is arbitrated as an operator command.
+            // `PrioritizedPacket::origin` is what makes that decidable here:
+            // without it, a sensor reading or any synthetic feed would be
+            // scored as `SemanticClass::OperatorCommand` and could be dropped
+            // under pressure, with no operator behind it to notice.
+            let from_operator = pkt.origin.is_operator();
+            let gate_this = pkt.gate_override_reason.is_some()
+                || (from_operator && lifecycle.gate_operator_input);
+            if gate_this {
                 let event = EventFeatures {
-                    urgency: 1.0,
+                    // Urgency is the operator's own priority tag; novelty has
+                    // no signal for free text, so it sits at the midpoint —
+                    // the same assumption the forced path has always made.
+                    urgency: match pkt.priority {
+                        senses::SensoryPriority::Low => 0.25,
+                        senses::SensoryPriority::Normal => 0.50,
+                        senses::SensoryPriority::High => 0.75,
+                        senses::SensoryPriority::Critical => 1.0,
+                    },
                     novelty: 0.5,
                     semantic_class: SemanticClass::OperatorCommand,
                     user_facing: true,
                 };
-                let signals = HomeostaticSignals::neutral();
-                let override_hint = GateOverride::OperatorForced {
-                    reason: reason.to_owned(),
+                let signals = lifecycle.last_signals.clone();
+                let override_hint = match pkt.gate_override_reason.as_deref() {
+                    Some(reason) => GateOverride::OperatorForced {
+                        reason: reason.to_owned(),
+                    },
+                    None => GateOverride::None,
                 };
                 let event_id = format!("sensory-{task_id}");
 
@@ -1178,6 +1292,21 @@ pub async fn somatic_execution_loop(
                 }
             }
 
+            // E33 S33.1/S33.6: only an operator-originated task belongs in
+            // the conversation.  The agenda also carries autonomous work —
+            // prospective intentions injected below, and anything a caller
+            // pushes directly — which must never be recorded as operator
+            // speech or fed back as conversational context.
+            if from_operator {
+                if lifecycle.operator_tasks.len() >= MAX_TRACKED_OPERATOR_TASKS {
+                    // Task ids are monotonic, so the lowest is the stalest.
+                    if let Some(oldest) = lifecycle.operator_tasks.iter().next().copied() {
+                        lifecycle.operator_tasks.remove(&oldest);
+                    }
+                }
+                lifecycle.operator_tasks.insert(task_id);
+            }
+
             lifecycle.agenda.push(Task::new(task_id, tier, prompt));
         }
 
@@ -1229,6 +1358,10 @@ pub async fn somatic_execution_loop(
                     now_ns,
                     &NullPublisher,
                 );
+                // E33 S33.6: keep the reading for the next iteration's intake
+                // gate, so it weighs guidance against the agent's real state
+                // rather than an assumed-idle one.
+                lifecycle.last_signals = HomeostaticSignals::from_interoceptive(&signals);
                 lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
                     agent_id: lifecycle.agent_id.clone(),
                     tick_ns: now_ns,
@@ -1294,6 +1427,35 @@ pub async fn somatic_execution_loop(
                 prompt,
             });
 
+            // Kept for the help request below: the operator's own words, not
+            // the composed context, are what a question should quote back.
+            #[cfg(feature = "std")]
+            let prompt_for_help = task.prompt.clone();
+            #[cfg(feature = "std")]
+            let mut help_request: Option<AuditEntry> = None;
+            #[cfg(feature = "std")]
+            let mut help_question: Option<String> = None;
+
+            // E33 S33.1: wrap the human's text in conversational context on the
+            // way to the backend.  Deliberately *after* the TaskStarted entry
+            // above, so the audit log — and every console built on it — keeps
+            // showing what the operator actually said rather than the whole
+            // composed context repeated on each turn.
+            // Drained on both targets so the set cannot grow on the
+            // bare-metal path; only the std build has a conversation to use it.
+            #[cfg_attr(not(feature = "std"), allow(unused_variables))]
+            let operator_task = lifecycle.operator_tasks.remove(&task_id);
+            #[cfg(feature = "std")]
+            let task = {
+                let mut task = task;
+                if operator_task {
+                    if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                        task.prompt = lock_recover(&memory).compose(task_id, &task.prompt);
+                    }
+                }
+                task
+            };
+
             let cancel = lifecycle.install_fresh_cancel();
             // E9 S9.5: when a per-tier backend map is installed, resolve the
             // dispatch backend for this task's cost-class tier and record the
@@ -1338,6 +1500,39 @@ pub async fn somatic_execution_loop(
                             // dispatch outcome (success) as a calibration point.
                             let score = ct.estimate_confidence(&outcome.response, 0);
                             ct.record_outcome(score.value, true);
+
+                            // E33 S33.3: a completion the agent is not
+                            // confident in becomes a question to the operator
+                            // rather than a silently shaky answer.  The
+                            // HelpRequest type has existed since E14; nothing
+                            // ever surfaced it to a human.
+                            if score.asks_for_help {
+                                let help = crate::metacognition::HelpRequest::from_low_confidence(
+                                    &prompt_for_help,
+                                    &score,
+                                );
+                                // The operator-facing wording, not the internal
+                                // diagnostic — an answer must arrive with the
+                                // question the human actually saw in context.
+                                help_question = Some(help.operator_question());
+                                help_request = Some(AuditEntry::HelpRequested {
+                                    agent_id: agent_id.clone(),
+                                    task_id,
+                                    task_description: help.task_description,
+                                    confidence: help.confidence,
+                                    reason: help.reason,
+                                });
+                            }
+                        }
+                    }
+
+                    // E33 S33.1: the agent's turn in the conversation.  Errors
+                    // are absorbed by the implementation — the lifecycle must
+                    // not stall because history could not be written.
+                    #[cfg(feature = "std")]
+                    if operator_task {
+                        if let Some(memory) = lifecycle.subsystems.conversation.clone() {
+                            lock_recover(&memory).record_reply(task_id, &outcome.response);
                         }
                     }
 
@@ -1347,6 +1542,23 @@ pub async fn somatic_execution_loop(
                         tokens_emitted: outcome.tokens_emitted,
                         response: outcome.response,
                     });
+
+                    // E33 S33.3: after the reply, so an operator reading the
+                    // log (or the console) sees the answer and then the doubt
+                    // about it, in that order.
+                    #[cfg(feature = "std")]
+                    if let Some(entry) = help_request.filter(|_| operator_task) {
+                        // The question is the agent's own turn: an answer then
+                        // arrives with it already in context, so no separate
+                        // question-tracking state is needed.
+                        if let (Some(memory), Some(question)) = (
+                            lifecycle.subsystems.conversation.clone(),
+                            help_question.as_deref(),
+                        ) {
+                            lock_recover(&memory).record_question(task_id, question);
+                        }
+                        lifecycle.audit.push(entry);
+                    }
                 }
                 Err(error) => {
                     lifecycle.audit.push(AuditEntry::TaskFailed {
@@ -1590,6 +1802,246 @@ mod tests {
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
         assert_eq!(m.scheduler.dispatched_tasks[0].mlfq_level, 2);
+    }
+
+    #[test]
+    fn a_low_confidence_completion_asks_the_operator_rather_than_staying_quiet() {
+        // E33 S33.3: the HelpRequest type has existed since E14 but nothing
+        // ever surfaced it.  A hedging, short answer must now reach the
+        // operator as a question — after the reply it is about.
+        let mut m = manager("agent-help", Some(2));
+        m.enable_confidence(metacognition::ConfidenceTracker::default());
+        // The mock backend echoes the prompt, so this is also the response:
+        // short and full of uncertainty markers.
+        m.senses
+            .packetize_text_checked("unsure perhaps possibly", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let help_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::HelpRequested { .. }))
+            .unwrap_or_else(|| panic!("no help request; entries: {entries:?}"));
+        let completed_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::TaskCompleted { .. }))
+            .expect("task completed");
+        assert!(
+            completed_at < help_at,
+            "the question must follow the answer it doubts"
+        );
+
+        match &entries[help_at] {
+            AuditEntry::HelpRequested {
+                confidence, reason, ..
+            } => {
+                assert!(
+                    *confidence < 0.35,
+                    "confidence {confidence} not below floor"
+                );
+                assert!(!reason.is_empty(), "help request carries no reason");
+            }
+            other => panic!("unexpected entry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_confident_completion_asks_nothing() {
+        let mut m = manager("agent-confident", Some(2));
+        m.enable_confidence(metacognition::ConfidenceTracker::default());
+        m.senses
+            .packetize_text_checked(
+                "Completed all steps successfully with verified results across the board.",
+                SensoryPriority::Normal,
+            )
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::HelpRequested { .. })),
+            "a confident answer should not produce a question"
+        );
+    }
+
+    #[test]
+    fn conversation_memory_composes_the_prompt_but_not_the_audit_entry() {
+        // E33 S33.1: the backend must see the composed context; the audit log
+        // must still show what the human actually typed.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<(u64, String)>,
+            replies: Vec<(u64, String)>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, task_id: u64, guidance: &str) -> String {
+                self.composed.push((task_id, guidance.to_string()));
+                format!("[context]\noperator: {guidance}\nanima:")
+            }
+            fn record_reply(&mut self, task_id: u64, response: &str) {
+                self.replies.push((task_id, response.to_string()));
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-conversation", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        assert!(m.conversation_enabled());
+        m.senses
+            .packetize_text_checked("what are you working on?", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        // The backend saw the composed prompt …
+        let dispatched = &m.scheduler.dispatched_tasks[0];
+        assert!(
+            dispatched.prompt.starts_with("[context]"),
+            "backend did not receive the composed prompt: {:?}",
+            dispatched.prompt
+        );
+
+        // … while the audit log kept the operator's own words.
+        let started = m
+            .audit
+            .entries()
+            .iter()
+            .find_map(|e| match e {
+                AuditEntry::TaskStarted { prompt, .. } => Some(prompt.clone()),
+                _ => None,
+            })
+            .expect("task started");
+        assert_eq!(started, "what are you working on?");
+
+        let rec = recorder.lock().unwrap();
+        assert_eq!(rec.composed.len(), 1, "compose called once per dispatch");
+        assert_eq!(rec.composed[0].1, "what are you working on?");
+        assert_eq!(rec.replies.len(), 1, "the reply was recorded");
+        assert_eq!(rec.replies[0].0, rec.composed[0].0, "same task id");
+    }
+
+    #[test]
+    fn without_conversation_memory_the_prompt_reaches_the_backend_untouched() {
+        let mut m = manager("agent-no-conversation", Some(2));
+        assert!(!m.conversation_enabled());
+        m.senses
+            .packetize_text_checked("plain text", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks[0].prompt, "plain text");
+    }
+
+    #[test]
+    fn a_tagged_packet_links_its_message_before_any_other_entry_for_that_task() {
+        // E33 S33.2: the link must precede both the gate decision (recorded at
+        // intake) and TaskStarted, so a log reader knows the correlation before
+        // it sees anything else about the task.
+        let mut m = manager("agent-linked", Some(2));
+        m.senses
+            .packetize_text_tagged(
+                "summarise the overnight logs",
+                SensoryPriority::Normal,
+                Some("op-7".to_string()),
+            )
+            .expect("valid tagged text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let link_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. }))
+            .unwrap_or_else(|| panic!("no link entry; entries: {entries:?}"));
+        let started_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::TaskStarted { .. }))
+            .expect("task started");
+        assert!(link_at < started_at, "link must precede TaskStarted");
+
+        let (task_id, message_id) = match &entries[link_at] {
+            AuditEntry::OperatorMessageLinked {
+                task_id,
+                message_id,
+                ..
+            } => (*task_id, message_id.clone()),
+            other => panic!("unexpected entry: {other:?}"),
+        };
+        assert_eq!(message_id, "op-7");
+        // The id it names is the task that actually ran.
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, AuditEntry::TaskCompleted { task_id: t, .. } if *t == task_id)));
+    }
+
+    #[test]
+    fn an_untagged_packet_emits_no_link_entry() {
+        // Sensor input and CLI guidance have no conversational origin; the
+        // audit log must look exactly as it did before correlation existed.
+        let mut m = manager("agent-untagged", Some(2));
+        m.senses
+            .packetize_text_checked("tick", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. })),
+            "untagged packet produced a correlation entry"
+        );
+    }
+
+    #[test]
+    fn a_forced_tagged_packet_links_before_its_gate_decision() {
+        let mut m = manager("agent-forced-linked", Some(2));
+        m.senses
+            .packetize_text_forced_tagged(
+                "deploy immediately",
+                "on-call escalation",
+                Some("op-9".to_string()),
+            )
+            .expect("valid forced text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        let entries = m.audit.entries();
+        let link_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::OperatorMessageLinked { .. }))
+            .expect("link entry");
+        let gate_at = entries
+            .iter()
+            .position(|e| matches!(e, AuditEntry::GateDecision { .. }))
+            .expect("gate decision");
+        assert!(
+            link_at < gate_at,
+            "link must precede the gate decision it explains"
+        );
+
+        // The gate's event id names the same task the link does.
+        match (&entries[link_at], &entries[gate_at]) {
+            (
+                AuditEntry::OperatorMessageLinked { task_id, .. },
+                AuditEntry::GateDecision { event_id, .. },
+            ) => assert_eq!(event_id, &format!("sensory-{task_id}")),
+            other => panic!("unexpected entries: {other:?}"),
+        }
     }
 
     #[test]
@@ -1885,10 +2337,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_packet_does_not_record_gate_decision_in_somatic_loop() {
-        // Non-forced packets must NOT produce a GateDecision entry; the gate
-        // is only consulted when an explicit operator-force override is present.
-        let mut m = manager("agent-normal-no-gate", Some(2));
+    fn every_operator_packet_is_arbitrated_by_the_gate() {
+        // E33 S33.6: `docs/11-operator-interface.md` and the console both tell
+        // the operator that guidance "is arbitrated by the Striatal Gate".
+        // Until this story only forced packets were, and everything else was
+        // admitted unconditionally.
+        let mut m = manager("agent-gated", Some(2));
         m.senses
             .packetize_text_checked("routine query", SensoryPriority::Normal)
             .expect("valid text");
@@ -1896,14 +2350,180 @@ mod tests {
         let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
-        let has_gate_entry = m
+        let decision = m
             .audit
             .entries()
             .iter()
-            .any(|e| matches!(e, AuditEntry::GateDecision { .. }));
+            .find_map(|e| match e {
+                AuditEntry::GateDecision {
+                    invoke,
+                    override_active,
+                    event_id,
+                    ..
+                } => Some((*invoke, *override_active, event_id.clone())),
+                _ => None,
+            })
+            .expect("a normal packet must produce a gate decision");
+        assert!(decision.0, "an idle agent should admit ordinary guidance");
+        assert!(!decision.1, "un-forced guidance must not claim an override");
+        assert!(decision.2.starts_with("sensory-"));
+        // Admitted, so the task actually ran.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+    }
+
+    #[test]
+    fn machine_input_is_neither_gated_nor_treated_as_operator_speech() {
+        // E33 S33.6: the bridge is the human sense, but the unchecked
+        // packetisers carry synthetic and sensor input. Scoring those as an
+        // OperatorCommand would let real pressure drop a reading nobody is
+        // waiting on, and would fold it into the operator's transcript.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<String>,
+            replies: Vec<String>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                self.composed.push(guidance.to_string());
+                format!("[context] {guidance}")
+            }
+            fn record_reply(&mut self, _task_id: u64, response: &str) {
+                self.replies.push(response.to_string());
+            }
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-machine-input", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        // The unchecked packetiser is the machine path.
+        m.senses.packetize_text("sensor reading 0.42");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
         assert!(
-            !has_gate_entry,
-            "a normal packet must not produce a GateDecision audit entry"
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::GateDecision { .. })),
+            "machine input was arbitrated as an operator command"
+        );
+        // It still runs — not gating is not the same as discarding.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert_eq!(
+            m.scheduler.dispatched_tasks[0].prompt,
+            "sensor reading 0.42"
+        );
+
+        let rec = recorder.lock().unwrap();
+        assert!(
+            rec.composed.is_empty() && rec.replies.is_empty(),
+            "machine input leaked into the operator conversation: composed={:?} replies={:?}",
+            rec.composed,
+            rec.replies
+        );
+    }
+
+    #[test]
+    fn an_autonomous_agenda_task_is_never_recorded_as_operator_speech() {
+        // Prospective intentions and anything else pushed straight onto the
+        // agenda have no operator behind them.
+        #[derive(Default)]
+        struct Recording {
+            composed: Vec<String>,
+        }
+        impl ConversationMemory for Recording {
+            fn compose(&mut self, _task_id: u64, guidance: &str) -> String {
+                self.composed.push(guidance.to_string());
+                guidance.to_string()
+            }
+            fn record_reply(&mut self, _task_id: u64, _response: &str) {}
+        }
+
+        let recorder = Arc::new(Mutex::new(Recording::default()));
+        let mut m = manager("agent-autonomous", Some(2))
+            .with_conversation(recorder.clone() as Arc<Mutex<dyn ConversationMemory>>);
+        m.agenda
+            .push(Task::new(7, 1, "self-directed work".to_string()));
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+        assert!(
+            recorder.lock().unwrap().composed.is_empty(),
+            "autonomous work was composed as operator conversation"
+        );
+    }
+
+    #[test]
+    fn gating_can_be_turned_off_to_restore_unconditional_admission() {
+        let mut m = manager("agent-ungated", Some(2));
+        m.gate_operator_input = false;
+        m.senses
+            .packetize_text_checked("routine query", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
+        assert!(
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::GateDecision { .. })),
+            "gating was disabled but a decision was still recorded"
+        );
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+    }
+
+    #[test]
+    fn a_stressed_agent_defers_low_priority_guidance_but_still_takes_critical() {
+        // The point of gating: under real thermal, memory and budget pressure
+        // the agent declines ordinary chatter while an emergency still lands.
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        // Hot, full, out of budget and nobody watching: the threshold climbs
+        // to its ceiling.
+        let under_pressure = HomeostaticSignals {
+            thermal_load: 1.0,
+            compute_pressure: 1.0,
+            memory_pressure: 1.0,
+            power_budget: 0.0,
+            financial_budget: 0.0,
+            attention_demand: 0.0,
+        };
+
+        let mut stressed = manager("agent-stressed", Some(2));
+        stressed.last_signals = under_pressure.clone();
+        stressed
+            .senses
+            .packetize_text_checked("something routine", SensoryPriority::Low)
+            .expect("valid text");
+        block_on(somatic_execution_loop(&mut stressed, &monitor)).unwrap();
+
+        let blocked = stressed
+            .audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::GateDecision { invoke: false, .. }));
+        assert!(blocked, "a stressed agent admitted low-priority guidance");
+        assert_eq!(
+            stressed.scheduler.dispatched_tasks.len(),
+            0,
+            "a blocked packet must not become a task"
+        );
+
+        let mut urgent = manager("agent-stressed-critical", Some(2));
+        urgent.last_signals = under_pressure;
+        urgent
+            .senses
+            .packetize_text_checked("the building is on fire", SensoryPriority::Critical)
+            .expect("valid text");
+        block_on(somatic_execution_loop(&mut urgent, &monitor)).unwrap();
+        assert_eq!(
+            urgent.scheduler.dispatched_tasks.len(),
+            1,
+            "a critical message must still reach a stressed agent"
         );
     }
 

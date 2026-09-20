@@ -5095,7 +5095,11 @@ pub(crate) fn cmd_serve() {
         Arc::clone(&backend),
         None, // run forever
     )
-    .with_tier_backends(tier_backends);
+    .with_tier_backends(tier_backends)
+    // E33 S33.0: install the skill registry on the manager, so the Dreaming
+    // phase's self-improvement reflection and the console's Skills panel read
+    // and write the *same* registry rather than two disconnected copies.
+    .with_skill_registry(skills::SkillRegistry::with_builtins());
     // Publish vital signs every iteration: the snapshot is written to the audit
     // log, where the console's tailer turns it into a `Vitals` event.
     manager.subsystems.sensor_bundle = Some(Arc::new(InteroceptiveSensorBundle::with_defaults()));
@@ -5143,8 +5147,120 @@ pub(crate) fn cmd_serve() {
         println!("  cognition: watchdog + confidence + prospective memory enabled (E14)");
     }
 
+    // ── E33 S33.1 — conversation memory ───────────────────────────────────────
+    // Without this the agent answers every operator message as though it were
+    // the first thing ever said: the task's prompt is the raw sensory text,
+    // with no identity framing and no prior turns.  The memory composes each
+    // dispatch from the durable E22 session store and records every reply back
+    // into it, so a follow-up ("and the second one?") means something and the
+    // history survives a restart.
+    // E33 S33.6 — ordinary operator guidance is arbitrated by the Striatal
+    // Gate, as the operator interface has always documented.  Opt out with
+    // ANIMA_GATE_OPERATOR=0 to restore unconditional admission.
+    let gate_operator_input = std::env::var("ANIMA_GATE_OPERATOR").as_deref() != Ok("0");
+    manager.gate_operator_input = gate_operator_input;
+
+    // Opt out with ANIMA_CONVERSATION=0 for a bare, stateless loop.
+    let conversation_store = if std::env::var("ANIMA_CONVERSATION").as_deref() == Ok("0") {
+        None
+    } else {
+        let conversation = Arc::new(std::sync::Mutex::new(
+            conversation::SessionConversation::open(
+                &agent_id,
+                &operator_user_id(),
+                build_identity_framing(&agent_id),
+            ),
+        ));
+        let handle = conversation
+            .lock()
+            .map(|c| (c.store(), c.session_id().to_string()))
+            .ok();
+        manager.enable_conversation(
+            conversation.clone() as Arc<std::sync::Mutex<dyn vita::ConversationMemory>>
+        );
+        handle
+    };
+
+    // ── E33 S33.0 — operator-facing shared state ──────────────────────────────
+    // The approval queue (E15 S15.2), the skill registry (E11) and the adapter
+    // library (E8) each back a console panel.  Without these handles the
+    // matching routes answer 404 and the panels stay permanently hidden, so the
+    // operator cannot see — let alone approve — anything the agent proposes.
+    // The skill handle is the one already installed on the manager, so the
+    // panel reflects live reflection output rather than an empty copy.
+    let approval_queue = Arc::new(std::sync::Mutex::new(
+        lifecycle::approval::ApprovalQueue::new(),
+    ));
+    let adapter_library = Arc::new(std::sync::Mutex::new(anima_finetune::AdapterLibrary::new(
+        ADAPTER_LIBRARY_CAPACITY,
+    )));
+    let skill_handle = manager.skill_registry_handle();
+
     // Bring up the console (HTTP/SSE server + audit tailer) on its own threads.
-    let console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env());
+    let mut console = Console::new(bridge.clone(), &audit_path, ServerConfig::from_env())
+        .with_approval_queue(Arc::clone(&approval_queue))
+        .with_adapter_library(Arc::clone(&adapter_library));
+    if let Some(registry) = skill_handle {
+        console = console.with_skill_registry(Arc::clone(&registry));
+        // E33 S33.0: without this the panel is wired but permanently empty — the agent
+        // proposes skills and no operator is ever asked.
+        spawn_skill_approval_drainer(agent_id.clone(), registry, Arc::clone(&approval_queue));
+    }
+    // The console serves the very history the agent composes from, so a
+    // reloaded dashboard shows the real conversation rather than whatever
+    // happens to remain in the hub's replay ring (E33 S33.1).
+    // Captured before the store is handed to the console, for the banner below.
+    let conversation_session = conversation_store.as_ref().map(|(_, id)| id.clone());
+    if let Some((store, session_id)) = conversation_store {
+        console = console.with_conversation(store, session_id);
+    }
+    // E33 S33.4 — quality signal collected where the reply is read, rather
+    // than only from `anima feedback` after the fact.
+    let feedback_path = feedback::FeedbackStore::default_path(&agent_id);
+    let feedback_store = feedback::FeedbackStore::open(&feedback_path).unwrap_or_else(|e| {
+        eprintln!(
+            "anima-hosted: cannot open the feedback store at {} ({e}); \
+             ratings will not persist this run",
+            feedback_path.display()
+        );
+        feedback::FeedbackStore::in_memory()
+    });
+    console = console.with_feedback(
+        Arc::new(std::sync::Mutex::new(feedback_store)),
+        operator_user_id(),
+    );
+
+    // E33 S33.5 — the operator has an identity in the E17 registry, so the
+    // console can say who it is talking as and what trust tier that carries.
+    // A first run registers the profile; later runs just refresh last-seen.
+    let user_id = operator_user_id();
+    let registry_path = users::UserRegistry::default_path(&agent_id);
+    let mut registry = users::UserRegistry::open(&registry_path).unwrap_or_else(|e| {
+        eprintln!(
+            "anima-hosted: cannot open the user registry at {} ({e}); \
+             operator identity will not persist this run",
+            registry_path.display()
+        );
+        users::UserRegistry::in_memory()
+    });
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if registry.get(&user_id).is_none() {
+        let profile = users::UserProfile::new(&user_id, "operator", "console", now_ns);
+        // Trust is granted deliberately (`anima users trust`), never assumed
+        // from the fact that someone reached the console.
+        if let Err(e) = registry.register(profile) {
+            eprintln!("anima-hosted: cannot register the operator profile ({e})");
+        } else if let Err(e) = registry.flush() {
+            // `register` only mutates memory.  Without this the profile is
+            // gone on the next start, and `anima users` cannot find the
+            // identity `/whoami` reports.
+            eprintln!("anima-hosted: cannot persist the operator profile ({e})");
+        }
+    }
+    console = console.with_identity(Arc::new(std::sync::Mutex::new(registry)), user_id);
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
@@ -5173,6 +5289,39 @@ pub(crate) fn cmd_serve() {
         frontier_b.id()
     );
     println!("  audit log : {}", audit_path.display());
+    println!(
+        "  panels    : approval-queue, skills, adapters (GET /approval-queue, /skills, /adapters)"
+    );
+    println!(
+        "  memory    : {}",
+        match &conversation_session {
+            Some(session_id) =>
+                format!("conversation on, session {session_id} (ANIMA_CONVERSATION=0 to disable)"),
+            None => "conversation disabled (ANIMA_CONVERSATION=0)".to_string(),
+        }
+    );
+    println!("  history   : GET /conversation (durable turns, survives restarts)");
+    println!("  identity  : GET /whoami · feedback: POST /feedback");
+    println!(
+        "  gate      : {}",
+        if gate_operator_input {
+            "every operator message is arbitrated by the Striatal Gate"
+        } else {
+            "operator guidance NOT gated (ANIMA_GATE_OPERATOR=0)"
+        }
+    );
+    if backend.id() == "mock" {
+        // The mock backend echoes its prompt word for word, so with
+        // conversation memory on it replies with the composed context rather
+        // than an answer.  That is the parrot working as designed, not a
+        // fault — say so, because it is the default first-run backend.
+        println!(
+            "\n  note: the mock backend echoes whatever prompt it is given, so its replies\n  \
+             repeat the composed context rather than answering. Use a real backend\n  \
+             (ANIMA_BACKEND=ollama, or anthropic/openai with a key) to judge the\n  \
+             conversation itself."
+        );
+    }
     if corpus_dir != "off" {
         println!("  corpus    : {corpus_dir} (sleep-phase training pairs)");
     }
@@ -5210,6 +5359,144 @@ pub(crate) fn cmd_serve() {
         println!("\nanima-hosted: somatic loop stopped; shut down cleanly.");
     }
 }
+
+/// How often the serve loop drains newly-proposed skills into the operator's
+/// approval queue (E33 S33.0).
+const APPROVAL_DRAIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Move agent-authored skill proposals from the live registry into the
+/// operator's approval queue (E33 S33.0).
+///
+/// The Dreaming phase registers reflected skills as `Proposed` in the shared
+/// `SkillRegistry` and stops there: `vita` cannot reach the E15 queue without a
+/// `vita → lifecycle` dependency, which would cycle. The hosted kernel is the
+/// layer that may depend on both, so the hand-off belongs here — the same
+/// division `anima skills` already uses for its one-shot demo.
+///
+/// Without this the console's approval panel is wired but permanently empty:
+/// the agent proposes, and nobody is ever asked.
+///
+/// Each hand-off is written to the agent's audit log through its own append
+/// handle, so the console's tailer turns it into the operator's question. The
+/// registry guard is released before the queue is locked, so this never holds
+/// two subsystem locks at once.
+fn spawn_skill_approval_drainer(
+    agent_id: String,
+    registry: Arc<std::sync::Mutex<skills::SkillRegistry>>,
+    queue: Arc<std::sync::Mutex<lifecycle::approval::ApprovalQueue>>,
+) {
+    use lifecycle::skill_bridge::SkillApprovalBridge;
+    use skills::{ProposalAction, SkillAuthor, SkillProposal, SkillState};
+
+    let builder = std::thread::Builder::new().name("anima-approval-drainer".to_string());
+    let spawned = builder.spawn(move || {
+        let mut bridge = SkillApprovalBridge::new();
+        let mut audit = AuditLog::from_env(&agent_id);
+        loop {
+            std::thread::sleep(APPROVAL_DRAIN_INTERVAL);
+
+            // 1. Snapshot the pending proposals, then let the registry go.
+            let pending: Vec<(String, SkillProposal)> = {
+                let Ok(reg) = registry.lock() else { continue };
+                reg.list_all()
+                    .into_iter()
+                    .filter(|e| matches!(e.state, SkillState::Proposed))
+                    .filter(|e| bridge.skill_id_for(&e.id).is_none())
+                    .map(|e| {
+                        let body = reg
+                            .load_body(&e.id)
+                            .ok()
+                            .map(|b| b.instructions.clone())
+                            .unwrap_or_default();
+                        let skill_text = format!(
+                            "---\nname: {}\ndescription: {}\n---\n{}",
+                            e.manifest.name, e.manifest.description, body
+                        );
+                        (
+                            e.id.clone(),
+                            SkillProposal {
+                                skill_text,
+                                authored_by: SkillAuthor::Agent,
+                                proposed_at_ns: e.provenance.proposed_at_ns,
+                                source_episode: e.provenance.source_episode.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            };
+            if pending.is_empty() {
+                continue;
+            }
+
+            // 2. Hand them to the queue the console serves.
+            for (skill_id, proposal) in pending {
+                let outcome = skills::ProposalOutcome {
+                    artifact_id: Some(skill_id.clone()),
+                    action: ProposalAction::PendingApproval,
+                };
+                let enqueued = {
+                    let Ok(mut q) = queue.lock() else { continue };
+                    bridge.enqueue_skill(&mut q, &outcome, &proposal)
+                };
+                match enqueued {
+                    Ok(Some(proposal_id)) => audit.push(AuditEntry::ApprovalProposalQueued {
+                        agent_id: agent_id.clone(),
+                        proposal_id,
+                        kind: "new-skill".to_string(),
+                        provenance: "agent (dreaming-phase reflection)".to_string(),
+                    }),
+                    // Auto-promoted or rejected upstream — nothing to ask about.
+                    Ok(None) => {}
+                    Err(e) => eprintln!(
+                        "anima-hosted: could not queue skill {skill_id} for approval: {e}"
+                    ),
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("anima-hosted: approval-queue drainer did not start ({e}); agent-authored skills will not reach the console");
+    }
+}
+
+/// The operator identity conversations are recorded against (E33 S33.1).
+///
+/// A single console operator today; `ANIMA_OPERATOR_ID` names them when more
+/// than one person shares an agent, which is what ties the history to an E17
+/// `UserRegistry` profile.
+fn operator_user_id() -> String {
+    std::env::var("ANIMA_OPERATOR_ID").unwrap_or_else(|_| "user:operator".to_string())
+}
+
+/// Build the system framing prepended to every composed prompt (E33 S33.1).
+///
+/// Uses the agent's own identity memory, so what it has learned about itself
+/// actually reaches the model instead of sitting unread on disk.  A missing or
+/// unreadable identity document degrades to the bare framing rather than
+/// failing the boot.
+fn build_identity_framing(agent_id: &str) -> String {
+    let mut framing = format!(
+        "You are {agent_id}, an autonomous agent that runs as its own operating system. \
+         You are speaking with your human operator, who is one of your senses rather than \
+         your controller. Answer in the context of the conversation so far, briefly and plainly."
+    );
+    let path = IdentityMemory::default_path(agent_id);
+    if let Ok(store) = IdentityMemory::open(&path) {
+        let doc = store.to_json();
+        if !doc.is_null() {
+            framing.push_str("\n\nWhat you know about yourself: ");
+            framing.push_str(&doc.to_string());
+        }
+    }
+    framing
+}
+
+/// How many adapter artifacts the serving agent's library retains (E33 S33.0).
+///
+/// The library is an LRU over fine-tune outputs; the console's Adapters panel
+/// lists whatever it holds.  Eight is comfortably more than a single agent
+/// accumulates between restarts without letting the list grow unbounded.
+const ADAPTER_LIBRARY_CAPACITY: usize = 8;
 
 /// Maximum consecutive somatic-loop restarts before the supervisor gives up.
 const MAX_SOMATIC_RESTARTS: u32 = 100;

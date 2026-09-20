@@ -90,8 +90,31 @@ TUI and COM1 serial bridge for the kernel.
       `GET /digest` endpoint reads the audit JSONL, calls `lifecycle::generate_digest`,
       returns JSON; the browser dashboard fetches it on connect and shows a
       dismissible summary panel (suppressed when the agent has no recorded history).
-- [ ] Auth beyond the bearer token for non-loopback deployments (per-user
-      identity exists in `crates/users` / E17; wire it to the console).
+- [x] **Operator identity and attribution** — `GET /whoami` answers from the
+      E17 `UserRegistry`: the profile conversations and feedback are recorded
+      against, plus its trust tier. Trust is never inferred from reaching the
+      console. (E33 S33.5)
+- [ ] **Authentication** beyond the bearer token for non-loopback deployments.
+      Still open, and deliberately distinguished from the item above: a shared
+      token identifies a *console*, not a person, so `/whoami` reports who the
+      server is configured to attribute requests to — it does not authenticate
+      the human sending them. Per-user credentials remain to be designed.
+- [x] Conversation UI (E33, `docs/24-conversation-ui.md`): conversation
+      memory on the serve path over the E22 session store, per-message
+      correlation and status, agent-initiated questions, durable history,
+      markdown rendering, in-place feedback, and the Striatal Gate
+      arbitrating *every* operator message rather than only forced ones.
+      `cmd_serve` now actually calls the `with_*` builders, so the three
+      panels above are live instead of answering 404.
+
+**Remaining on the conversation surface** (detail in `docs/24` §3.1):
+- [ ] Judge it against a real backend — the mock echoes its prompt, so it
+      proves the plumbing and not the experience.
+- [ ] Token streaming: `LlmBackend` collects the whole completion before
+      returning, so a streamed event would be theatre until the trait grows
+      a sink.
+- [ ] Attachments: images packetise, but the loop reduces them to
+      `[Image N B mime]` text until a vision route is bound.
 
 ## Pillar 4 — Self-extending, self-tuning agent
 

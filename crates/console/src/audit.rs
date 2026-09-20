@@ -58,12 +58,16 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
     };
 
     let event = match variant.as_str() {
+        // `message_id` is filled in by `CorrelationTracker`, which has the
+        // cross-line state this per-line mapping deliberately lacks.
         "TaskStarted" => OperatorEvent::TaskStarted {
             task_id: u64f("task_id"),
+            message_id: None,
             prompt: s("prompt"),
         },
         "TaskCompleted" => OperatorEvent::AgentMessage {
             task_id: u64f("task_id"),
+            message_id: None,
             tokens: fields
                 .get("tokens_emitted")
                 .and_then(Value::as_u64)
@@ -73,8 +77,10 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
         "TaskFailed" => OperatorEvent::Audit {
             kind: "TaskFailed".into(),
             detail: format!("task {} failed: {}", u64f("task_id"), s("error")),
+            message_id: None,
         },
         "GateDecision" => OperatorEvent::Gate {
+            message_id: None,
             invoke: boolf("invoke"),
             cost_class: opt_s("cost_class"),
             value_score: f32f("value_score"),
@@ -117,6 +123,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 s("phase"),
                 if boolf("success") { "ok" } else { "FAILED" }
             ),
+            message_id: None,
         },
         "MemoryPressureEvent" => OperatorEvent::Audit {
             kind: "MemoryPressureEvent".into(),
@@ -126,6 +133,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 u64f("active_tokens"),
                 u64f("max_context")
             ),
+            message_id: None,
         },
         // Security-relevant — surfaced prominently in the feed.
         "DefenceVeto" => OperatorEvent::Audit {
@@ -136,6 +144,7 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 s("action_blocked"),
                 s("reason")
             ),
+            message_id: None,
         },
         "AttentionDemandEscalated" => OperatorEvent::Audit {
             kind: "AttentionDemandEscalated".into(),
@@ -143,20 +152,54 @@ pub fn event_from_audit_value(value: &Value) -> Option<OperatorEvent> {
                 "{} vetoes in window — operator attention requested",
                 u64f("veto_count")
             ),
+            message_id: None,
         },
         "CortexFault" => OperatorEvent::Audit {
             kind: "CortexFault".into(),
             detail: format!("task {}: {}", s("task_id"), s("error")),
+            message_id: None,
+        },
+        // E33 S33.3 — the agent asking its operator something.  Suggested
+        // answers are rendered here rather than carried in the audit entry:
+        // the log records the fact, the console decides the affordances.
+        "HelpRequested" => OperatorEvent::AgentQuestion {
+            task_id: u64f("task_id"),
+            question_id: format!("help-{}", u64f("task_id")),
+            // Rendered by `vita`, so the transcript the model sees and the
+            // card the operator answers carry the identical question.
+            text: vita::HelpRequest {
+                task_description: s("task_description"),
+                confidence: f32f("confidence"),
+                reason: s("reason"),
+            }
+            .operator_question(),
+            options: vec!["that's fine".to_string(), "try again".to_string()],
+            reason: s("reason"),
+        },
+        // A pending proposal is a question too — the operator's answer is the
+        // approve/reject decision, addressed by the proposal id.
+        "ApprovalProposalQueued" => OperatorEvent::AgentQuestion {
+            task_id: 0,
+            question_id: format!("approval:{}", s("proposal_id")),
+            text: format!(
+                "I'd like to add a {} ({}). Approve it?",
+                s("kind"),
+                s("proposal_id")
+            ),
+            options: vec!["approve".to_string(), "reject".to_string()],
+            reason: s("provenance"),
         },
         "IdentityUpdated" => OperatorEvent::Audit {
             kind: "IdentityUpdated".into(),
             detail: format!("{} = {}", s("key"), s("new_value")),
+            message_id: None,
         },
         // Everything else: a compact generic audit line so nothing is silently
         // dropped from the operator's view.
         other => OperatorEvent::Audit {
             kind: other.to_string(),
             detail: fields.as_object().map(compact_fields).unwrap_or_default(),
+            message_id: None,
         },
     };
     Some(event)
@@ -177,6 +220,123 @@ fn compact_fields(fields: &serde_json::Map<String, Value>) -> String {
         parts.push(format!("{k}={rendered}"));
     }
     parts.join(", ")
+}
+
+// ── Operator-message correlation (E33 S33.2) ─────────────────────────────────
+
+/// Upper bound on the in-flight `task_id → message_id` links the tailer holds.
+///
+/// A link is dropped as soon as its task settles, so this is only approached
+/// when tasks are admitted much faster than they complete.
+const MAX_TRACKED_LINKS: usize = 256;
+
+/// Carries operator-message correlation across audit lines.
+///
+/// `vita` records the link between an operator message and the task it caused
+/// as its own [`vita::AuditEntry::OperatorMessageLinked`] entry, written
+/// *before* anything else about that task.  This tracker is the reader half:
+/// it remembers each link and stamps the `message_id` onto the gate decision,
+/// the task start and the eventual reply, so a console can show the status of
+/// one specific message instead of inferring it from arrival order.
+///
+/// State lives here rather than in the wire protocol because the tailer
+/// re-reads the audit file from offset 0 after a restart, which replays the
+/// link entries and rebuilds the map for free.
+#[derive(Debug, Default)]
+pub struct CorrelationTracker {
+    links: std::collections::BTreeMap<u64, String>,
+}
+
+impl CorrelationTracker {
+    /// A tracker with no links yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of links currently held (test/diagnostic aid).
+    pub fn tracked(&self) -> usize {
+        self.links.len()
+    }
+
+    /// Translate one audit JSONL line, applying and updating correlation.
+    ///
+    /// Returns `None` both for unrecognised lines and for the link entries
+    /// themselves — they are plumbing, not something an operator should see in
+    /// the telemetry feed.
+    pub fn translate_line(&mut self, line: &str) -> Option<OperatorEvent> {
+        let value: Value = serde_json::from_str(line).ok()?;
+        self.translate(&value)
+    }
+
+    /// As [`CorrelationTracker::translate_line`], for an already-parsed entry.
+    pub fn translate(&mut self, value: &Value) -> Option<OperatorEvent> {
+        let obj = value.as_object()?;
+        let (variant, fields) = obj.iter().next()?;
+
+        if variant == "OperatorMessageLinked" {
+            let task_id = fields.get("task_id").and_then(Value::as_u64)?;
+            let message_id = fields.get("message_id").and_then(Value::as_str)?;
+            if self.links.len() >= MAX_TRACKED_LINKS {
+                // Task ids are monotonic, so the lowest key is the stalest.
+                if let Some(oldest) = self.links.keys().next().copied() {
+                    self.links.remove(&oldest);
+                }
+            }
+            self.links.insert(task_id, message_id.to_string());
+            return None;
+        }
+
+        // A failure settles the task as surely as a completion does, but maps
+        // to a generic `Audit` event with no task_id field to key off.
+        let failed_task = (variant == "TaskFailed")
+            .then(|| fields.get("task_id").and_then(Value::as_u64))
+            .flatten();
+
+        let mut event = event_from_audit_value(value)?;
+        match &mut event {
+            // A failure arrives as a generic audit line, but it ends the
+            // message's life as surely as a reply does — without the id the
+            // console would leave that message at "working" forever.
+            OperatorEvent::Audit { message_id, .. } if failed_task.is_some() => {
+                *message_id = failed_task.and_then(|id| self.links.get(&id).cloned());
+            }
+            OperatorEvent::TaskStarted {
+                task_id,
+                message_id,
+                ..
+            } => *message_id = self.links.get(task_id).cloned(),
+            OperatorEvent::AgentMessage {
+                task_id,
+                message_id,
+                ..
+            } => {
+                // The reply settles the task: attach and release in one step.
+                *message_id = self.links.remove(task_id);
+            }
+            OperatorEvent::Gate {
+                message_id, invoke, ..
+            } => {
+                // Sensory gate decisions carry `event_id = "sensory-<task_id>"`.
+                let task_id = fields
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .and_then(|e| e.strip_prefix("sensory-"))
+                    .and_then(|n| n.parse::<u64>().ok());
+                *message_id = task_id.and_then(|id| self.links.get(&id).cloned());
+                if !*invoke {
+                    // Blocked: no task will follow, so the link is spent.
+                    if let Some(id) = task_id {
+                        self.links.remove(&id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(id) = failed_task {
+            self.links.remove(&id);
+        }
+        Some(event)
+    }
 }
 
 /// Follows an audit JSONL file, publishing each new entry to the hub as an
@@ -231,16 +391,21 @@ impl AuditTailer {
     pub fn run(&self) {
         let mut offset: u64 = 0;
         let mut last_vitals: Option<Instant> = None;
+        // Rebuilt from scratch whenever the file is re-read from offset 0, so a
+        // restart recovers every in-flight correlation (E33 S33.2).
+        let mut links = CorrelationTracker::new();
         loop {
             match std::fs::File::open(&self.path) {
                 Ok(file) => {
                     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
                     if len < offset {
-                        // File was truncated or rotated — start over.
+                        // File was truncated or rotated — start over, and drop
+                        // correlations that referred to the vanished lines.
                         offset = 0;
+                        links = CorrelationTracker::new();
                     }
                     if len > offset {
-                        offset = self.drain_from(file, offset, &mut last_vitals);
+                        offset = self.drain_from(file, offset, &mut last_vitals, &mut links);
                     }
                 }
                 Err(_) => {
@@ -259,6 +424,7 @@ impl AuditTailer {
         file: std::fs::File,
         offset: u64,
         last_vitals: &mut Option<Instant>,
+        links: &mut CorrelationTracker,
     ) -> u64 {
         let mut reader = BufReader::new(file);
         if reader.seek(SeekFrom::Start(offset)).is_err() {
@@ -281,7 +447,7 @@ impl AuditTailer {
                     // Update the Prometheus metric registry from every line
                     // before the operator-event throttling (E21).
                     self.hub.update_metrics_from_json(trimmed);
-                    if let Some(event) = event_from_audit_line(trimmed) {
+                    if let Some(event) = links.translate_line(trimmed) {
                         if matches!(event, OperatorEvent::Vitals { .. }) {
                             let now = Instant::now();
                             let too_soon = last_vitals
@@ -305,6 +471,205 @@ impl AuditTailer {
 }
 
 #[cfg(test)]
+mod correlation_tests {
+    use super::*;
+
+    fn link(task_id: u64, message_id: &str) -> String {
+        format!(
+            r#"{{"OperatorMessageLinked":{{"agent_id":"a","task_id":{task_id},"message_id":"{message_id}"}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_help_request_becomes_an_answerable_question() {
+        let mut t = CorrelationTracker::new();
+        let ev = t
+            .translate_line(
+                r#"{"HelpRequested":{"agent_id":"a","task_id":9,"task_description":"deploy the thing","confidence":0.22,"reason":"confidence 0.22 is below the help-request floor"}}"#,
+            )
+            .expect("question event");
+        match ev {
+            OperatorEvent::AgentQuestion {
+                task_id,
+                question_id,
+                text,
+                options,
+                reason,
+            } => {
+                assert_eq!(task_id, 9);
+                assert_eq!(question_id, "help-9");
+                assert!(text.contains("deploy the thing"), "text: {text}");
+                assert!(text.contains("0.22"), "confidence not quoted: {text}");
+                assert_eq!(options, vec!["that's fine", "try again"]);
+                assert!(reason.contains("below the help-request floor"));
+            }
+            other => panic!("expected AgentQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_queued_proposal_becomes_a_question_addressed_by_proposal_id() {
+        // The quick replies must reach the audited approve/reject endpoint,
+        // so the id has to survive into the question.
+        let mut t = CorrelationTracker::new();
+        let ev = t
+            .translate_line(
+                r#"{"ApprovalProposalQueued":{"agent_id":"a","proposal_id":"skill-42","kind":"new-skill","provenance":"dreaming phase cycle 7"}}"#,
+            )
+            .expect("question event");
+        match ev {
+            OperatorEvent::AgentQuestion {
+                question_id,
+                options,
+                reason,
+                ..
+            } => {
+                assert_eq!(question_id, "approval:skill-42");
+                assert_eq!(options, vec!["approve", "reject"]);
+                assert_eq!(reason, "dreaming phase cycle 7");
+            }
+            other => panic!("expected AgentQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_entries_are_plumbing_and_never_reach_the_operator_feed() {
+        let mut t = CorrelationTracker::new();
+        assert!(t.translate_line(&link(9, "op-1")).is_none());
+        assert_eq!(t.tracked(), 1);
+    }
+
+    #[test]
+    fn a_message_is_followed_from_gate_through_task_to_reply() {
+        let mut t = CorrelationTracker::new();
+        t.translate_line(&link(42, "op-7"));
+
+        let gate = t
+            .translate_line(
+                r#"{"GateDecision":{"agent_id":"a","event_id":"sensory-42","invoke":true,"cost_class":"Frontier","urgency":1.0,"novelty":0.5,"user_facing":true,"semantic_class":"OperatorCommand","value_score":1.0,"threshold_applied":0.4,"thermal_load":0.0,"compute_pressure":0.0,"memory_pressure":0.0,"power_budget":1.0,"financial_budget":1.0,"attention_demand":0.0,"reasoning":"forced","override_active":true}}"#,
+            )
+            .expect("gate event");
+        assert!(
+            matches!(gate, OperatorEvent::Gate { message_id: Some(ref m), .. } if m == "op-7"),
+            "gate lost correlation: {gate:?}"
+        );
+
+        let started = t
+            .translate_line(
+                r#"{"TaskStarted":{"agent_id":"a","task_id":42,"tier":0,"prompt":"hello"}}"#,
+            )
+            .expect("task event");
+        assert!(
+            matches!(started, OperatorEvent::TaskStarted { message_id: Some(ref m), .. } if m == "op-7"),
+        );
+
+        let reply = t
+            .translate_line(
+                r#"{"TaskCompleted":{"agent_id":"a","task_id":42,"tokens_emitted":3,"response":"hi"}}"#,
+            )
+            .expect("reply event");
+        assert!(
+            matches!(reply, OperatorEvent::AgentMessage { message_id: Some(ref m), .. } if m == "op-7"),
+        );
+        // The reply settles the task, so the link is released.
+        assert_eq!(t.tracked(), 0, "link outlived the task it described");
+    }
+
+    #[test]
+    fn a_gate_block_releases_the_link_because_no_task_will_follow() {
+        let mut t = CorrelationTracker::new();
+        t.translate_line(&link(7, "op-2"));
+        let gate = t
+            .translate_line(
+                r#"{"GateDecision":{"agent_id":"a","event_id":"sensory-7","invoke":false,"cost_class":null,"urgency":0.1,"novelty":0.1,"user_facing":false,"semantic_class":"Background","value_score":0.1,"threshold_applied":0.4,"thermal_load":0.0,"compute_pressure":0.0,"memory_pressure":0.0,"power_budget":1.0,"financial_budget":1.0,"attention_demand":0.0,"reasoning":"below threshold","override_active":false}}"#,
+            )
+            .expect("gate event");
+        assert!(
+            matches!(gate, OperatorEvent::Gate { message_id: Some(ref m), invoke: false, .. } if m == "op-2"),
+        );
+        assert_eq!(t.tracked(), 0);
+    }
+
+    #[test]
+    fn a_failure_carries_the_correlation_so_the_message_reaches_a_terminal_state() {
+        // Without this the console leaves a message whose task failed sitting
+        // at "working" forever — the per-message status never terminates.
+        let mut t = CorrelationTracker::new();
+        t.translate_line(&link(5, "op-3"));
+        let failed = t
+            .translate_line(r#"{"TaskFailed":{"agent_id":"a","task_id":5,"error":"boom"}}"#)
+            .expect("failure event");
+        match failed {
+            OperatorEvent::Audit {
+                kind, message_id, ..
+            } => {
+                assert_eq!(kind, "TaskFailed");
+                assert_eq!(message_id.as_deref(), Some("op-3"));
+            }
+            other => panic!("expected an Audit event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_uncorrelated_failure_carries_no_message_id() {
+        let mut t = CorrelationTracker::new();
+        let failed = t
+            .translate_line(r#"{"TaskFailed":{"agent_id":"a","task_id":9,"error":"boom"}}"#)
+            .expect("failure event");
+        assert!(matches!(
+            failed,
+            OperatorEvent::Audit {
+                message_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_failure_releases_the_link_too() {
+        let mut t = CorrelationTracker::new();
+        t.translate_line(&link(5, "op-3"));
+        let failed = t
+            .translate_line(r#"{"TaskFailed":{"agent_id":"a","task_id":5,"error":"boom"}}"#)
+            .expect("failure event");
+        assert!(matches!(failed, OperatorEvent::Audit { ref kind, .. } if kind == "TaskFailed"));
+        assert_eq!(t.tracked(), 0);
+    }
+
+    #[test]
+    fn an_uncorrelated_task_still_produces_an_event_with_no_message_id() {
+        // Tasks the agent starts by itself (intentions, sleep work) have no
+        // operator message behind them; correlation must stay optional.
+        let mut t = CorrelationTracker::new();
+        let started = t
+            .translate_line(
+                r#"{"TaskStarted":{"agent_id":"a","task_id":1,"tier":0,"prompt":"self"}}"#,
+            )
+            .expect("task event");
+        assert!(matches!(
+            started,
+            OperatorEvent::TaskStarted {
+                message_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_link_map_is_bounded() {
+        let mut t = CorrelationTracker::new();
+        for i in 0..(MAX_TRACKED_LINKS + 50) {
+            t.translate_line(&link(i as u64, &format!("op-{i}")));
+        }
+        assert!(
+            t.tracked() <= MAX_TRACKED_LINKS,
+            "unbounded at {} links",
+            t.tracked()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -316,6 +681,7 @@ mod tests {
                 task_id,
                 tokens,
                 text,
+                ..
             } => {
                 assert_eq!(task_id, 7);
                 assert_eq!(tokens, 42);
@@ -365,7 +731,7 @@ mod tests {
     fn unknown_variant_falls_through_to_generic_audit() {
         let line = r#"{"RouterDecision":{"agent_id":"a","event_id":"e","route_id":"mid-tier","model_selector":"mid-tier","tool_scope_name":"std","tools_available":3,"tools_permitted":2,"memory_scope_identity":true,"memory_scope_l1":true,"memory_scope_l2":true,"memory_scope_l3":false,"max_turns":8,"max_tool_calls":8}}"#;
         match event_from_audit_line(line).unwrap() {
-            OperatorEvent::Audit { kind, detail } => {
+            OperatorEvent::Audit { kind, detail, .. } => {
                 assert_eq!(kind, "RouterDecision");
                 assert!(detail.contains("route_id=mid-tier"), "detail was: {detail}");
                 assert!(!detail.contains("agent_id"), "agent_id should be skipped");
@@ -378,7 +744,7 @@ mod tests {
     fn defence_veto_is_surfaced_with_detector_and_reason() {
         let line = r#"{"DefenceVeto":{"agent_id":"a","invocation_id":"i","detector":"PromptInjectionDetector","action_blocked":"shell rm -rf","reason":"injection pattern"}}"#;
         match event_from_audit_line(line).unwrap() {
-            OperatorEvent::Audit { kind, detail } => {
+            OperatorEvent::Audit { kind, detail, .. } => {
                 assert_eq!(kind, "DefenceVeto");
                 assert!(detail.contains("PromptInjectionDetector"));
                 assert!(detail.contains("injection pattern"));

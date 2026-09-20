@@ -37,7 +37,7 @@ mod audit;
 mod hub;
 mod server;
 
-pub use audit::{event_from_audit_line, event_from_audit_value, AuditTailer};
+pub use audit::{event_from_audit_line, event_from_audit_value, AuditTailer, CorrelationTracker};
 pub use hub::{ConsoleHub, Subscription};
 pub use server::{ConsoleServer, ServerConfig};
 
@@ -63,6 +63,9 @@ pub struct Console {
     approval_queue: Option<Arc<Mutex<lifecycle::approval::ApprovalQueue>>>,
     skill_registry: Option<Arc<Mutex<skills::SkillRegistry>>>,
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
+    feedback: Option<(Arc<Mutex<feedback::FeedbackStore>>, String)>,
+    identity: Option<(Arc<Mutex<users::UserRegistry>>, String)>,
 }
 
 impl Console {
@@ -80,7 +83,43 @@ impl Console {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            conversation: None,
+            feedback: None,
+            identity: None,
         }
+    }
+
+    /// Wire in the operator identity so `GET /whoami` names who the console is
+    /// talking as (E33 S33.5).
+    pub fn with_identity(
+        mut self,
+        registry: Arc<Mutex<users::UserRegistry>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.identity = Some((registry, user_id.into()));
+        self
+    }
+
+    /// Wire in the shared feedback store so `POST /feedback` accepts ratings on
+    /// the agent's replies (E33 S33.4).
+    pub fn with_feedback(
+        mut self,
+        store: Arc<Mutex<feedback::FeedbackStore>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.feedback = Some((store, user_id.into()));
+        self
+    }
+
+    /// Wire in the shared conversation store so `GET /conversation` serves the
+    /// durable history the agent itself composes from (E33 S33.1).
+    pub fn with_conversation(
+        mut self,
+        store: Arc<Mutex<sessions::SessionStore>>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.conversation = Some((store, session_id.into()));
+        self
     }
 
     /// Wire in a shared approval queue so the console can serve
@@ -139,6 +178,15 @@ impl Console {
         if let Some(l) = &self.adapter_library {
             server = server.with_adapter_library(Arc::clone(l));
         }
+        if let Some((store, session_id)) = &self.conversation {
+            server = server.with_conversation(Arc::clone(store), session_id.clone());
+        }
+        if let Some((store, user_id)) = &self.feedback {
+            server = server.with_feedback(Arc::clone(store), user_id.clone());
+        }
+        if let Some((registry, user_id)) = &self.identity {
+            server = server.with_identity(Arc::clone(registry), user_id.clone());
+        }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)
     }
@@ -152,6 +200,21 @@ mod tests {
     fn dashboard_html_is_embedded_and_nonempty() {
         assert!(DASHBOARD_HTML.contains("EventSource"));
         assert!(DASHBOARD_HTML.contains("/guidance"));
+    }
+
+    #[test]
+    fn dashboard_parses_the_forced_guidance_echo_shape() {
+        // E33 S33.0: forced guidance echoes as
+        // `[FORCED:Critical] (Reason: …) text`; the renderer must strip both
+        // the colon-bearing label and the reason clause from the message body.
+        assert!(
+            DASHBOARD_HTML.contains("GUIDANCE_RE"),
+            "dashboard lost the guidance-echo pattern"
+        );
+        assert!(
+            DASHBOARD_HTML.contains("Reason:"),
+            "dashboard no longer recognises the forced-guidance reason clause"
+        );
     }
 
     #[test]

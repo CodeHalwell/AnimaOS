@@ -193,6 +193,72 @@
   .bubble.op { align-self: flex-end; background: linear-gradient(135deg, rgba(92, 200, 255, .16), rgba(139, 124, 246, .16)); border: 1px solid rgba(92, 200, 255, .25); border-bottom-right-radius: 4px; }
   .bubble.agent { align-self: flex-start; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
   .bubble.agent .meta { color: var(--msg); }
+  /* E33 S33.3 — the agent asking the operator something. Deliberately not a
+     bubble: it is a prompt for input, and should read as one. */
+  .ask {
+    align-self: flex-start; max-width: 82%; padding: 12px 14px; border-radius: 14px;
+    border: 1px solid rgba(251, 191, 36, .42); background: rgba(251, 191, 36, .07);
+    border-bottom-left-radius: 4px;
+  }
+  .ask .meta {
+    display: block; font: 600 10px var(--mono); letter-spacing: .08em;
+    text-transform: uppercase; color: var(--warn); margin-bottom: 5px;
+  }
+  .ask .q { font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+  .ask .why { margin-top: 6px; font: 400 11px var(--mono); color: var(--faint); }
+  .ask .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .ask .opts button {
+    font: 600 11px var(--sans); padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    color: var(--ink); background: rgba(10, 13, 20, .6); border: 1px solid var(--line);
+    transition: border-color .2s, color .2s;
+  }
+  .ask .opts button:hover { border-color: var(--warn); color: var(--warn); }
+  .ask .opts button:disabled { opacity: .45; cursor: default; }
+  .ask.answered { border-color: var(--line); background: rgba(10, 13, 20, .4); }
+  .ask.answered .meta { color: var(--faint); }
+
+  .bubble .body { white-space: pre-wrap; word-break: break-word; }
+  .bubble .body ul, .bubble .body ol { white-space: normal; margin: 6px 0; padding-left: 20px; }
+  .bubble .body li { margin: 2px 0; }
+  .bubble .body code {
+    font: 12px var(--mono); background: rgba(10, 13, 20, .7);
+    border: 1px solid var(--line-soft); border-radius: 5px; padding: 1px 5px;
+  }
+  .bubble .body pre {
+    white-space: pre; overflow-x: auto; margin: 8px 0; padding: 10px 12px;
+    background: #080b12; border: 1px solid var(--line-soft); border-radius: 9px;
+  }
+  .bubble .body pre code { border: 0; background: none; padding: 0; }
+  /* A long reply is collapsed rather than dominating the column; the operator
+     opens it when they want it. */
+  .bubble.long .body { max-height: 260px; overflow: hidden; position: relative; }
+  .bubble.long.open .body { max-height: none; }
+  .bubble.long .body::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 52px;
+    background: linear-gradient(transparent, rgba(20, 26, 40, .95));
+  }
+  .bubble.long.open .body::after { display: none; }
+  .bubble .acts { display: flex; gap: 10px; margin-top: 8px; align-items: center; }
+  .bubble .acts button {
+    font: 500 10.5px var(--mono); color: var(--faint); background: none;
+    border: 0; padding: 2px 4px; cursor: pointer; border-radius: 5px;
+  }
+  .bubble .acts button:hover { color: var(--ink); background: rgba(255,255,255,.05); }
+  .bubble .acts button.on { color: var(--ok); }
+  .bubble .acts button.on.down { color: var(--crit); }
+
+  .bubble .status {
+    display: block; margin-top: 6px; font: 500 10px var(--mono);
+    letter-spacing: .05em; color: var(--faint);
+  }
+  .bubble .status.working { color: var(--accent); }
+  .bubble .status.answered { color: var(--ok); }
+  .bubble .status.blocked { color: var(--warn); }
+  .bubble .status.failed { color: var(--crit); }
+  .bubble .reason {
+    display: block; margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(248,113,113,.25);
+    font: 500 10.5px var(--mono); color: var(--crit); letter-spacing: .03em;
+  }
   .notice { align-self: center; text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 14px; border-radius: 999px; border: 1px dashed var(--line); max-width: 90%; }
   .notice.veto { color: var(--crit); border-color: rgba(248, 113, 113, .4); border-style: solid; }
   .typing { align-self: flex-start; display: inline-flex; gap: 5px; padding: 12px 16px; background: rgba(20, 26, 40, .85); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; }
@@ -201,11 +267,23 @@
   @keyframes tdot { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: 1; } }
 
   #composer { display: flex; gap: 9px; padding: 14px 18px; border-top: 1px solid var(--line-soft); background: rgba(10, 13, 20, .5); }
-  #composer input[type=text] {
-    flex: 1; background: #0a0e17; border: 1px solid var(--line); color: var(--ink);
-    padding: 11px 14px; border-radius: 10px; font: inherit; outline: none; transition: border-color .25s, box-shadow .25s;
+  #composer { flex-wrap: wrap; }
+  #composer textarea {
+    flex: 1 1 100%; min-width: 0; background: #0a0e17; border: 1px solid var(--line); color: var(--ink);
+    padding: 11px 14px; border-radius: 10px; font: inherit; outline: none; resize: none;
+    min-height: 44px; max-height: 180px; line-height: 1.5;
+    transition: border-color .25s, box-shadow .25s;
   }
-  #composer input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(92, 200, 255, .12); }
+  #composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(92, 200, 255, .12); }
+  #composer .row { display: flex; gap: 9px; width: 100%; align-items: center; }
+  #composer .row .spacer { flex: 1; }
+  #forcewrap { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+  #forcewrap input { accent-color: var(--crit); }
+  #forcereason {
+    flex: 1 1 100%; background: #0a0e17; border: 1px solid rgba(248,113,113,.4); color: var(--ink);
+    padding: 8px 12px; border-radius: 9px; font: 12px var(--sans); outline: none; display: none;
+  }
+  #forcereason.on { display: block; }
   #composer select, #composer button {
     background: #0a0e17; border: 1px solid var(--line); color: var(--ink);
     padding: 11px 13px; border-radius: 10px; font: inherit; cursor: pointer;
@@ -244,6 +322,7 @@
   .ev { padding: 6px 9px; border-left: 2px solid var(--line); margin: 2.5px 0; border-radius: 0 8px 8px 0; background: rgba(13, 17, 27, .7); white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5; }
   .ev .tag { font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-right: 8px; }
   .ev .t { float: right; color: var(--faint); font-size: 9.5px; }
+  .ev .msg { display: inline; }
   .ev.msg  { border-left-color: var(--msg); }   .ev.msg .tag { color: var(--msg); }
   .ev.gate { border-left-color: var(--accent); } .ev.gate .tag { color: var(--accent); }
   .ev.task { border-left-color: var(--ok); }    .ev.task .tag { color: var(--ok); }
@@ -344,11 +423,18 @@
       <h2>Conversation</h2>
       <div id="chat" aria-live="polite"></div>
       <form id="composer">
-        <input id="text" type="text" placeholder="Send guidance to the agent…" autocomplete="off" aria-label="guidance text" />
-        <select id="priority" aria-label="priority">
-          <option>Low</option><option selected>Normal</option><option>High</option><option>Critical</option>
-        </select>
-        <button type="submit" id="sendbtn">Send</button>
+        <textarea id="text" rows="1" placeholder="Send guidance to the agent…  (Enter to send, Shift+Enter for a new line)" aria-label="guidance text"></textarea>
+        <input id="forcereason" type="text" placeholder="Reason for the override — recorded in the audit trail" aria-label="force override reason" />
+        <div class="row">
+          <label id="forcewrap" title="Request an audited GateOverride::OperatorForced. Still policy-checked; never a kernel bypass.">
+            <input type="checkbox" id="force" /> force
+          </label>
+          <select id="priority" aria-label="priority">
+            <option>Low</option><option selected>Normal</option><option>High</option><option>Critical</option>
+          </select>
+          <span class="spacer"></span>
+          <button type="submit" id="sendbtn">Send</button>
+        </div>
       </form>
       <div class="hint">Guidance enters the sensory queue and is arbitrated by the Striatal Gate — it cannot preempt the kernel.</div>
     </div>
@@ -409,16 +495,36 @@
     for (const ev of $("feed").children)
       ev.style.display = (filter === "all" || ev.classList.contains(filter)) ? "" : "none";
   });
+  // A sleep cycle emits four SleepPhaseCompleted rows, every cycle, and the
+  // agent sleeps after every reply — so the feed filled with them and buried
+  // the events an operator is actually watching for. Consecutive phase rows
+  // fold into one that counts them.
+  let lastPhaseRow = null, lastPhaseCount = 0;
+  function addPhaseRow(body) {
+    const feed = $("feed");
+    if (lastPhaseRow && feed.firstChild === lastPhaseRow) {
+      lastPhaseCount++;
+      lastPhaseRow.querySelector(".msg").textContent =
+        "sleep cycle · " + lastPhaseCount + " phases · " + body;
+      return true;
+    }
+    lastPhaseCount = 1;
+    return false;
+  }
+
   function addFeed(cls, tag, body) {
     evTotal++;
     $("evcount").textContent = evTotal;
+    if (tag === "SleepPhaseCompleted" && addPhaseRow(body)) return;
     const el = document.createElement("div");
     el.className = "ev " + cls;
     const time = new Date().toLocaleTimeString([], { hour12: false });
-    el.innerHTML = '<span class="t">' + time + '</span><span class="tag">' + esc(tag) + "</span>" + esc(body);
+    el.innerHTML = '<span class="t">' + time + '</span><span class="tag">' + esc(tag) +
+      '</span><span class="msg">' + esc(body) + "</span>";
     if (filter !== "all" && !el.classList.contains(filter)) el.style.display = "none";
     const feed = $("feed");
     feed.prepend(el);
+    lastPhaseRow = tag === "SleepPhaseCompleted" ? el : null;
     while (feed.childNodes.length > 400) feed.removeChild(feed.lastChild);
   }
   // One reused element: esc() runs for every feed line and chat bubble, so
@@ -427,19 +533,133 @@
   function esc(s) { escEl.textContent = String(s); return escEl.innerHTML; }
 
   /* ── Conversation ───────────────────────────────────────────────── */
+  // Priority label, an optional "(Reason: …)" clause for operator-forced
+  // guidance, then the message body.
+  const GUIDANCE_RE = /^\[([A-Za-z]+(?::[A-Za-z]+)?)\]\s*(?:\(Reason:\s*([\s\S]*?)\)\s*)?([\s\S]*)$/;
   const chat = $("chat");
   const typing = new Map(); // task_id -> typing element
   function nearBottom() { return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80; }
   function scrollChat(force) { if (force || nearBottom()) chat.scrollTop = chat.scrollHeight; }
+  /* Markdown-lite (E33 S33.4). Models answer in markdown; rendering it as
+     literal asterisks and backticks made every reply harder to read than it
+     needed to be. Everything is HTML-escaped *first*, so the only tags that
+     can reach the DOM are the ones produced below — a model (or anything
+     upstream of it) cannot inject markup. */
+  function mdLite(src) {
+    let out = esc(String(src == null ? "" : src));
+
+    // Lift fenced blocks out before line processing so their contents are
+    // never mistaken for lists or run together.
+    const blocks = [];
+    out = out.replace(/```([\s\S]*?)```/g, function (_, code) {
+      blocks.push(code.replace(/^\r?\n/, ""));
+      return "\u0000B" + (blocks.length - 1) + "\u0000";
+    });
+    out = out.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+
+    const html = [];
+    let list = null;
+    function closeList() { if (list) { html.push("</" + list + ">"); list = null; } }
+    for (const line of out.split(/\r?\n/)) {
+      const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+      const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+      if (bullet) {
+        if (list !== "ul") { closeList(); html.push("<ul>"); list = "ul"; }
+        html.push("<li>" + bullet[1] + "</li>");
+      } else if (numbered) {
+        if (list !== "ol") { closeList(); html.push("<ol>"); list = "ol"; }
+        html.push("<li>" + numbered[1] + "</li>");
+      } else {
+        closeList();
+        html.push(line);
+      }
+    }
+    closeList();
+    out = html.join("\n")
+      // The bubble body is pre-wrap, so newlines beside block tags would show
+      // as blank lines.
+      .replace(/\n(<\/?(?:ul|ol|li|pre)\b)/g, "$1")
+      .replace(/(<\/(?:ul|ol|li|pre)>)\n/g, "$1");
+    return out.replace(/\u0000B(\d+)\u0000/g, function (_, i) {
+      return "<pre><code>" + blocks[Number(i)] + "</code></pre>";
+    });
+  }
+
+  /** Replies longer than this are collapsed behind a "show more" control. */
+  const LONG_REPLY_CHARS = 1200;
+
   function bubble(cls, meta, text, force) {
     const stick = nearBottom();
     const el = document.createElement("div");
     el.className = "bubble " + cls;
-    el.innerHTML = '<span class="meta">' + esc(meta) + "</span>" + esc(text);
+    // The agent answers in markdown; the operator's own text is shown exactly
+    // as they typed it.
+    const body = cls === "agent" ? mdLite(text) : esc(text);
+    el.innerHTML = '<span class="meta">' + esc(meta) + '</span><div class="body">' + body + "</div>";
     chat.appendChild(el);
     while (chat.childNodes.length > 250) chat.removeChild(chat.firstChild);
     scrollChat(force || stick);
     return el;
+  }
+
+  /* Actions on an agent reply: expand it, copy it, and rate it. The rating
+     reaches the E24 feedback store, which until now could only be written
+     from the CLI — long after whoever read the reply had gone. */
+  function decorateReply(el, text, taskKey) {
+    const acts = document.createElement("div");
+    acts.className = "acts";
+
+    if (String(text || "").length > LONG_REPLY_CHARS) {
+      el.classList.add("long");
+      const more = document.createElement("button");
+      more.type = "button";
+      more.textContent = "show more";
+      more.addEventListener("click", () => {
+        const open = el.classList.toggle("open");
+        more.textContent = open ? "show less" : "show more";
+      });
+      acts.appendChild(more);
+    }
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.textContent = "copy";
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        copy.textContent = "copied";
+        setTimeout(() => { copy.textContent = "copy"; }, 1500);
+      } catch (e) { copy.textContent = "copy failed"; }
+    });
+    acts.appendChild(copy);
+
+    if (taskKey && feedbackAvailable) {
+      for (const [label, rating] of [["\u2191 helpful", "up"], ["\u2193 not", "down"]]) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        if (rating === "down") b.classList.add("down");
+        b.addEventListener("click", () => rateReply(taskKey, rating, acts, b));
+        acts.appendChild(b);
+      }
+    }
+    el.appendChild(acts);
+  }
+
+  let feedbackAvailable = true;
+  async function rateReply(taskKey, rating, acts, btn) {
+    try {
+      const r = await fetch("/feedback", {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ task_id: String(taskKey), rating }),
+      });
+      if (r.status === 404) { feedbackAvailable = false; acts.querySelectorAll("button.rate").forEach(b => b.remove()); return; }
+      if (!r.ok) return;
+      for (const b of acts.querySelectorAll("button")) b.classList.remove("on");
+      btn.classList.add("on");
+    } catch (e) { /* offline: leave the control untouched */ }
   }
   function notice(text, veto) {
     const stick = nearBottom();
@@ -449,6 +669,122 @@
     chat.appendChild(el);
     scrollChat(stick);
   }
+  /* ── Per-message status (E33 S33.2) ─────────────────────────────────
+     Every accepted message owns a status line under its own bubble, so the
+     operator can see where *this* message got to — accepted, gated, being
+     worked, answered — rather than inferring it from the order replies
+     happen to arrive in. */
+  const statusEls = new Map(); // message_id -> status element
+  const STATUS_TEXT = {
+    accepted: "accepted · queued as a sensory packet",
+    blocked: "gate held this back",
+    working: "working…",
+    answered: "answered",
+    failed: "failed",
+  };
+  function setStatus(messageId, state, bubbleEl, detail) {
+    let el = statusEls.get(messageId);
+    if (!el) {
+      if (!bubbleEl) return;
+      el = document.createElement("span");
+      el.className = "status";
+      bubbleEl.appendChild(el);
+      statusEls.set(messageId, el);
+      // Bound the map alongside the bubble cap so a long session does not
+      // retain a handle per message forever.
+      if (statusEls.size > 250) {
+        const oldest = statusEls.keys().next().value;
+        statusEls.delete(oldest);
+      }
+    }
+    el.className = "status " + state;
+    el.textContent = (STATUS_TEXT[state] || state) + (detail ? " · " + detail : "");
+  }
+
+  /* ── Agent questions (E33 S33.3) ────────────────────────────────────
+     Two sources, one shape: a low-confidence completion, and a proposal
+     waiting for approval. They differ only in where the answer goes —
+     an approval decision has its own audited endpoint, so a quick reply
+     for one posts there rather than sending guidance. */
+  const answered = new Set();
+  const questionCards = new Map(); // question_id -> card element
+
+  /** Retire a question card, wherever the answer came from. */
+  function markAnswered(questionId, el) {
+    if (!questionId) return;
+    answered.add(questionId);
+    const card = el || questionCards.get(questionId);
+    if (!card) return;
+    for (const b of card.querySelectorAll("button")) b.disabled = true;
+    card.classList.add("answered");
+  }
+
+  function renderQuestion(ev) {
+    if (answered.has(ev.question_id)) return;
+    const stick = nearBottom();
+    const el = document.createElement("div");
+    el.className = "ask";
+    el.innerHTML =
+      '<span class="meta">anima is asking</span>' +
+      '<div class="q">' + esc(ev.text) + "</div>" +
+      (ev.reason ? '<div class="why">' + esc(ev.reason) + "</div>" : "");
+    const opts = document.createElement("div");
+    opts.className = "opts";
+    for (const option of (ev.options || [])) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = option;
+      b.addEventListener("click", () => answerQuestion(ev, option, el));
+      opts.appendChild(b);
+    }
+    if (opts.childNodes.length) el.appendChild(opts);
+    chat.appendChild(el);
+    questionCards.set(ev.question_id, el);
+    if (questionCards.size > 250) {
+      questionCards.delete(questionCards.keys().next().value);
+    }
+    scrollChat(stick);
+  }
+
+  async function answerQuestion(ev, option, el) {
+    for (const b of el.querySelectorAll("button")) b.disabled = true;
+    const approvalId = (ev.question_id || "").startsWith("approval:")
+      ? ev.question_id.slice("approval:".length)
+      : null;
+    try {
+      let r;
+      if (approvalId) {
+        // An approval has its own audited decision endpoint; routing it
+        // through guidance would record a chat line instead of a decision.
+        const act = option === "approve" ? "approve" : "reject";
+        r = await fetch("/approval-queue/" + encodeURIComponent(approvalId) + "/" + act, {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "answered from the console" }),
+        });
+      } else {
+        r = await fetch("/guidance", {
+          method: "POST",
+          headers: { ...authHeaders, "Content-Type": "application/json" },
+          body: JSON.stringify({ text: option, priority: "Normal", reply_to: ev.question_id }),
+        });
+      }
+      // `fetch` resolves for 4xx/5xx too. Without this check a rejected
+      // answer still disabled the buttons and told the operator it landed.
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        for (const b of el.querySelectorAll("button")) b.disabled = false;
+        notice("answer rejected · " + (body.error || "HTTP " + r.status), true);
+        return;
+      }
+      if (approvalId) refreshApprovalQueue();
+      markAnswered(ev.question_id, el);
+    } catch (err) {
+      for (const b of el.querySelectorAll("button")) b.disabled = false;
+      notice("could not answer · " + String(err), true);
+    }
+  }
+
   function showTyping(taskId) {
     if (typing.has(taskId)) return;
     const stick = nearBottom();
@@ -523,6 +859,10 @@
       case "Gate":
         gateCount++; $("gatecount").textContent = gateCount;
         setGate(ev);
+        if (ev.message_id) {
+          setStatus(ev.message_id, ev.invoke ? "accepted" : "blocked",
+            null, ev.invoke ? "gate cleared" : ev.reasoning);
+        }
         addFeed("gate", "gate",
           (ev.invoke ? "INVOKE" : "block") + " " + (ev.cost_class || "") +
           " · value " + (ev.value_score ?? 0).toFixed(2) + " vs " + (ev.threshold ?? 0).toFixed(2) +
@@ -532,19 +872,65 @@
       case "TaskStarted":
         addFeed("task", "task→", "#" + (ev.task_key || ev.task_id) + " " + ev.prompt);
         showTyping(ev.task_key || String(ev.task_id));
+        if (ev.message_id) setStatus(ev.message_id, "working");
         break;
       case "AgentMessage":
         clearTyping(ev.task_key || String(ev.task_id));
-        bubble("agent", "anima · " + ev.tokens + " tok", ev.text);
+        if (ev.message_id) setStatus(ev.message_id, "answered");
+        if (alreadyRendered("agent", ev.text)) {
+          addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (replayed)");
+          break;
+        }
+        decorateReply(
+          bubble("agent", "anima · " + ev.tokens + " tok", ev.text),
+          ev.text,
+          ev.task_key || String(ev.task_id)
+        );
         addFeed("msg", "agent", "#" + (ev.task_key || ev.task_id) + " (" + ev.tokens + " tok) " + ev.text);
+        break;
+      // E33 S33.2 — the operator's own message, typed and uncorrelated-free.
+      // Every ingress (this browser, the CLI, a chat channel) renders here.
+      case "Accepted": {
+        if (ev.reply_to) markAnswered(ev.reply_to, null);
+        if (alreadyRendered("op", ev.text)) break;
+        const tag = ev.forced ? "forced · critical" : String(ev.priority || "").toLowerCase();
+        const el = bubble("op", "operator · " + tag, ev.text);
+        el.dataset.msg = ev.message_id || "";
+        if (ev.force_reason) {
+          const reason = document.createElement("span");
+          reason.className = "reason";
+          reason.textContent = "forced override · " + ev.force_reason;
+          el.appendChild(reason);
+        }
+        if (ev.message_id) setStatus(ev.message_id, "accepted", el);
+        break;
+      }
+      case "AgentQuestion":
+        renderQuestion(ev);
+        addFeed("audit", "ask?", ev.text + " — " + (ev.reason || ""));
         break;
       case "Audit":
         if (ev.kind === "OperatorGuidance") {
-          // detail shape: "[Priority] text" — render as an operator bubble.
-          const m = /^\[(\w+)\]\s*([\s\S]*)$/.exec(ev.detail || "");
-          bubble("op", "operator · " + (m ? m[1].toLowerCase() : "guidance"), m ? m[2] : ev.detail);
+          // Two detail shapes are emitted by POST /guidance:
+          //   "[Normal] text"
+          //   "[FORCED:Critical] (Reason: why) text"
+          // The old `[\w+]` pattern matched neither the colon nor the reason
+          // clause, so a forced line rendered its raw prefix as message body.
+          const m = GUIDANCE_RE.exec(ev.detail || "");
+          if (m) {
+            const el = bubble("op", "operator · " + m[1].toLowerCase().replace(":", " · "), m[3]);
+            if (m[2]) {
+              const reason = document.createElement("span");
+              reason.className = "reason";
+              reason.textContent = "forced override · " + m[2];
+              el.appendChild(reason);
+            }
+          } else {
+            bubble("op", "operator · guidance", ev.detail);
+          }
         }
         if (ev.kind === "DefenceVeto") notice("defence veto · " + ev.detail, true);
+        if (ev.message_id) setStatus(ev.message_id, "failed", null, ev.detail);
         if (ev.kind === "TaskFailed" || ev.kind === "CortexFault") {
           // "task <id> failed: …" / "task <id>: …" — the matching typing
           // indicator will never see an AgentMessage; retire it and tell the
@@ -555,7 +941,12 @@
         }
         addFeed(["DefenceVeto", "AttentionDemandEscalated", "TaskFailed", "CortexFault"].includes(ev.kind) ? "veto" : "audit", ev.kind, ev.detail);
         break;
-      case "Heartbeat": $("uptime").textContent = fmtUptime(ev.uptime_secs); break;
+      case "Heartbeat":
+        $("uptime").textContent = fmtUptime(ev.uptime_secs);
+        // The snapshot is fully written before the server's first beat, so
+        // anything after this point is live and must never be suppressed.
+        if (reconciling) { reconciling = false; reconcile.clear(); }
+        break;
     }
   }
   function fmtUptime(s) {
@@ -710,6 +1101,49 @@
   setInterval(refreshSkills, 8000);
   setInterval(refreshAdapters, 8000);
 
+  /* ── Durable history (E33 S33.1) ────────────────────────────────────
+     The conversation is loaded from the agent's own session store — the very
+     turns it composes its prompts from — rather than from whatever happens to
+     remain in the event hub's replay ring.
+
+     That replay still arrives on connect, so the same recent exchange would
+     paint twice. `reconcile` holds one entry per turn already rendered from
+     history; a replayed conversation event matching one consumes it instead of
+     rendering. It is dropped on the first Heartbeat, which the server only
+     sends once the whole snapshot has been written — so live messages are
+     never mistaken for replay, even if someone sends the same text twice. */
+  const reconcile = new Map();
+  let reconciling = false;
+  function turnKey(role, text) { return role + "\u0000" + String(text == null ? "" : text); }
+  function alreadyRendered(role, text) {
+    if (!reconciling) return false;
+    const k = turnKey(role, text);
+    const n = reconcile.get(k) || 0;
+    if (n <= 0) return false;
+    reconcile.set(k, n - 1);
+    return true;
+  }
+
+  async function loadHistory() {
+    try {
+      const r = await fetch("/conversation?limit=100", { headers: authHeaders });
+      if (!r.ok) return; // 404 when not wired — fall back to the replay ring
+      const turns = await r.json();
+      if (!Array.isArray(turns) || !turns.length) return;
+      reconciling = true;
+      for (const t of turns) {
+        const isUser = t.role === "user";
+        if (!isUser && t.role !== "assistant") continue; // system/tool stay out of the transcript
+        const el = bubble(isUser ? "op" : "agent", isUser ? "operator" : "anima", t.content);
+        if (!isUser) decorateReply(el, t.content, null);
+        const k = turnKey(isUser ? "op" : "agent", t.content);
+        reconcile.set(k, (reconcile.get(k) || 0) + 1);
+      }
+      notice("— end of saved history —");
+      scrollChat(true);
+    } catch (e) { /* offline or not wired: the replay ring still paints */ }
+  }
+
   /* ── Transport ──────────────────────────────────────────────────── */
   const url = "/events" + (token ? "?token=" + encodeURIComponent(token) : "");
   function connect() {
@@ -728,7 +1162,9 @@
       } catch (e) { /* tolerate partial lines */ }
     };
   }
-  connect();
+  // History first, then the live stream: the reconciliation above depends on
+  // the saved turns being rendered before the replay reaches the handler.
+  loadHistory().finally(connect);
 
   /* ── "While you were away" digest ──────────────────────────────── */
   (function () {
@@ -777,23 +1213,75 @@
   })();
 
   /* ── Composer ───────────────────────────────────────────────────── */
+  const textEl = $("text");
+
+  // Grow with the content up to the CSS max, so a multi-paragraph message is
+  // visible while being written.
+  function autosize() {
+    textEl.style.height = "auto";
+    textEl.style.height = Math.min(textEl.scrollHeight, 180) + "px";
+  }
+  textEl.addEventListener("input", () => {
+    autosize();
+    // Keep an unsent draft across an accidental reload. Per-viewer only, and
+    // never required: a browser that refuses storage just loses the draft.
+    try { localStorage.setItem("anima.draft", textEl.value); } catch (e) {}
+  });
+  try {
+    const draft = localStorage.getItem("anima.draft");
+    if (draft) { textEl.value = draft; autosize(); }
+  } catch (e) {}
+
+  // Enter sends, Shift+Enter adds a line — the convention every chat client
+  // has trained people on.
+  textEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $("composer").requestSubmit();
+    }
+  });
+
+  // The force toggle reveals its reason field: an override is only accepted
+  // with a reason, and that reason goes into the audit trail.
+  $("force").addEventListener("change", () => {
+    const on = $("force").checked;
+    $("forcereason").classList.toggle("on", on);
+    if (on) $("forcereason").focus();
+  });
+
   $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const text = $("text").value.trim();
+    const text = textEl.value.trim();
     if (!text) return;
+    const forced = $("force").checked;
+    const reason = $("forcereason").value.trim();
+    if (forced && !reason) {
+      notice("an override needs a reason — it is recorded in the audit trail", true);
+      $("forcereason").focus();
+      return;
+    }
     const btn = $("sendbtn");
     btn.disabled = true;
     const headers = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = "Bearer " + token;
+    const payload = { text, priority: $("priority").value };
+    if (forced) payload.force = reason;
     try {
       const r = await fetch("/guidance", {
         method: "POST", headers,
-        body: JSON.stringify({ text, priority: $("priority").value }),
+        body: JSON.stringify(payload),
       });
       if (r.ok) {
-        $("text").value = "";
-        // The bubble is rendered from the echoed OperatorGuidance audit event,
-        // so every ingress channel (web, CLI, comms) appears identically.
+        textEl.value = "";
+        autosize();
+        try { localStorage.removeItem("anima.draft"); } catch (e) {}
+        // A forced send is deliberate each time, so the toggle does not stay on.
+        $("force").checked = false;
+        $("forcereason").value = "";
+        $("forcereason").classList.remove("on");
+        // The bubble is rendered from the echoed `Accepted` event, so every
+        // ingress channel (web, CLI, comms) appears identically — and carries
+        // the correlation id this message's status will be keyed on.
       } else {
         const j = await r.json().catch(() => ({}));
         notice("guidance rejected · " + (j.error || "HTTP " + r.status), true);
@@ -802,10 +1290,10 @@
       notice("send failed · " + String(err), true);
     } finally {
       btn.disabled = false;
-      $("text").focus();
+      textEl.focus();
     }
   });
-  $("text").focus();
+  textEl.focus();
 })();
 </script>
 </body>

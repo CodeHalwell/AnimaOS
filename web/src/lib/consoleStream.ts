@@ -27,14 +27,20 @@
  *                       aggregate_stress                              (all f32)
  *   type "State"        lifecycle: string ("Awake"|"Sleep"),
  *                       sleep_phase: string|null, agenda_depth: u32
- *   type "Gate"         invoke: bool, cost_class: string|null,
+ *   type "Gate"         message_id: string|null, invoke: bool, cost_class: string|null,
  *                       value_score: f32, threshold: f32,
  *                       override_active: bool, reasoning: string
  *   type "Audit"        kind: string (AuditEntry variant name),
- *                       detail: string
- *   type "TaskStarted"  task_id: u64, prompt: string
- *   type "AgentMessage" task_id: u64, tokens: u32, text: string
+ *                       detail: string, message_id: string|null
+ *   type "TaskStarted"  task_id: u64, message_id: string|null, prompt: string
+ *   type "AgentMessage" task_id: u64, message_id: string|null, tokens: u32,
+ *                       text: string
  *   type "Heartbeat"    uptime_secs: u64
+ *   type "Accepted"     message_id: string, priority: string, forced: bool,
+ *                       force_reason: string|null, reply_to: string|null,
+ *                       text: string
+ *   type "AgentQuestion" task_id: u64, question_id: string, text: string,
+ *                       options: string[], reason: string
  *
  * Notes mirrored from `crates/console/src/dashboard.html`:
  *   • `task_id` is a u64; values above 2^53 lose precision through JSON.parse,
@@ -71,6 +77,8 @@ export interface StateEvent {
 
 export interface GateEvent {
   type: 'Gate';
+  /** Operator message this decision concerns, when it concerns one (E33 S33.2). */
+  message_id: string | null;
   invoke: boolean;
   cost_class: string | null;
   value_score: number;
@@ -83,11 +91,15 @@ export interface AuditEvent {
   type: 'Audit';
   kind: string;
   detail: string;
+  /** Operator message this line concerns, when it concerns one (E33 S33.2). */
+  message_id: string | null;
 }
 
 export interface TaskStartedEvent {
   type: 'TaskStarted';
   task_id: number;
+  /** Operator message that produced this task, when it was one (E33 S33.2). */
+  message_id: string | null;
   prompt: string;
   /** Exact u64 digits recovered from the raw frame (precision-safe key). */
   task_key?: string;
@@ -96,6 +108,8 @@ export interface TaskStartedEvent {
 export interface AgentMessageEvent {
   type: 'AgentMessage';
   task_id: number;
+  /** Operator message this answers, when it answers one (E33 S33.2). */
+  message_id: string | null;
   tokens: number;
   text: string;
   /** Exact u64 digits recovered from the raw frame (precision-safe key). */
@@ -107,6 +121,44 @@ export interface HeartbeatEvent {
   uptime_secs: number;
 }
 
+/**
+ * A guidance line accepted into the sensory queue (E33 S33.2).
+ *
+ * The typed successor to the free-text `Audit{kind:"OperatorGuidance"}` echo:
+ * it carries the correlation id and the untruncated text, so a client renders
+ * the operator's own message without reparsing a "[Priority] …" string and can
+ * then follow that message through gate, task and reply by `message_id`.
+ */
+export interface AcceptedEvent {
+  type: 'Accepted';
+  message_id: string;
+  priority: 'Low' | 'Normal' | 'High' | 'Critical';
+  forced: boolean;
+  force_reason: string | null;
+  /** The `AgentQuestion.question_id` this line answers, when it answers one. */
+  reply_to: string | null;
+  text: string;
+}
+
+/**
+ * The agent asking the operator something (E33 S33.3).
+ *
+ * Efferent like every other event here: a request for a sense, not a blocking
+ * prompt. The agent carries on whether or not anyone answers.
+ *
+ * `question_id` prefixed `approval:` names a pending proposal, whose answer
+ * belongs to `POST /approval-queue/{id}/approve|reject` rather than
+ * `POST /guidance` — the decision is audited as a decision, not as chat.
+ */
+export interface AgentQuestionEvent {
+  type: 'AgentQuestion';
+  task_id: number;
+  question_id: string;
+  text: string;
+  options: string[];
+  reason: string;
+}
+
 export type OperatorEvent =
   | VitalsEvent
   | StateEvent
@@ -114,7 +166,9 @@ export type OperatorEvent =
   | AuditEvent
   | TaskStartedEvent
   | AgentMessageEvent
-  | HeartbeatEvent;
+  | HeartbeatEvent
+  | AcceptedEvent
+  | AgentQuestionEvent;
 
 // ── Derived UI shapes (what the React islands consume) ───────────────────────
 
@@ -246,6 +300,30 @@ export function reduceEvent(prev: ConsoleSnapshot, ev: OperatorEvent): ConsoleSn
         cls: 'msg',
         tag: 'agent',
         body: `#${ev.task_key ?? ev.task_id} (${ev.tokens} tok) ${ev.text}`,
+      });
+    // E33 S33.2 — the operator's own message. Its former representation
+    // (`Audit { kind: "OperatorGuidance" }`) was rendered here, so without a
+    // case guidance would silently vanish from the feed against a live server.
+    case 'Accepted':
+      return pushFeed(prev, {
+        cls: 'msg',
+        tag: 'you',
+        body:
+          `[${ev.forced ? `FORCED:${ev.priority}` : ev.priority}] ` +
+          `[${ev.message_id}]` +
+          (ev.reply_to ? ` ↩${ev.reply_to}` : '') +
+          (ev.force_reason ? ` (reason: ${ev.force_reason})` : '') +
+          ` ${ev.text}`,
+      });
+    // E33 S33.3 — the agent asking the operator something.
+    case 'AgentQuestion':
+      return pushFeed(prev, {
+        cls: 'audit',
+        tag: 'ask?',
+        body:
+          `[${ev.question_id}] ${ev.text}` +
+          (ev.options.length ? ` [${ev.options.join(' / ')}]` : '') +
+          (ev.reason ? ` — ${ev.reason}` : ''),
       });
     case 'Audit':
       return pushFeed(prev, {
