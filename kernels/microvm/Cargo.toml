@@ -71,7 +71,7 @@ senses = { path = "../../crates/senses", default-features = false }
 #                     so the "ANIMA_PANIC" string appears in the CI serial log.
 #   global_allocator — we supply corpus::BumpAllocator as our own
 #                      #[global_allocator] to demonstrate S4.1.2.
-uefi = { version = "0.37", features = ["logger"] }
+uefi = { version = "0.38", features = ["logger"] }
 
 log = { version = "0.4", default-features = false }
 
