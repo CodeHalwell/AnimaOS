@@ -166,6 +166,13 @@ pub struct ConsoleServer {
     /// Optional adapter library — when set, `GET /adapters` is active (E8
     /// adapter-library dashboard surface).
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
+    /// Operator identity, when wired: `(registry, user_id)` (E33 S33.5).
+    ///
+    /// Answers "who does this console think I am": the profile conversations
+    /// and feedback are recorded against, and the trust tier the E17 registry
+    /// holds for them.  The bearer token still decides *whether* a request is
+    /// served; this says who it is attributed to.
+    identity: Option<(Arc<Mutex<users::UserRegistry>>, String)>,
     /// Shared feedback store, when wired — backs `POST /feedback` (E33 S33.4).
     ///
     /// The E24 store has existed since the operational wave with only a CLI in
@@ -280,6 +287,7 @@ impl ConsoleServer {
             approval_queue: None,
             skill_registry: None,
             adapter_library: None,
+            identity: None,
             feedback: None,
             conversation: None,
             message_seq: std::sync::atomic::AtomicU64::new(
@@ -324,6 +332,16 @@ impl ConsoleServer {
 
     /// Wire in a shared adapter library. When set, `GET /adapters` returns all
     /// registered adapters as JSON (E8 adapter-library dashboard surface).
+    /// Wire in the operator identity so `GET /whoami` is active (E33 S33.5).
+    pub fn with_identity(
+        mut self,
+        registry: Arc<Mutex<users::UserRegistry>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.identity = Some((registry, user_id.into()));
+        self
+    }
+
     /// Wire in the shared feedback store so `POST /feedback` is active
     /// (E33 S33.4).  `user_id` is the operator the ratings are attributed to.
     pub fn with_feedback(
@@ -545,6 +563,8 @@ impl ConsoleServer {
             ("POST", "/guidance") => self.serve_guidance(&mut reader, content_length, &mut out),
             // E33 S33.1 — durable conversation history, so a reloaded page
             // paints the real transcript instead of the replay ring's tail.
+            // E33 S33.5 — who this console is talking as.
+            ("GET", "/whoami") => self.serve_whoami(&mut out),
             ("GET", "/conversation") => self.serve_conversation(&query, &mut out),
             // E33 S33.4 — rate a reply from the conversation view.
             ("POST", "/feedback") => self.serve_feedback(&mut reader, content_length, &mut out),
@@ -903,6 +923,51 @@ impl ConsoleServer {
                 br#"{"ok":false,"error":"invalid input"}"#,
             ),
         }
+    }
+
+    /// Serve the operator's identity as JSON (E33 S33.5).
+    ///
+    /// `authenticated` reports whether a bearer token gates this server at
+    /// all — a request that reached this handler has already satisfied it.  It
+    /// is deliberately not a claim that the *person* was authenticated: a
+    /// shared token identifies a console, not a human, which is why the trust
+    /// tier comes from the registry rather than from the request.
+    fn serve_whoami(&self, out: &mut TcpStream) -> std::io::Result<()> {
+        let Some((registry, user_id)) = &self.identity else {
+            return write_json(
+                out,
+                404,
+                "Not Found",
+                br#"{"error":"identity not available"}"#,
+            );
+        };
+        let (display_name, trust_tier, known) = match registry.lock() {
+            Ok(reg) => match reg.get(user_id) {
+                Some(record) => (
+                    record.profile.display_name.clone(),
+                    record.profile.trust_tier.as_str().to_string(),
+                    true,
+                ),
+                None => (user_id.clone(), "unknown".to_string(), false),
+            },
+            Err(_) => {
+                return write_json(
+                    out,
+                    500,
+                    "Internal Server Error",
+                    br#"{"error":"user registry lock poisoned"}"#,
+                );
+            }
+        };
+        let body = format!(
+            r#"{{"user_id":{},"display_name":{},"trust_tier":{},"registered":{},"token_required":{}}}"#,
+            json_string(user_id),
+            json_string(&display_name),
+            json_string(&trust_tier),
+            known,
+            self.config.token.is_some(),
+        );
+        write_json(out, 200, "OK", body.as_bytes())
     }
 
     /// Record operator feedback on one reply (E33 S33.4).
@@ -1537,6 +1602,88 @@ mod tests {
             ),
             other => panic!("expected an Accepted echo, got {other:?}"),
         }
+    }
+
+    // ── E33 S33.5 — operator identity ─────────────────────────────────────
+
+    fn start_with_identity(register: bool, token: Option<&str>) -> std::net::SocketAddr {
+        let mut registry = users::UserRegistry::in_memory();
+        if register {
+            let mut profile =
+                users::UserProfile::new("user:operator", "Dana", "console", 1_000_000);
+            profile.trust_tier = users::TrustTier::Trusted;
+            registry.register(profile).unwrap();
+        }
+        let hub = Arc::new(ConsoleHub::new());
+        let bridge = SensoryBridge::new(HumanGuidance::new("test"));
+        ConsoleServer::new(
+            hub,
+            bridge,
+            ServerConfig {
+                addr: "127.0.0.1:0".into(),
+                token: token.map(str::to_string),
+            },
+        )
+        .with_identity(Arc::new(Mutex::new(registry)), "user:operator")
+        .spawn()
+        .expect("spawn")
+        .0
+    }
+
+    fn get_whoami(addr: std::net::SocketAddr, auth: &str) -> String {
+        http_request(
+            addr,
+            &format!("GET /whoami HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"),
+        )
+    }
+
+    #[test]
+    fn whoami_returns_404_when_not_wired() {
+        let (addr, _hub, _bridge) = start();
+        assert!(get_whoami(addr, "").contains("404 Not Found"));
+    }
+
+    #[test]
+    fn whoami_names_the_registered_operator_and_their_trust_tier() {
+        let addr = start_with_identity(true, None);
+        let resp = get_whoami(addr, "");
+        assert!(resp.contains("200 OK"), "resp: {resp}");
+        assert!(resp.contains(r#""display_name":"Dana""#), "resp: {resp}");
+        assert!(resp.contains(r#""trust_tier":"trusted""#), "resp: {resp}");
+        assert!(resp.contains(r#""registered":true"#), "resp: {resp}");
+        // Loopback with no token configured.
+        assert!(resp.contains(r#""token_required":false"#), "resp: {resp}");
+    }
+
+    #[test]
+    fn whoami_reports_an_unregistered_operator_without_inventing_trust() {
+        let addr = start_with_identity(false, None);
+        let resp = get_whoami(addr, "");
+        assert!(resp.contains(r#""registered":false"#), "resp: {resp}");
+        assert!(
+            resp.contains(r#""trust_tier":"unknown""#),
+            "an unregistered operator must not be granted a tier: {resp}"
+        );
+    }
+
+    #[test]
+    fn whoami_is_behind_the_bearer_token_like_every_other_route() {
+        let addr = start_with_identity(true, Some("sekret"));
+        assert!(get_whoami(addr, "").contains("401 Unauthorized"));
+        let ok = get_whoami(addr, "Authorization: Bearer sekret\r\n");
+        assert!(ok.contains("200 OK"), "resp: {ok}");
+        assert!(ok.contains(r#""token_required":true"#), "resp: {ok}");
+    }
+
+    #[test]
+    fn whoami_body_is_valid_json() {
+        let addr = start_with_identity(true, None);
+        let resp = get_whoami(addr, "");
+        let payload = resp.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(payload).is_ok(),
+            "not valid JSON: {payload}"
+        );
     }
 
     // ── E33 S33.4 — feedback ──────────────────────────────────────────────

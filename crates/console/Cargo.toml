@@ -19,6 +19,8 @@ lifecycle = { path = "../lifecycle" }
 sessions = { path = "../sessions" }
 # E33 S33.4 — response feedback collected from the conversation view.
 feedback = { path = "../feedback" }
+# E33 S33.5 — operator identity behind `GET /whoami`.
+users = { path = "../users" }
 metrics = { path = "../metrics" }
 skills = { path = "../skills" }
 anima-finetune = { path = "../finetune" }

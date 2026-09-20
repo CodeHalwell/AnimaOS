@@ -5154,6 +5154,16 @@ pub(crate) fn cmd_serve() {
     // dispatch from the durable E22 session store and records every reply back
     // into it, so a follow-up ("and the second one?") means something and the
     // history survives a restart.
+    // E33 S33.6 — ordinary operator guidance is arbitrated by the Striatal
+    // Gate, as the operator interface has always documented.  Opt out with
+    // ANIMA_GATE_OPERATOR=0 to restore unconditional admission.
+    if std::env::var("ANIMA_GATE_OPERATOR").as_deref() == Ok("0") {
+        manager.gate_operator_input = false;
+        println!("  gate      : operator guidance NOT gated (ANIMA_GATE_OPERATOR=0)");
+    } else {
+        println!("  gate      : every operator message is arbitrated by the Striatal Gate");
+    }
+
     // Opt out with ANIMA_CONVERSATION=0 for a bare, stateless loop.
     let conversation_store = if std::env::var("ANIMA_CONVERSATION").as_deref() == Ok("0") {
         println!("  memory    : conversation disabled (ANIMA_CONVERSATION=0)");
@@ -5222,6 +5232,33 @@ pub(crate) fn cmd_serve() {
         Arc::new(std::sync::Mutex::new(feedback_store)),
         operator_user_id(),
     );
+
+    // E33 S33.5 — the operator has an identity in the E17 registry, so the
+    // console can say who it is talking as and what trust tier that carries.
+    // A first run registers the profile; later runs just refresh last-seen.
+    let user_id = operator_user_id();
+    let registry_path = users::UserRegistry::default_path(&agent_id);
+    let mut registry = users::UserRegistry::open(&registry_path).unwrap_or_else(|e| {
+        eprintln!(
+            "anima-hosted: cannot open the user registry at {} ({e}); \
+             operator identity will not persist this run",
+            registry_path.display()
+        );
+        users::UserRegistry::in_memory()
+    });
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    if registry.get(&user_id).is_none() {
+        let profile = users::UserProfile::new(&user_id, "operator", "console", now_ns);
+        // Trust is granted deliberately (`anima users trust`), never assumed
+        // from the fact that someone reached the console.
+        if let Err(e) = registry.register(profile) {
+            eprintln!("anima-hosted: cannot register the operator profile ({e})");
+        }
+    }
+    console = console.with_identity(Arc::new(std::sync::Mutex::new(registry)), user_id);
     let addr = console.start().unwrap_or_else(|e| {
         // Surface the real reason — e.g. the exposure-policy refusal to bind a
         // non-loopback address without ANIMA_CONSOLE_TOKEN — not a generic guess.
@@ -5254,6 +5291,7 @@ pub(crate) fn cmd_serve() {
         "  panels    : approval-queue, skills, adapters (GET /approval-queue, /skills, /adapters)"
     );
     println!("  history   : GET /conversation (durable turns, survives restarts)");
+    println!("  identity  : GET /whoami · feedback: POST /feedback");
     if backend.id() == "mock" {
         // The mock backend echoes its prompt word for word, so with
         // conversation memory on it replies with the composed context rather

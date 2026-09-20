@@ -65,6 +65,7 @@ pub struct Console {
     adapter_library: Option<Arc<Mutex<anima_finetune::AdapterLibrary>>>,
     conversation: Option<(Arc<Mutex<sessions::SessionStore>>, String)>,
     feedback: Option<(Arc<Mutex<feedback::FeedbackStore>>, String)>,
+    identity: Option<(Arc<Mutex<users::UserRegistry>>, String)>,
 }
 
 impl Console {
@@ -84,7 +85,19 @@ impl Console {
             adapter_library: None,
             conversation: None,
             feedback: None,
+            identity: None,
         }
+    }
+
+    /// Wire in the operator identity so `GET /whoami` names who the console is
+    /// talking as (E33 S33.5).
+    pub fn with_identity(
+        mut self,
+        registry: Arc<Mutex<users::UserRegistry>>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.identity = Some((registry, user_id.into()));
+        self
     }
 
     /// Wire in the shared feedback store so `POST /feedback` accepts ratings on
@@ -170,6 +183,9 @@ impl Console {
         }
         if let Some((store, user_id)) = &self.feedback {
             server = server.with_feedback(Arc::clone(store), user_id.clone());
+        }
+        if let Some((registry, user_id)) = &self.identity {
+            server = server.with_identity(Arc::clone(registry), user_id.clone());
         }
         let (addr, _handle) = server.spawn()?;
         Ok(addr)

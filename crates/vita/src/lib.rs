@@ -398,6 +398,24 @@ pub struct LifecycleManager {
     /// loop is called multiple times on the same `LifecycleManager`.
     /// Starts at `2^63` to avoid collisions with caller-supplied task IDs.
     next_sensory_task_id: u64,
+    /// Most recent interoceptive reading, for gate decisions taken at sensory
+    /// intake (E33 S33.6).
+    ///
+    /// The snapshot is sampled once a second in step 4 of the loop, while
+    /// intake runs every iteration — so a gate evaluated here uses a reading at
+    /// most a second old.  Neutral until the first sample, which is the same
+    /// assumption the operator-force path has always made.
+    last_signals: HomeostaticSignals,
+    /// Whether ordinary (un-forced) operator guidance is arbitrated by the
+    /// Striatal Gate (E33 S33.6).
+    ///
+    /// `true` matches what `docs/11-operator-interface.md` has always claimed
+    /// and what the dashboard tells the operator: guidance "enters the
+    /// prioritisation queue and is weighted against the agent's current state
+    /// by the Striatal Gate".  Set `false` to restore the older behaviour in
+    /// which only forced packets were evaluated and everything else was
+    /// admitted unconditionally.
+    pub gate_operator_input: bool,
     /// Optional iteration limit to allow bounded runs.
     pub max_iterations: Option<u32>,
     iterations: u32,
@@ -484,6 +502,8 @@ impl LifecycleManager {
             audit,
             task_cancel: Arc::new(Mutex::new(CancellationToken::new())),
             next_sensory_task_id: 1u64 << 63,
+            last_signals: HomeostaticSignals::neutral(),
+            gate_operator_input: true,
             max_iterations,
             iterations: 0,
             last_pressure_level: memory::MemoryPressureEvent::Normal,
@@ -1154,16 +1174,36 @@ pub async fn somatic_execution_loop(
                 });
             }
 
-            if let Some(reason) = pkt.gate_override_reason.as_deref() {
+            // E33 S33.6: every operator packet is arbitrated, not just the
+            // forced ones.  Before this, only `force` reached the gate and
+            // everything else was admitted unconditionally — so the console's
+            // promise that guidance "is arbitrated by the Striatal Gate" was
+            // true of one path in four.  An un-forced packet now carries no
+            // override, which means the gate can decline it: under real
+            // thermal, memory or budget stress the agent defers ordinary
+            // chatter while still taking a Critical message.
+            let gate_this = pkt.gate_override_reason.is_some() || lifecycle.gate_operator_input;
+            if gate_this {
                 let event = EventFeatures {
-                    urgency: 1.0,
+                    // Urgency is the operator's own priority tag; novelty has
+                    // no signal for free text, so it sits at the midpoint —
+                    // the same assumption the forced path has always made.
+                    urgency: match pkt.priority {
+                        senses::SensoryPriority::Low => 0.25,
+                        senses::SensoryPriority::Normal => 0.50,
+                        senses::SensoryPriority::High => 0.75,
+                        senses::SensoryPriority::Critical => 1.0,
+                    },
                     novelty: 0.5,
                     semantic_class: SemanticClass::OperatorCommand,
                     user_facing: true,
                 };
-                let signals = HomeostaticSignals::neutral();
-                let override_hint = GateOverride::OperatorForced {
-                    reason: reason.to_owned(),
+                let signals = lifecycle.last_signals.clone();
+                let override_hint = match pkt.gate_override_reason.as_deref() {
+                    Some(reason) => GateOverride::OperatorForced {
+                        reason: reason.to_owned(),
+                    },
+                    None => GateOverride::None,
                 };
                 let event_id = format!("sensory-{task_id}");
 
@@ -1280,6 +1320,10 @@ pub async fn somatic_execution_loop(
                     now_ns,
                     &NullPublisher,
                 );
+                // E33 S33.6: keep the reading for the next iteration's intake
+                // gate, so it weighs guidance against the agent's real state
+                // rather than an assumed-idle one.
+                lifecycle.last_signals = HomeostaticSignals::from_interoceptive(&signals);
                 lifecycle.audit.push(AuditEntry::InteroceptiveSnapshot {
                     agent_id: lifecycle.agent_id.clone(),
                     tick_ns: now_ns,
@@ -2240,10 +2284,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_packet_does_not_record_gate_decision_in_somatic_loop() {
-        // Non-forced packets must NOT produce a GateDecision entry; the gate
-        // is only consulted when an explicit operator-force override is present.
-        let mut m = manager("agent-normal-no-gate", Some(2));
+    fn every_operator_packet_is_arbitrated_by_the_gate() {
+        // E33 S33.6: `docs/11-operator-interface.md` and the console both tell
+        // the operator that guidance "is arbitrated by the Striatal Gate".
+        // Until this story only forced packets were, and everything else was
+        // admitted unconditionally.
+        let mut m = manager("agent-gated", Some(2));
         m.senses
             .packetize_text_checked("routine query", SensoryPriority::Normal)
             .expect("valid text");
@@ -2251,14 +2297,95 @@ mod tests {
         let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
         block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
 
-        let has_gate_entry = m
+        let decision = m
             .audit
             .entries()
             .iter()
-            .any(|e| matches!(e, AuditEntry::GateDecision { .. }));
+            .find_map(|e| match e {
+                AuditEntry::GateDecision {
+                    invoke,
+                    override_active,
+                    event_id,
+                    ..
+                } => Some((*invoke, *override_active, event_id.clone())),
+                _ => None,
+            })
+            .expect("a normal packet must produce a gate decision");
+        assert!(decision.0, "an idle agent should admit ordinary guidance");
+        assert!(!decision.1, "un-forced guidance must not claim an override");
+        assert!(decision.2.starts_with("sensory-"));
+        // Admitted, so the task actually ran.
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+    }
+
+    #[test]
+    fn gating_can_be_turned_off_to_restore_unconditional_admission() {
+        let mut m = manager("agent-ungated", Some(2));
+        m.gate_operator_input = false;
+        m.senses
+            .packetize_text_checked("routine query", SensoryPriority::Normal)
+            .expect("valid text");
+
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        block_on(somatic_execution_loop(&mut m, &monitor)).unwrap();
+
         assert!(
-            !has_gate_entry,
-            "a normal packet must not produce a GateDecision audit entry"
+            !m.audit
+                .entries()
+                .iter()
+                .any(|e| matches!(e, AuditEntry::GateDecision { .. })),
+            "gating was disabled but a decision was still recorded"
+        );
+        assert_eq!(m.scheduler.dispatched_tasks.len(), 1);
+    }
+
+    #[test]
+    fn a_stressed_agent_defers_low_priority_guidance_but_still_takes_critical() {
+        // The point of gating: under real thermal, memory and budget pressure
+        // the agent declines ordinary chatter while an emergency still lands.
+        let monitor = HomeostaticMonitor::new(1.0, 0.5, 16);
+        // Hot, full, out of budget and nobody watching: the threshold climbs
+        // to its ceiling.
+        let under_pressure = HomeostaticSignals {
+            thermal_load: 1.0,
+            compute_pressure: 1.0,
+            memory_pressure: 1.0,
+            power_budget: 0.0,
+            financial_budget: 0.0,
+            attention_demand: 0.0,
+        };
+
+        let mut stressed = manager("agent-stressed", Some(2));
+        stressed.last_signals = under_pressure.clone();
+        stressed
+            .senses
+            .packetize_text_checked("something routine", SensoryPriority::Low)
+            .expect("valid text");
+        block_on(somatic_execution_loop(&mut stressed, &monitor)).unwrap();
+
+        let blocked = stressed
+            .audit
+            .entries()
+            .iter()
+            .any(|e| matches!(e, AuditEntry::GateDecision { invoke: false, .. }));
+        assert!(blocked, "a stressed agent admitted low-priority guidance");
+        assert_eq!(
+            stressed.scheduler.dispatched_tasks.len(),
+            0,
+            "a blocked packet must not become a task"
+        );
+
+        let mut urgent = manager("agent-stressed-critical", Some(2));
+        urgent.last_signals = under_pressure;
+        urgent
+            .senses
+            .packetize_text_checked("the building is on fire", SensoryPriority::Critical)
+            .expect("valid text");
+        block_on(somatic_execution_loop(&mut urgent, &monitor)).unwrap();
+        assert_eq!(
+            urgent.scheduler.dispatched_tasks.len(),
+            1,
+            "a critical message must still reach a stressed agent"
         );
     }
 
